@@ -43,7 +43,7 @@ Build a local-development MVP VSCode plugin that renders the eggplant pattern sc
 <!-- Map each task to its target Acceptance Criterion -->
 | Task | Target AC | Status | Notes |
 |------|-----------|--------|-------|
-| Stabilize extension-host validation (`npm run test:extension-host`) | 5 | todo | Currently terminates with `SIGABRT` even though the in-VSCode mocha suite reports `7 passing` in logs. |
+| Stabilize extension-host validation (`npm run test:extension-host`) | 5 | todo | Still terminates with `SIGABRT` in this environment (Round 1 runner changes did not resolve). |
 
 ### Completed and Verified
 <!-- Only move tasks here after Codex verification -->
@@ -66,4 +66,5 @@ Build a local-development MVP VSCode plugin that renders the eggplant pattern sc
 <!-- Issues discovered during implementation -->
 | Issue | Discovered Round | Blocking AC | Resolution Path |
 |-------|-----------------|-------------|-----------------|
-| `cd eggplant-pattern-vscode && npm run test:extension-host` terminates with `SIGABRT` | 0 | 5 | Remove or gate Graphviz smoke test and/or stabilize the VSCode test runner so the command exits `0`, then re-verify and update evidence |
+| `cd eggplant-pattern-vscode && npm run test:extension-host` terminates with `SIGABRT` | 0 | 5 | Preserve failing temp profiles for logs; gate `test:extension-host` to skip with a clear message when running under the Codex seatbelt sandbox, and collect real extension-host evidence on a normal developer machine. |
+| Codex seatbelt sandbox appears to block macOS app launches (even `open /System/Applications/Calculator.app` fails with `kLSNoExecutableErr`) | 1 | 5 | Treat this as an environment constraint: document it and/or gate `test:extension-host` so it remains meaningful on developer machines while not hard-failing in sandboxed runs. |
