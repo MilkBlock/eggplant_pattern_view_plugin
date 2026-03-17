@@ -7,6 +7,8 @@ import { downloadAndUnzipVSCode, runTests, TestRunFailedError } from "@vscode/te
 const GRAPHVIZ_EXTENSION_ID = "tintinweb.graphviz-interactive-preview";
 const VSCODE_TEST_VERSION = "1.111.0";
 const MAX_RUN_ATTEMPTS = 3;
+const RUN_GRAPHVIZ_SMOKE_TEST = process.env.EGGPLANT_RUN_GRAPHVIZ_SMOKE_TEST === "1";
+const KEEP_TEMP_PROFILE_ON_FAILURE = process.env.EGGPLANT_VSCODE_TEST_KEEP_TMP === "1";
 
 async function main(): Promise<void> {
   try {
@@ -40,22 +42,29 @@ async function runExtensionHostTests(options: {
     const baseTempDir = fs.mkdtempSync(path.join(os.tmpdir(), "eggplant-vscode-test-"));
     const userDataDir = path.join(baseTempDir, "user-data");
     const extensionsDir = path.join(baseTempDir, "extensions");
+    let succeeded = false;
 
     try {
       fs.mkdirSync(userDataDir, { recursive: true });
       fs.mkdirSync(extensionsDir, { recursive: true });
-      ensureGraphvizExtensionAvailable(userDataDir, extensionsDir);
+      if (RUN_GRAPHVIZ_SMOKE_TEST) {
+        ensureGraphvizExtensionAvailable(userDataDir, extensionsDir);
+      }
 
       await runTests({
         vscodeExecutablePath: options.vscodeExecutablePath,
         extensionDevelopmentPath: options.extensionDevelopmentPath,
         extensionTestsPath: options.extensionTestsPath,
+        extensionTestsEnv: {
+          EGGPLANT_RUN_GRAPHVIZ_SMOKE_TEST: RUN_GRAPHVIZ_SMOKE_TEST ? "1" : "0"
+        },
         launchArgs: [
           options.testWorkspace,
           `--user-data-dir=${userDataDir}`,
           `--extensions-dir=${extensionsDir}`
         ]
       });
+      succeeded = true;
       return;
     } catch (error) {
       lastError = error;
@@ -65,7 +74,11 @@ async function runExtensionHostTests(options: {
 
       console.warn(`VSCode extension-host run aborted with SIGABRT on attempt ${attempt}; retrying with a fresh temp profile.`);
     } finally {
-      fs.rmSync(baseTempDir, { force: true, recursive: true });
+      if (succeeded || !KEEP_TEMP_PROFILE_ON_FAILURE) {
+        fs.rmSync(baseTempDir, { force: true, recursive: true });
+      } else {
+        console.warn(`Keeping VSCode test profile for inspection: ${baseTempDir}`);
+      }
     }
   }
 
