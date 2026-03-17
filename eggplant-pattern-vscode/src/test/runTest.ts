@@ -2,45 +2,74 @@ import * as path from "path";
 import * as os from "os";
 import * as fs from "fs";
 import { execFileSync } from "child_process";
-import { downloadAndUnzipVSCode, runTests } from "@vscode/test-electron";
+import { downloadAndUnzipVSCode, runTests, TestRunFailedError } from "@vscode/test-electron";
 
 const GRAPHVIZ_EXTENSION_ID = "tintinweb.graphviz-interactive-preview";
 const VSCODE_TEST_VERSION = "1.111.0";
+const MAX_RUN_ATTEMPTS = 3;
 
 async function main(): Promise<void> {
-  let baseTempDir: string | undefined;
   try {
     const extensionDevelopmentPath = path.resolve(__dirname, "../..");
     const extensionTestsPath = path.resolve(__dirname, "./suite/index");
     const testWorkspace = path.resolve(extensionDevelopmentPath, "test-fixtures", "workspace");
-    baseTempDir = fs.mkdtempSync(path.join(os.tmpdir(), "eggplant-vscode-test-"));
-    const userDataDir = path.join(baseTempDir, "user-data");
-    const extensionsDir = path.join(baseTempDir, "extensions");
     const vscodeCacheDir = path.join(extensionDevelopmentPath, ".vscode-test");
-    fs.mkdirSync(userDataDir, { recursive: true });
-    fs.mkdirSync(extensionsDir, { recursive: true });
-
-    ensureGraphvizExtensionAvailable(userDataDir, extensionsDir);
     const vscodeExecutablePath = await resolveVSCodeExecutable(vscodeCacheDir);
 
-    await runTests({
-      vscodeExecutablePath,
+    await runExtensionHostTests({
       extensionDevelopmentPath,
       extensionTestsPath,
-      launchArgs: [
-        testWorkspace,
-        `--user-data-dir=${userDataDir}`,
-        `--extensions-dir=${extensionsDir}`
-      ]
+      testWorkspace,
+      vscodeExecutablePath
     });
   } catch (error) {
     console.error("Failed to run VSCode extension tests:", error);
     process.exit(1);
-  } finally {
-    if (baseTempDir) {
+  }
+}
+
+async function runExtensionHostTests(options: {
+  extensionDevelopmentPath: string;
+  extensionTestsPath: string;
+  testWorkspace: string;
+  vscodeExecutablePath: string;
+}): Promise<void> {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= MAX_RUN_ATTEMPTS; attempt += 1) {
+    const baseTempDir = fs.mkdtempSync(path.join(os.tmpdir(), "eggplant-vscode-test-"));
+    const userDataDir = path.join(baseTempDir, "user-data");
+    const extensionsDir = path.join(baseTempDir, "extensions");
+
+    try {
+      fs.mkdirSync(userDataDir, { recursive: true });
+      fs.mkdirSync(extensionsDir, { recursive: true });
+      ensureGraphvizExtensionAvailable(userDataDir, extensionsDir);
+
+      await runTests({
+        vscodeExecutablePath: options.vscodeExecutablePath,
+        extensionDevelopmentPath: options.extensionDevelopmentPath,
+        extensionTestsPath: options.extensionTestsPath,
+        launchArgs: [
+          options.testWorkspace,
+          `--user-data-dir=${userDataDir}`,
+          `--extensions-dir=${extensionsDir}`
+        ]
+      });
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableTestRunFailure(error) || attempt === MAX_RUN_ATTEMPTS) {
+        throw error;
+      }
+
+      console.warn(`VSCode extension-host run aborted with SIGABRT on attempt ${attempt}; retrying with a fresh temp profile.`);
+    } finally {
       fs.rmSync(baseTempDir, { force: true, recursive: true });
     }
   }
+
+  throw lastError;
 }
 
 async function resolveVSCodeExecutable(vscodeCacheDir: string): Promise<string> {
@@ -121,6 +150,10 @@ function vscodeExecutableRelativePath(): string {
   }
 
   return "code";
+}
+
+function isRetryableTestRunFailure(error: unknown): boolean {
+  return error instanceof TestRunFailedError && error.signal === "SIGABRT";
 }
 
 void main();
