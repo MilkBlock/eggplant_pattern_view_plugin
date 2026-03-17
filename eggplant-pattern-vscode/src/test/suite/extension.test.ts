@@ -7,6 +7,7 @@ const EXTENSION_ID = "local.eggplant-pattern-vscode";
 const MOCK_PREVIEW_COMMAND = "eggplant-pattern.test.preview";
 const FAILING_PREVIEW_COMMAND = "eggplant-pattern.test.preview.fail";
 const DEFAULT_PREVIEW_COMMAND = "graphviz-interactive-preview.preview.beside";
+const RUN_GRAPHVIZ_SMOKE_TEST = process.env.EGGPLANT_RUN_GRAPHVIZ_SMOKE_TEST === "1";
 const FIXTURE_DIR = path.resolve(__dirname, "../../../test-fixtures/workspace");
 const RUST_FIXTURE = path.join(FIXTURE_DIR, "pattern_samples.rs");
 const TEXT_FIXTURE = path.join(FIXTURE_DIR, "notes.txt");
@@ -68,7 +69,9 @@ suite("eggplant pattern extension", () => {
     assert.match(previewCalls[0].content, /"p" -> "l"/);
   });
 
-  test.skip("manual preview smoke test works with installed graphviz preview command", async () => {
+  const graphvizSmokeTest = RUN_GRAPHVIZ_SMOKE_TEST ? test : test.skip;
+
+  graphvizSmokeTest("manual preview smoke test works with installed graphviz preview command", async () => {
     const editor = await openEditor(RUST_FIXTURE);
     await vscode.workspace.getConfiguration().update("eggplantPattern.previewCommand", DEFAULT_PREVIEW_COMMAND, vscode.ConfigurationTarget.Global);
     resetObservations();

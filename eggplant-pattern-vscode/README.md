@@ -27,3 +27,14 @@ cd ../eggplant-pattern-vscode
 npm install
 npm run compile
 ```
+
+Default repo-local validation paths:
+
+```bash
+npm test
+npm run test:extension-host
+```
+
+- `npm test` runs the headless-safe suite.
+- `npm run test:extension-host` runs extension-host validation without requiring the Graphviz extension.
+- `npm run test:extension-host:graphviz` enables the optional Graphviz smoke test.
