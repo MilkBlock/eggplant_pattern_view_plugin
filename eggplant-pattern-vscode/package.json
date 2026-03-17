@@ -17,6 +17,9 @@
     "onCommand:eggplant-pattern.preview"
   ],
   "main": "./out/extension.js",
+  "extensionDependencies": [
+    "tintinweb.graphviz-interactive-preview"
+  ],
   "contributes": {
     "commands": [
       {

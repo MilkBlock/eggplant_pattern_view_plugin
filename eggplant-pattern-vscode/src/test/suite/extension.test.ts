@@ -7,6 +7,7 @@ const EXTENSION_ID = "local.eggplant-pattern-vscode";
 const GRAPHVIZ_EXTENSION_ID = "tintinweb.graphviz-interactive-preview";
 const MOCK_PREVIEW_COMMAND = "eggplant-pattern.test.preview";
 const FAILING_PREVIEW_COMMAND = "eggplant-pattern.test.preview.fail";
+const MISSING_PREVIEW_COMMAND = "eggplant-pattern.test.preview.missing";
 const DEFAULT_PREVIEW_COMMAND = "graphviz-interactive-preview.preview.beside";
 const RUN_GRAPHVIZ_SMOKE_TEST = process.env.EGGPLANT_RUN_GRAPHVIZ_SMOKE_TEST === "1";
 const FIXTURE_DIR = path.resolve(__dirname, "../../../test-fixtures/workspace");
@@ -71,7 +72,6 @@ suite("eggplant pattern extension", () => {
   });
 
   const graphvizSmokeTest = RUN_GRAPHVIZ_SMOKE_TEST ? test : test.skip;
-  const missingPreviewHostTest = RUN_GRAPHVIZ_SMOKE_TEST ? test.skip : test;
 
   graphvizSmokeTest("manual preview smoke test works with installed graphviz preview command", async () => {
     const editor = await openEditor(RUST_FIXTURE);
@@ -150,9 +150,9 @@ suite("eggplant pattern extension", () => {
     assert.match(warningMessages[0], /Mock preview failure/);
   });
 
-  missingPreviewHostTest("manual preview reports missing default preview host clearly", async () => {
+  test("manual preview reports missing configured preview host clearly", async () => {
     const editor = await openEditor(RUST_FIXTURE);
-    await vscode.workspace.getConfiguration().update("eggplantPattern.previewCommand", DEFAULT_PREVIEW_COMMAND, vscode.ConfigurationTarget.Global);
+    await vscode.workspace.getConfiguration().update("eggplantPattern.previewCommand", MISSING_PREVIEW_COMMAND, vscode.ConfigurationTarget.Global);
     resetObservations();
     placeCursor(editor, "let p = Add::query");
 
@@ -160,14 +160,14 @@ suite("eggplant pattern extension", () => {
 
     assert.equal(previewCalls.length, 0);
     assert.equal(warningMessages.length, 1);
-    assert.match(warningMessages[0], /Preview command 'graphviz-interactive-preview\.preview\.beside' is unavailable/);
-    assert.match(warningMessages[0], /Install the tintinweb\.graphviz-interactive-preview VSCode extension/);
+    assert.match(warningMessages[0], /Preview command 'eggplant-pattern\.test\.preview\.missing' is unavailable/);
+    assert.match(warningMessages[0], /Register or configure a different preview command/);
   });
 
-  missingPreviewHostTest("auto preview warns only once when preview host is missing", async () => {
+  test("auto preview warns only once when preview host is missing", async () => {
     const editor = await openEditor(RUST_FIXTURE);
     await vscode.workspace.getConfiguration().update("eggplantPattern.autoPreview", true, vscode.ConfigurationTarget.Global);
-    await vscode.workspace.getConfiguration().update("eggplantPattern.previewCommand", DEFAULT_PREVIEW_COMMAND, vscode.ConfigurationTarget.Global);
+    await vscode.workspace.getConfiguration().update("eggplantPattern.previewCommand", MISSING_PREVIEW_COMMAND, vscode.ConfigurationTarget.Global);
     resetObservations();
 
     placeCursor(editor, "let l = Const::query");

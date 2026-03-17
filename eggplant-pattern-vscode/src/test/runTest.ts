@@ -52,9 +52,7 @@ async function runExtensionHostTests(options: {
     try {
       fs.mkdirSync(userDataDir, { recursive: true });
       fs.mkdirSync(extensionsDir, { recursive: true });
-      if (RUN_GRAPHVIZ_SMOKE_TEST) {
-        ensureGraphvizExtensionAvailable(userDataDir, extensionsDir);
-      }
+      ensureGraphvizExtensionAvailable(userDataDir, extensionsDir);
 
       await runTests({
         vscodeExecutablePath: options.vscodeExecutablePath,
