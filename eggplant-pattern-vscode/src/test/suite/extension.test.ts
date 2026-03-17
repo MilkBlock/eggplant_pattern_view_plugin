@@ -167,13 +167,14 @@ suite("eggplant pattern extension", () => {
   test("auto preview warns only once when preview host is missing", async () => {
     const editor = await openEditor(RUST_FIXTURE);
     await vscode.workspace.getConfiguration().update("eggplantPattern.autoPreview", true, vscode.ConfigurationTarget.Global);
+    await vscode.workspace.getConfiguration().update("eggplantPattern.debounceMs", 10, vscode.ConfigurationTarget.Global);
     await vscode.workspace.getConfiguration().update("eggplantPattern.previewCommand", MISSING_PREVIEW_COMMAND, vscode.ConfigurationTarget.Global);
     resetObservations();
 
     placeCursor(editor, "let l = Const::query");
     await waitFor(() => warningMessages.length >= 1);
     placeCursor(editor, "let p = Add::query");
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => setTimeout(resolve, 75));
 
     assert.equal(previewCalls.length, 0);
     assert.equal(warningMessages.length, 1);

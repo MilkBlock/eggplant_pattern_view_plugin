@@ -157,18 +157,21 @@ async function showPreview(editor: vscode.TextEditor, content: string): Promise<
     "eggplantPattern.previewCommand",
     GRAPHVIZ_PREVIEW_COMMAND
   );
-  const availableCommands = await vscode.commands.getCommands(true);
-  if (!availableCommands.includes(previewCommand)) {
-    throw new PreviewHostUnavailableError(previewCommand);
-  }
   const title = `Eggplant Pattern: ${editor.document.fileName.split("/").pop() ?? "Preview"}`;
-  await vscode.commands.executeCommand(previewCommand, {
-    document: editor.document,
-    uri: editor.document.uri,
-    content,
-    title,
-    allowMultiplePanels: false
-  });
+  try {
+    await vscode.commands.executeCommand(previewCommand, {
+      document: editor.document,
+      uri: editor.document.uri,
+      content,
+      title,
+      allowMultiplePanels: false
+    });
+  } catch (error) {
+    if (isMissingCommandError(error, previewCommand)) {
+      throw new PreviewHostUnavailableError(previewCommand);
+    }
+    throw error;
+  }
 }
 
 function formatPreviewError(error: unknown): string {
@@ -188,6 +191,13 @@ class PreviewHostUnavailableError extends Error {
       : `Register or configure a different preview command than '${commandId}'.`;
     super(`Preview command '${commandId}' is unavailable. ${installHint}`);
   }
+}
+
+function isMissingCommandError(error: unknown, commandId: string): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  return error.message.includes(commandId) && error.message.toLowerCase().includes("command");
 }
 
 interface PreviewRequest {
