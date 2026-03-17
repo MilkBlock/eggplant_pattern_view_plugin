@@ -399,4 +399,25 @@ fn step_pat<PR: PatRecSgl>() -> StepPat<PR> {
         assert_eq!(ir.nodes.len(), 3);
         assert_eq!(ir.roots, vec!["l", "r", "p"]);
     }
+
+    #[test]
+    fn rejects_non_pattern_scope() {
+        let src = r#"
+fn helper() {
+    let value = 42;
+    println!("{value}");
+}
+"#;
+        let offset = src.find("println!").expect("needle not found");
+        let error = extract_pattern(
+            src,
+            ExtractOptions {
+                offset,
+                edition: Edition::CURRENT,
+            },
+        )
+        .expect_err("non-pattern scope should fail");
+
+        assert!(error.to_string().contains("no supported pattern scope found at cursor"));
+    }
 }
