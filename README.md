@@ -41,9 +41,9 @@ npm run test:extension-host
 
 That script now rebuilds the extractor and recompiles the extension before launching the VSCode test host.
 
-The extension-host harness reuses a locally installed `tintinweb.graphviz-interactive-preview` extension when available; otherwise it falls back to installing that extension into a temporary test extensions directory.
+The extension-host harness reuses a locally installed `tintinweb.graphviz-interactive-preview` extension when available; otherwise it falls back to installing that extension into a temporary test extensions directory so the packaged extension dependency can activate.
 
-By default, `npm run test:extension-host` validates only the eggplant extension behavior and does not require the Graphviz extension. To run the optional Graphviz smoke check, use:
+By default, `npm run test:extension-host` validates the eggplant extension behavior without asserting Graphviz-specific preview-host behavior. It does not require you to preinstall the Graphviz extension locally. To run the optional Graphviz smoke check, use:
 
 ```bash
 cd eggplant-pattern-vscode
