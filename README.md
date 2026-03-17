@@ -39,6 +39,8 @@ cd eggplant-pattern-vscode
 npm run test:extension-host
 ```
 
+That script now rebuilds the extractor and recompiles the extension before launching the VSCode test host.
+
 The extension-host harness reuses a locally installed `tintinweb.graphviz-interactive-preview` extension when available; otherwise it falls back to installing that extension into a temporary test extensions directory.
 
 ## Run In VSCode
