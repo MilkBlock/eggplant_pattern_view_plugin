@@ -109,8 +109,8 @@ class PreviewController {
       }
 
       const message = formatPreviewError(error);
-      await renderNotice(request.editor, message);
-      if (request.manual) {
+      const renderedNotice = await tryRenderNotice(request.editor, message);
+      if (request.manual || !renderedNotice) {
         void vscode.window.showWarningMessage(`Eggplant pattern preview failed: ${message}`);
       }
     }
@@ -133,9 +133,23 @@ async function renderNotice(editor: vscode.TextEditor, message: string): Promise
   await showPreview(editor, dot);
 }
 
+async function tryRenderNotice(editor: vscode.TextEditor, message: string): Promise<boolean> {
+  try {
+    await renderNotice(editor, message);
+    return true;
+  } catch (error) {
+    console.error("Eggplant pattern preview notice failed:", error);
+    return false;
+  }
+}
+
 async function showPreview(editor: vscode.TextEditor, content: string): Promise<void> {
+  const previewCommand = vscode.workspace.getConfiguration().get<string>(
+    "eggplantPattern.previewCommand",
+    GRAPHVIZ_PREVIEW_COMMAND
+  );
   const title = `Eggplant Pattern: ${editor.document.fileName.split("/").pop() ?? "Preview"}`;
-  await vscode.commands.executeCommand(GRAPHVIZ_PREVIEW_COMMAND, {
+  await vscode.commands.executeCommand(previewCommand, {
     document: editor.document,
     uri: editor.document.uri,
     content,

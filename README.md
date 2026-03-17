@@ -27,6 +27,7 @@ Compile the extension:
 cd eggplant-pattern-vscode
 npm install
 npm run compile
+npm test
 ```
 
 ## Run In VSCode
@@ -44,6 +45,12 @@ By default, the extension looks for the extractor binary at:
 
 Override that path with the `eggplantPattern.extractorPath` setting if needed.
 
+For a repo-local validation target, use `samples/pattern_samples.rs`, which includes:
+
+- an `add_rule(..., || { ... })` pattern closure
+- a standalone pattern builder function
+- a non-pattern Rust scope
+
 ## Supported Pattern Shapes
 
 - `MyTx::add_rule(..., || { ... }, ...)` pattern closures
@@ -53,3 +60,9 @@ Override that path with the `eggplantPattern.extractorPath` setting if needed.
 - Chained `.assert(...)` constraints
 
 Unsupported scopes render a diagnostic preview instead of reusing stale graph data.
+
+## Limitations / Unsupported
+
+- The MVP recognizes only the supported pattern shapes listed above; other Rust scopes return a diagnostic notice instead of a graph.
+- The preview depends on a DOT preview command. The default is `tintinweb.graphviz-interactive-preview`, but `eggplantPattern.previewCommand` can be overridden for testing or alternate preview hosts.
+- The current automated validation focuses on extension-host command flow and preview payload generation. It does not assert Graphviz panel pixels or richer Graphviz extension behavior.
