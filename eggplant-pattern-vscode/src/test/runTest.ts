@@ -8,11 +8,12 @@ const GRAPHVIZ_EXTENSION_ID = "tintinweb.graphviz-interactive-preview";
 const VSCODE_TEST_VERSION = "1.111.0";
 
 async function main(): Promise<void> {
+  let baseTempDir: string | undefined;
   try {
     const extensionDevelopmentPath = path.resolve(__dirname, "../..");
     const extensionTestsPath = path.resolve(__dirname, "./suite/index");
     const testWorkspace = path.resolve(extensionDevelopmentPath, "test-fixtures", "workspace");
-    const baseTempDir = path.join(os.tmpdir(), "eggplant-vscode-test");
+    baseTempDir = fs.mkdtempSync(path.join(os.tmpdir(), "eggplant-vscode-test-"));
     const userDataDir = path.join(baseTempDir, "user-data");
     const extensionsDir = path.join(baseTempDir, "extensions");
     const vscodeCacheDir = path.join(extensionDevelopmentPath, ".vscode-test");
@@ -35,6 +36,10 @@ async function main(): Promise<void> {
   } catch (error) {
     console.error("Failed to run VSCode extension tests:", error);
     process.exit(1);
+  } finally {
+    if (baseTempDir) {
+      fs.rmSync(baseTempDir, { force: true, recursive: true });
+    }
   }
 }
 
