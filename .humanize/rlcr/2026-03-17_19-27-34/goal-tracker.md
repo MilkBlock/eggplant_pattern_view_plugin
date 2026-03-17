@@ -43,7 +43,7 @@ Build a local-development MVP VSCode plugin that renders the eggplant pattern sc
 <!-- Map each task to its target Acceptance Criterion -->
 | Task | Target AC | Status | Notes |
 |------|-----------|--------|-------|
-| None | - | completed | Current `HEAD` satisfies the planned MVP and all repo-local verification passes locally. |
+| Stabilize extension-host validation (`npm run test:extension-host`) | 5 | todo | Currently terminates with `SIGABRT` even though the in-VSCode mocha suite reports `7 passing` in logs. |
 
 ### Completed and Verified
 <!-- Only move tasks here after Codex verification -->
@@ -52,10 +52,9 @@ Build a local-development MVP VSCode plugin that renders the eggplant pattern sc
 | 1,2,3,4,5 | Initialize goal tracker from the draft plan | 0 | 0 | Goal tracker populated from `PLAN_DRAFT.md` and current repository state |
 | 2,5 | Resolve the extractor from the common repo layout without source edits | 0 | 0 | Default extractor path is repo-relative in `eggplant-pattern-vscode/src/extractor.ts` |
 | 1,2,3,4 | Keep TypeScript orchestration-only and render DOT from extractor `PatternIR` | 0 | 0 | Extension pipeline remains editor events -> extractor JSON -> DOT -> preview command |
-| 1,3,4 | Support manual preview plus debounced single-panel auto-refresh without stale overwrites | 0 | 0 | Extension-host suite passes manual preview coverage and `auto preview coalesces rapid cursor updates into a single render` |
-| 4 | Surface unsupported scopes and preview-command failures safely | 0 | 0 | Rust tests cover unsupported scope; extension-host suite passes diagnostic and preview-failure warning cases |
-| 5 | Make repo-local validation reproducible for both headless and extension-host paths | 0 | 0 | `npm test` passes with 3 headless tests; `npm run test:extension-host` passes with 7 extension-host tests |
-| 1,2,3,4,5 | Re-run current end-to-end verification on the repo snapshot used to start this loop | 0 | 0 | `cargo test` passed; `cd eggplant-pattern-vscode && npm test` passed; `cd eggplant-pattern-vscode && npm run test:extension-host` passed with exit code `0` |
+| 1,3,4 | Support manual preview plus debounced single-panel auto-refresh without stale overwrites | 0 | 0 | Debounce + single-panel render + stale-run suppression is implemented in `eggplant-pattern-vscode/src/extension.ts` |
+| 4 | Surface unsupported scopes and preview-command failures safely | 0 | 0 | Missing-binary + unsupported-scope + non-zero exit handling is implemented in `eggplant-pattern-vscode/src/extractor.ts` and `eggplant-pattern-vscode/src/extension.ts` |
+| 5 | Make repo-local validation reproducible for extractor + headless extension path | 0 | 0 | `cd eggplant-pattern-extractor && cargo test` passes; `cd eggplant-pattern-vscode && npm test` passes |
 
 ### Explicitly Deferred
 <!-- Items here require strong justification -->
@@ -67,4 +66,4 @@ Build a local-development MVP VSCode plugin that renders the eggplant pattern sc
 <!-- Issues discovered during implementation -->
 | Issue | Discovered Round | Blocking AC | Resolution Path |
 |-------|-----------------|-------------|-----------------|
-| None | - | - | - |
+| `cd eggplant-pattern-vscode && npm run test:extension-host` terminates with `SIGABRT` | 0 | 5 | Remove or gate Graphviz smoke test and/or stabilize the VSCode test runner so the command exits `0`, then re-verify and update evidence |
