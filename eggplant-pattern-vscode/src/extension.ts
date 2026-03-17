@@ -50,6 +50,7 @@ class PreviewController {
   private running = false;
   private pending: PreviewRequest | undefined;
   private nextRequestId = 0;
+  private lastAutoWarning: string | undefined;
 
   scheduleRefresh(editor?: vscode.TextEditor): void {
     const activeEditor = editor ?? vscode.window.activeTextEditor;
@@ -103,14 +104,22 @@ class PreviewController {
         return;
       }
       await renderDot(request.editor, ir);
+      this.lastAutoWarning = undefined;
     } catch (error) {
       if (this.pending && this.pending.id > request.id) {
         return;
       }
 
       const message = formatPreviewError(error);
+      if (!request.manual && message === this.lastAutoWarning) {
+        return;
+      }
+
       const renderedNotice = await tryRenderNotice(request.editor, message);
       if (request.manual || !renderedNotice) {
+        if (!request.manual) {
+          this.lastAutoWarning = message;
+        }
         void vscode.window.showWarningMessage(`Eggplant pattern preview failed: ${message}`);
       }
     }
@@ -148,6 +157,10 @@ async function showPreview(editor: vscode.TextEditor, content: string): Promise<
     "eggplantPattern.previewCommand",
     GRAPHVIZ_PREVIEW_COMMAND
   );
+  const availableCommands = await vscode.commands.getCommands(true);
+  if (!availableCommands.includes(previewCommand)) {
+    throw new PreviewHostUnavailableError(previewCommand);
+  }
   const title = `Eggplant Pattern: ${editor.document.fileName.split("/").pop() ?? "Preview"}`;
   await vscode.commands.executeCommand(previewCommand, {
     document: editor.document,
@@ -159,10 +172,22 @@ async function showPreview(editor: vscode.TextEditor, content: string): Promise<
 }
 
 function formatPreviewError(error: unknown): string {
+  if (error instanceof PreviewHostUnavailableError) {
+    return error.message;
+  }
   if (error instanceof ExtractorError) {
     return error.message;
   }
   return error instanceof Error ? error.message : String(error);
+}
+
+class PreviewHostUnavailableError extends Error {
+  constructor(commandId: string) {
+    const installHint = commandId === GRAPHVIZ_PREVIEW_COMMAND
+      ? "Install the tintinweb.graphviz-interactive-preview VSCode extension or set eggplantPattern.previewCommand to a different preview command."
+      : `Register or configure a different preview command than '${commandId}'.`;
+    super(`Preview command '${commandId}' is unavailable. ${installHint}`);
+  }
 }
 
 interface PreviewRequest {

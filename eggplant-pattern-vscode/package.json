@@ -57,6 +57,7 @@
     "watch": "tsc -w -p .",
     "pretest": "npm run build:extractor && npm run compile",
     "pretest:extension-host": "npm run build:extractor && npm run compile",
+    "pretest:extension-host:graphviz": "npm run build:extractor && npm run compile",
     "test": "node ./out/test/runHeadless.js",
     "test:extension-host": "node ./out/test/runTest.js",
     "test:extension-host:graphviz": "node -e \"process.env.EGGPLANT_RUN_GRAPHVIZ_SMOKE_TEST='1'; require('./out/test/runTest.js');\""
