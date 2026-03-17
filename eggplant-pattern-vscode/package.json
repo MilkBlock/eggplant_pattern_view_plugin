@@ -1,0 +1,61 @@
+{
+  "name": "eggplant-pattern-vscode",
+  "displayName": "Eggplant Pattern Preview",
+  "description": "Live preview of cursor-scoped eggplant Rust patterns in VSCode.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Visualization"
+  ],
+  "activationEvents": [
+    "onLanguage:rust",
+    "onCommand:eggplant-pattern.preview"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "eggplant-pattern.preview",
+        "title": "Eggplant Pattern: Preview Current Scope"
+      }
+    ],
+    "configuration": {
+      "title": "Eggplant Pattern Preview",
+      "properties": {
+        "eggplantPattern.extractorPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional absolute path to the eggplant-pattern-extractor binary."
+        },
+        "eggplantPattern.autoPreview": {
+          "type": "boolean",
+          "default": true,
+          "description": "Refresh the preview automatically when the cursor or document changes in Rust files."
+        },
+        "eggplantPattern.debounceMs": {
+          "type": "number",
+          "default": 200,
+          "minimum": 0,
+          "description": "Debounce delay before re-running extraction after editor changes."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -w -p ."
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.5.4"
+  },
+  "extensionDependencies": [
+    "tintinweb.graphviz-interactive-preview"
+  ]
+}
