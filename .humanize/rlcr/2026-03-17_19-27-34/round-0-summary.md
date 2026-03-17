@@ -22,7 +22,7 @@
 
 ## Commits created this round
 
-- Pending in this round until RLCR artifacts are committed
+- `7e675e1` `chore: initialize fresh rlcr loop state`
 
 ## Remaining items
 
