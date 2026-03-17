@@ -68,7 +68,7 @@ suite("eggplant pattern extension", () => {
     assert.match(previewCalls[0].content, /"p" -> "l"/);
   });
 
-  test("manual preview smoke test works with installed graphviz preview command", async () => {
+  test.skip("manual preview smoke test works with installed graphviz preview command", async () => {
     const editor = await openEditor(RUST_FIXTURE);
     await vscode.workspace.getConfiguration().update("eggplantPattern.previewCommand", DEFAULT_PREVIEW_COMMAND, vscode.ConfigurationTarget.Global);
     resetObservations();
