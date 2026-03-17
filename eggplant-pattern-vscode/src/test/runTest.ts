@@ -79,7 +79,8 @@ async function runExtensionHostTests(options: {
 
       console.warn(`VSCode extension-host run aborted with SIGABRT on attempt ${attempt}; retrying with a fresh temp profile.`);
     } finally {
-      if (succeeded || !KEEP_TEMP_PROFILE_ON_FAILURE) {
+      const shouldKeepTempProfile = !succeeded && (KEEP_TEMP_PROFILE_ON_FAILURE || attempt === MAX_RUN_ATTEMPTS);
+      if (!shouldKeepTempProfile) {
         fs.rmSync(baseTempDir, { force: true, recursive: true });
       } else {
         console.warn(`Keeping VSCode test profile for inspection: ${baseTempDir}`);
