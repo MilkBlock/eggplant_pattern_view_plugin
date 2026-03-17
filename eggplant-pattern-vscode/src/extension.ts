@@ -111,12 +111,9 @@ class PreviewController {
       }
 
       const message = formatPreviewError(error);
-      if (!request.manual && message === this.lastAutoWarning) {
-        return;
-      }
-
+      const suppressRepeatedAutoWarning = !request.manual && message === this.lastAutoWarning;
       const renderedNotice = await tryRenderNotice(request.editor, message);
-      if (request.manual || !renderedNotice) {
+      if (!suppressRepeatedAutoWarning && (request.manual || !renderedNotice)) {
         if (!request.manual) {
           this.lastAutoWarning = message;
         }
@@ -167,7 +164,7 @@ async function showPreview(editor: vscode.TextEditor, content: string): Promise<
       allowMultiplePanels: false
     });
   } catch (error) {
-    if (isMissingCommandError(error, previewCommand)) {
+    if (await isMissingCommandError(previewCommand)) {
       throw new PreviewHostUnavailableError(previewCommand);
     }
     throw error;
@@ -193,11 +190,9 @@ class PreviewHostUnavailableError extends Error {
   }
 }
 
-function isMissingCommandError(error: unknown, commandId: string): boolean {
-  if (!(error instanceof Error)) {
-    return false;
-  }
-  return error.message.includes(commandId) && error.message.toLowerCase().includes("command");
+async function isMissingCommandError(commandId: string): Promise<boolean> {
+  const availableCommands = await vscode.commands.getCommands(true);
+  return !availableCommands.includes(commandId);
 }
 
 interface PreviewRequest {
