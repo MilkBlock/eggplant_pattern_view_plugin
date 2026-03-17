@@ -30,6 +30,8 @@ npm run compile
 npm test
 ```
 
+`npm test` runs the VSCode extension-host suite. The harness reuses a locally installed `tintinweb.graphviz-interactive-preview` extension when available; otherwise it falls back to installing that extension into a temporary test extensions directory.
+
 ## Run In VSCode
 
 1. Open `eggplant-pattern-vscode/` in VSCode.
