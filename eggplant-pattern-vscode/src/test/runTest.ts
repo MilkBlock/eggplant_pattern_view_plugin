@@ -81,7 +81,11 @@ async function runExtensionHostTests(options: {
     } finally {
       const shouldKeepTempProfile = !succeeded && (KEEP_TEMP_PROFILE_ON_FAILURE || attempt === MAX_RUN_ATTEMPTS);
       if (!shouldKeepTempProfile) {
-        fs.rmSync(baseTempDir, { force: true, recursive: true });
+        try {
+          fs.rmSync(baseTempDir, { force: true, recursive: true });
+        } catch (cleanupError) {
+          console.warn(`Failed to remove VSCode test profile ${baseTempDir}:`, cleanupError);
+        }
       } else {
         console.warn(`Keeping VSCode test profile for inspection: ${baseTempDir}`);
       }
