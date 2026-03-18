@@ -368,7 +368,7 @@ fn unwrap_assert_chain(
     next_constraint_id: &mut usize,
 ) -> (ast::Expr, Vec<PatternConstraint>) {
     let mut current = expr;
-    let mut constraints = Vec::new();
+    let mut extracted_constraints = Vec::new();
 
     loop {
         let Some(method_call) = expr_as_method_call(&current) else {
@@ -384,14 +384,13 @@ fn unwrap_assert_chain(
 
         if let Some(arg) = method_call.arg_list().and_then(|args| args.args().next()) {
             let (resolved_text, referenced_vars) = resolve_constraint(&arg, local_bindings);
-            constraints.push(PatternConstraint {
-                id: format!("constraint_{}", *next_constraint_id),
+            extracted_constraints.push(PatternConstraint {
+                id: String::new(),
                 source_text: arg.syntax().text().to_string(),
                 resolved_text,
                 referenced_vars,
                 range: span_from_text_range(arg.syntax().text_range()),
             });
-            *next_constraint_id += 1;
         }
 
         let Some(receiver) = method_call.receiver() else {
@@ -400,7 +399,13 @@ fn unwrap_assert_chain(
         current = receiver;
     }
 
-    constraints.reverse();
+    extracted_constraints.reverse();
+    let mut constraints = Vec::with_capacity(extracted_constraints.len());
+    for mut constraint in extracted_constraints {
+        constraint.id = format!("constraint_{}", *next_constraint_id);
+        *next_constraint_id += 1;
+        constraints.push(constraint);
+    }
     (current, constraints)
 }
 
@@ -492,6 +497,15 @@ fn extract_action_effects(
     let mut effects = Vec::new();
     let mut next_effect_id = 0usize;
     for method_call in block.syntax().descendants().filter_map(ast::MethodCallExpr::cast) {
+        if method_call
+            .syntax()
+            .ancestors()
+            .skip(1)
+            .take_while(|ancestor| ancestor != block.syntax())
+            .any(|ancestor| ast::ClosureExpr::can_cast(ancestor.kind()))
+        {
+            continue;
+        }
         let Some(receiver) = method_call.receiver() else {
             continue;
         };
@@ -818,6 +832,8 @@ fn demo() {
         assert_eq!(ir.constraints.len(), 2);
         assert_eq!(ir.constraints[0].source_text, "eq1");
         assert_eq!(ir.constraints[1].source_text, "eq2");
+        assert_eq!(ir.constraints[0].id, "constraint_0");
+        assert_eq!(ir.constraints[1].id, "constraint_1");
         assert_ne!(ir.constraints[0].id, ir.constraints[1].id);
     }
 
@@ -878,6 +894,29 @@ fn demo() {
         assert_eq!(ir.action_effects.len(), 2);
         assert_eq!(ir.action_effects[0].referenced_pat_vars, vec!["l"]);
         assert_eq!(ir.action_effects[1].referenced_pat_vars, vec!["p"]);
+    }
+
+    #[test]
+    fn ignores_action_effects_inside_nested_closures() {
+        let src = r#"
+fn demo() {
+    MyTx::add_rule("demo", ruleset, || {
+        let l = Const::query();
+        let p = Add::query(&l, &l);
+        DemoPat::new(l, p)
+    }, |ctx, pat| {
+        let _deferred = || {
+            ctx.union(pat.p, ctx.insert_const(9));
+        };
+        let folded = ctx.insert_const(3);
+        ctx.union(pat.p, folded);
+    });
+}
+"#;
+        let ir = extract(src, "ctx.union(pat.p, folded)");
+        assert_eq!(ir.action_effects.len(), 2);
+        assert_eq!(ir.action_effects[0].source_text, "ctx.insert_const(3)");
+        assert_eq!(ir.action_effects[1].source_text, "ctx.union(pat.p, folded)");
     }
 
     #[test]
