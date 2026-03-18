@@ -79,7 +79,13 @@ fn is_add_rule_call(call: &ast::CallExpr) -> bool {
         return false;
     };
     let callee_text = callee.syntax().text().to_string();
-    callee_text.ends_with("add_rule")
+    if !callee_text.ends_with("add_rule") {
+        return false;
+    }
+    call.arg_list()
+        .and_then(|args| args.args().nth(2))
+        .and_then(|arg| expr_as_closure(&arg))
+        .is_some()
 }
 
 fn function_looks_like_pattern(function: &ast::Fn) -> bool {
@@ -502,28 +508,10 @@ fn extract_action_effects(
 fn collect_pat_field_references(node: &SyntaxNode) -> Vec<String> {
     let mut vars = BTreeSet::new();
     for field_expr in node.descendants().filter_map(ast::FieldExpr::cast) {
-        let Some(receiver) = field_expr.expr() else {
+        let Some(first_pat_field) = first_pat_field_name(&field_expr) else {
             continue;
         };
-        let Some(name_ref) = field_expr.name_ref() else {
-            continue;
-        };
-        match receiver {
-            ast::Expr::PathExpr(path) => {
-                if path.syntax().text() == "pat" {
-                    vars.insert(name_ref.syntax().text().to_string());
-                }
-            }
-            ast::Expr::FieldExpr(inner) => {
-                if let Some(inner_receiver) = inner.expr()
-                    && let ast::Expr::PathExpr(path) = inner_receiver
-                    && path.syntax().text() == "pat"
-                {
-                    vars.insert(name_ref.syntax().text().to_string());
-                }
-            }
-            _ => {}
-        }
+        vars.insert(first_pat_field);
     }
     vars.into_iter().collect()
 }
@@ -541,6 +529,14 @@ fn extract_seed_facts(function_body: &ast::BlockExpr, rule_call: &ast::CallExpr)
             continue;
         };
         if name_ref.syntax().text() != "commit" {
+            continue;
+        }
+        if method_call
+            .syntax()
+            .ancestors()
+            .skip(1)
+            .any(|ancestor| ast::ClosureExpr::can_cast(ancestor.kind()))
+        {
             continue;
         }
         let commit_range = method_call.syntax().text_range();
@@ -566,6 +562,27 @@ fn extract_seed_facts(function_body: &ast::BlockExpr, rule_call: &ast::CallExpr)
         next_fact_id += 1;
     }
     facts
+}
+
+fn first_pat_field_name(field_expr: &ast::FieldExpr) -> Option<String> {
+    let mut current = field_expr.clone();
+    loop {
+        let receiver = current.expr()?;
+        match receiver {
+            ast::Expr::PathExpr(path) => {
+                if path.syntax().text() == "pat" {
+                    return current
+                        .name_ref()
+                        .map(|name_ref| name_ref.syntax().text().to_string());
+                }
+                return None;
+            }
+            ast::Expr::FieldExpr(inner) => {
+                current = inner;
+            }
+            _ => return None,
+        }
+    }
 }
 
 fn block_pat_roots(block: &ast::BlockExpr) -> Vec<String> {
@@ -792,8 +809,9 @@ fn demo() {
 fn demo() {
     MyTx::add_rule("demo", ruleset, || {
         let l = Const::query();
+        let num = Const::query();
         let p = Add::query(&l, &l);
-        DemoPat::new(l, p)
+        DemoPat::new(l, num, p)
     }, |ctx, pat| {
         let folded = ctx.insert_const(ctx.devalue(pat.l.num));
         ctx.union(pat.p, folded);
@@ -804,6 +822,25 @@ fn demo() {
         assert_eq!(ir.action_effects.len(), 2);
         assert_eq!(ir.action_effects[0].referenced_pat_vars, vec!["l"]);
         assert_eq!(ir.action_effects[1].referenced_pat_vars, vec!["p"]);
+    }
+
+    #[test]
+    fn ignores_unrelated_add_rule_calls() {
+        let src = r#"
+fn demo() {
+    helper.add_rule("demo", ruleset, 42, "not a closure");
+}
+"#;
+        let offset = src.find("add_rule").unwrap();
+        let error = extract_pattern(
+            src,
+            ExtractOptions {
+                offset,
+                edition: Edition::CURRENT,
+            },
+        )
+        .expect_err("unrelated add_rule call should not be treated as a pattern scope");
+        assert!(error.to_string().contains("no supported pattern scope found at cursor"));
     }
 
     #[test]
@@ -834,6 +871,10 @@ fn helper() {
 fn demo() {
     let before = Add::new(&Const::new(1), &Const::new(2));
     before.commit();
+    let nested = || {
+        let hidden = Add::new(&Const::new(5), &Const::new(6));
+        hidden.commit();
+    };
     MyTx::add_rule("demo", ruleset, || {
         let l = Const::query();
         let r = Const::query();
@@ -850,6 +891,7 @@ fn demo() {
         let ir = extract(src, "DemoPat::new");
         assert_eq!(ir.seed_facts.len(), 1);
         assert_eq!(ir.seed_facts[0].committed_root, "before");
+        assert_eq!(ir.seed_facts[0].source_text, "before.commit()");
     }
 
     #[test]
