@@ -126,6 +126,7 @@ fn extract_from_rule_call(call: ast::CallExpr) -> Result<PatternIr> {
         },
         action_closure.and_then(closure_block_body),
         enclosing_function.and_then(|function| function.body()),
+        Some(call),
     )
 }
 
@@ -141,6 +142,7 @@ fn extract_from_function(function: ast::Fn) -> Result<PatternIr> {
         },
         None,
         None,
+        None,
     )
 }
 
@@ -149,6 +151,7 @@ fn extract_from_block(
     scope: ScopeInfo,
     action_block: Option<ast::BlockExpr>,
     enclosing_function_body: Option<ast::BlockExpr>,
+    rule_call: Option<ast::CallExpr>,
 ) -> Result<PatternIr> {
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
@@ -222,8 +225,10 @@ fn extract_from_block(
         action_effects = extract_action_effects(&action_block, &known_pattern_vars);
     }
 
-    if let Some(function_body) = enclosing_function_body {
-        seed_facts = extract_seed_facts(&function_body);
+    if let Some(function_body) = enclosing_function_body
+        && let Some(rule_call) = rule_call
+    {
+        seed_facts = extract_seed_facts(&function_body, &rule_call);
     }
 
     if roots.is_empty() {
@@ -330,13 +335,7 @@ fn collect_roots_and_constraints(
 
     if let Some(block) = expr_as_block(&base) {
         let extracted_roots = block_pat_roots(&block);
-        if extracted_roots.is_empty() {
-            diagnostics.push(Diagnostic {
-                severity: crate::ir::Severity::Warning,
-                message: "pattern block found, but no root variables could be extracted".into(),
-                range: Some(span_from_text_range(block.syntax().text_range())),
-            });
-        } else {
+        if !extracted_roots.is_empty() {
             constraints.extend(extracted_constraints);
             roots.extend(extracted_roots);
         }
@@ -529,9 +528,10 @@ fn collect_pat_field_references(node: &SyntaxNode) -> Vec<String> {
     vars.into_iter().collect()
 }
 
-fn extract_seed_facts(function_body: &ast::BlockExpr) -> Vec<SeedFact> {
+fn extract_seed_facts(function_body: &ast::BlockExpr, rule_call: &ast::CallExpr) -> Vec<SeedFact> {
     let mut facts = Vec::new();
     let mut next_fact_id = 0usize;
+    let rule_range = rule_call.syntax().text_range();
     for method_call in function_body
         .syntax()
         .descendants()
@@ -541,6 +541,13 @@ fn extract_seed_facts(function_body: &ast::BlockExpr) -> Vec<SeedFact> {
             continue;
         };
         if name_ref.syntax().text() != "commit" {
+            continue;
+        }
+        let commit_range = method_call.syntax().text_range();
+        if commit_range.start() >= rule_range.start() {
+            continue;
+        }
+        if rule_range.contains_range(commit_range) {
             continue;
         }
         let Some(receiver) = method_call.receiver() else {
@@ -818,6 +825,31 @@ fn helper() {
         let ir = extract(src, "DemoPat::new");
         assert_eq!(ir.roots, vec!["l", "r", "p"]);
         assert!(ir.constraints.is_empty());
+        assert!(ir.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn seed_facts_only_include_pre_rule_commits() {
+        let src = r#"
+fn demo() {
+    let before = Add::new(&Const::new(1), &Const::new(2));
+    before.commit();
+    MyTx::add_rule("demo", ruleset, || {
+        let l = Const::query();
+        let r = Const::query();
+        let p = Add::query(&l, &r);
+        DemoPat::new(l, r, p)
+    }, |ctx, pat| {
+        let folded = ctx.insert_const(6);
+        ctx.union(pat.p, folded);
+    });
+    let after = Add::new(&Const::new(3), &Const::new(4));
+    after.commit();
+}
+"#;
+        let ir = extract(src, "DemoPat::new");
+        assert_eq!(ir.seed_facts.len(), 1);
+        assert_eq!(ir.seed_facts[0].committed_root, "before");
     }
 
     #[test]
