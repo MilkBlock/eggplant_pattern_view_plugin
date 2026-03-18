@@ -20,6 +20,29 @@ fn step_pat<PR: PatRecSgl>() -> StepPat<PR> {
     StepPat::new(lhs, rhs, q)
 }
 
+fn add_rule_assert_block_demo() {
+    MyTx::add_rule(
+        "demo_assert_block",
+        ruleset,
+        || {
+            let l = Const::query();
+            let r = Const::query();
+            let p = Add::query(&l, &r);
+            let l_r_eq = l.handle().eq(&r.handle());
+            {
+                #[eggplant::pat_vars_catch]
+                struct AddPat {
+                    l: Const,
+                    r: Const,
+                    p: Add,
+                }
+            }
+            .assert(l_r_eq)
+        },
+        |ctx, pat| {},
+    );
+}
+
 fn not_a_pattern() {
     println!("not a pattern");
 }

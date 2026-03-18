@@ -26,7 +26,9 @@ export interface PatternEdge {
 
 export interface PatternConstraint {
   id: string;
-  label: string;
+  source_text: string;
+  resolved_text: string;
+  referenced_vars: string[];
   range: TextSpan;
 }
 

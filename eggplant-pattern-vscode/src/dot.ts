@@ -33,13 +33,14 @@ export function patternIrToDot(ir: PatternIr): string {
 
   for (const constraint of ir.constraints) {
     const id = `constraint:${constraint.id}`;
-    lines.push(`  ${quote(id)} [label=${quote(constraint.label)}, shape=note, fillcolor=\"#eef3fb\", color=\"#4e6a85\"];`);
+    lines.push(`  ${quote(id)} [label=${quote(constraint.resolved_text)}, shape=note, fillcolor=\"#eef3fb\", color=\"#4e6a85\"];`);
   }
 
   for (const constraint of ir.constraints) {
     const id = `constraint:${constraint.id}`;
-    for (const root of ir.roots) {
-      lines.push(`  ${quote(id)} -> ${quote(root)} [style=dashed, arrowhead=none, color=\"#7b8ea3\"];`);
+    const targets = constraint.referenced_vars.length > 0 ? constraint.referenced_vars : ir.roots;
+    for (const target of targets) {
+      lines.push(`  ${quote(id)} -> ${quote(target)} [style=dashed, arrowhead=none, color=\"#7b8ea3\"];`);
     }
   }
 

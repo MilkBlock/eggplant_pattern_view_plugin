@@ -53,7 +53,9 @@ pub struct PatternEdge {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PatternConstraint {
     pub id: String,
-    pub label: String,
+    pub source_text: String,
+    pub resolved_text: String,
+    pub referenced_vars: Vec<String>,
     pub range: TextSpan,
 }
 

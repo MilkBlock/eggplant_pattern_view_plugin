@@ -34,6 +34,29 @@ suite("eggplant pattern headless tests", () => {
     assert.deepEqual(ir.roots, ["l", "r", "p"]);
     assert.equal(ir.nodes.length, 3);
     assert.equal(ir.edges.length, 2);
+    assert.equal(ir.constraints[0].source_text, "eq");
+    assert.match(ir.constraints[0].resolved_text, /x1\.handle\(\)\.eq/);
+  });
+
+  test("extractor resolves assertion references for block host patterns", () => {
+    const source = fs.readFileSync(FIXTURE_PATH, "utf8");
+    const offset = source.indexOf("#[eggplant::pat_vars_catch]");
+    assert.notEqual(offset, -1);
+
+    const result = spawnSync(EXTRACTOR_PATH, ["--offset", String(offset)], {
+      cwd: WORKSPACE_ROOT,
+      input: source,
+      encoding: "utf8"
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const ir = JSON.parse(result.stdout) as PatternIr;
+
+    assert.deepEqual(ir.roots, ["l", "r", "p"]);
+    assert.equal(ir.constraints.length, 1);
+    assert.equal(ir.constraints[0].source_text, "l_r_eq");
+    assert.equal(ir.constraints[0].resolved_text, "l.handle().eq(&r.handle())");
+    assert.deepEqual(ir.constraints[0].referenced_vars, ["l", "r"]);
   });
 
   test("extractor reports unsupported non-pattern scope", () => {
@@ -88,7 +111,15 @@ suite("eggplant pattern headless tests", () => {
         { from: "q", to: "rhs", kind: "operand", index: 1 }
       ],
       roots: ["lhs", "rhs", "q"],
-      constraints: [],
+      constraints: [
+        {
+          id: "constraint_0",
+          source_text: "lhs_eq_rhs",
+          resolved_text: "lhs.handle().eq(&rhs.handle())",
+          referenced_vars: ["lhs", "rhs"],
+          range: { start: 6, end: 7 }
+        }
+      ],
       diagnostics: []
     };
 
@@ -98,5 +129,8 @@ suite("eggplant pattern headless tests", () => {
     assert.match(dot, /"q" -> "lhs" \[label="0"\]/);
     assert.match(dot, /"q" -> "rhs" \[label="1"\]/);
     assert.match(dot, /penwidth=2/);
+    assert.match(dot, /lhs\.handle\(\)\.eq/);
+    assert.match(dot, /"constraint:constraint_0" -> "lhs"/);
+    assert.match(dot, /"constraint:constraint_0" -> "rhs"/);
   });
 });

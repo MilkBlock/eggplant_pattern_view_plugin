@@ -1,8 +1,9 @@
 use anyhow::{Result, anyhow};
 use ra_ap_syntax::{
     AstNode, Edition, SourceFile, SyntaxNode, TextRange, TextSize, algo,
-    ast::{self, HasArgList, HasName},
+    ast::{self, HasArgList, HasAttrs, HasName},
 };
+use std::collections::{BTreeSet, HashMap};
 
 use crate::ir::{
     Diagnostic, PatternConstraint, PatternEdge, PatternIr, PatternNode, ScopeInfo, ScopeKind,
@@ -145,10 +146,17 @@ fn extract_from_block(block: ast::BlockExpr, scope: ScopeInfo) -> Result<Pattern
     let mut roots = Vec::new();
     let mut constraints = Vec::new();
     let mut diagnostics = Vec::new();
+    let mut local_bindings = HashMap::new();
 
     for stmt in block.statements() {
         match stmt {
             ast::Stmt::LetStmt(let_stmt) => {
+                if let Some(pat) = let_stmt.pat()
+                    && let Some(name) = ident_pat_name(pat)
+                    && let Some(init) = let_stmt.initializer()
+                {
+                    local_bindings.insert(name, init);
+                }
                 if let Some(node) = extract_let_node(&let_stmt) {
                     for (index, input) in node.inputs.iter().enumerate() {
                         edges.push(PatternEdge {
@@ -165,6 +173,7 @@ fn extract_from_block(block: ast::BlockExpr, scope: ScopeInfo) -> Result<Pattern
                 if let Some(expr) = expr_stmt.expr() {
                     collect_roots_and_constraints(
                         &expr,
+                        &local_bindings,
                         &mut roots,
                         &mut constraints,
                         &mut diagnostics,
@@ -178,6 +187,7 @@ fn extract_from_block(block: ast::BlockExpr, scope: ScopeInfo) -> Result<Pattern
     if let Some(tail_expr) = block.tail_expr() {
         collect_roots_and_constraints(
             &tail_expr,
+            &local_bindings,
             &mut roots,
             &mut constraints,
             &mut diagnostics,
@@ -187,7 +197,7 @@ fn extract_from_block(block: ast::BlockExpr, scope: ScopeInfo) -> Result<Pattern
     if roots.is_empty() {
         diagnostics.push(Diagnostic {
             severity: crate::ir::Severity::Warning,
-            message: "no Pat::new(...) roots found in scope".into(),
+            message: "no supported pattern roots found in scope".into(),
             range: Some(span_from_text_range(block.syntax().text_range())),
         });
     }
@@ -253,41 +263,53 @@ fn query_spec(expr: &ast::Expr) -> Option<QuerySpec> {
 
 fn collect_roots_and_constraints(
     expr: &ast::Expr,
+    local_bindings: &HashMap<String, ast::Expr>,
     roots: &mut Vec<String>,
     constraints: &mut Vec<PatternConstraint>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let (base, extracted_constraints) = unwrap_assert_chain(expr.clone());
+    let (base, extracted_constraints) = unwrap_assert_chain(expr.clone(), local_bindings);
     constraints.extend(extracted_constraints);
 
-    let Some(call) = ast::CallExpr::cast(base.syntax().clone()) else {
-        return;
-    };
-    let Some(path) = call_path(&call) else {
-        return;
-    };
-    if !path.ends_with("::new") {
-        return;
-    }
-
-    let mut found = 0usize;
-    for arg in call.arg_list().into_iter().flat_map(|args| args.args()) {
-        if let Some(name) = expr_variable_name(arg) {
-            roots.push(name);
-            found += 1;
+    if let Some(call) = ast::CallExpr::cast(base.syntax().clone())
+        && call_path(&call).is_some_and(|path| path.ends_with("::new"))
+    {
+        let mut found = 0usize;
+        for arg in call.arg_list().into_iter().flat_map(|args| args.args()) {
+            if let Some(name) = expr_variable_name(arg) {
+                roots.push(name);
+                found += 1;
+            }
         }
+
+        if found == 0 {
+            diagnostics.push(Diagnostic {
+                severity: crate::ir::Severity::Warning,
+                message: "Pat::new(...) found, but no root variables could be extracted".into(),
+                range: Some(span_from_text_range(call.syntax().text_range())),
+            });
+        }
+        return;
     }
 
-    if found == 0 {
-        diagnostics.push(Diagnostic {
-            severity: crate::ir::Severity::Warning,
-            message: "Pat::new(...) found, but no root variables could be extracted".into(),
-            range: Some(span_from_text_range(call.syntax().text_range())),
-        });
+    if let Some(block) = ast::BlockExpr::cast(base.syntax().clone()) {
+        let extracted_roots = block_pat_roots(&block);
+        if extracted_roots.is_empty() {
+            diagnostics.push(Diagnostic {
+                severity: crate::ir::Severity::Warning,
+                message: "pattern block found, but no root variables could be extracted".into(),
+                range: Some(span_from_text_range(block.syntax().text_range())),
+            });
+        } else {
+            roots.extend(extracted_roots);
+        }
     }
 }
 
-fn unwrap_assert_chain(expr: ast::Expr) -> (ast::Expr, Vec<PatternConstraint>) {
+fn unwrap_assert_chain(
+    expr: ast::Expr,
+    local_bindings: &HashMap<String, ast::Expr>,
+) -> (ast::Expr, Vec<PatternConstraint>) {
     let mut current = expr;
     let mut constraints = Vec::new();
 
@@ -304,9 +326,12 @@ fn unwrap_assert_chain(expr: ast::Expr) -> (ast::Expr, Vec<PatternConstraint>) {
         }
 
         if let Some(arg) = method_call.arg_list().and_then(|args| args.args().next()) {
+            let (resolved_text, referenced_vars) = resolve_constraint(&arg, local_bindings);
             constraints.push(PatternConstraint {
                 id: format!("constraint_{}", constraints.len()),
-                label: arg.syntax().text().to_string(),
+                source_text: arg.syntax().text().to_string(),
+                resolved_text,
+                referenced_vars,
                 range: span_from_text_range(arg.syntax().text_range()),
             });
         }
@@ -319,6 +344,74 @@ fn unwrap_assert_chain(expr: ast::Expr) -> (ast::Expr, Vec<PatternConstraint>) {
 
     constraints.reverse();
     (current, constraints)
+}
+
+fn resolve_constraint(
+    expr: &ast::Expr,
+    local_bindings: &HashMap<String, ast::Expr>,
+) -> (String, Vec<String>) {
+    if let Some(name) = expr_variable_name(expr.clone())
+        && let Some(bound_expr) = local_bindings.get(&name)
+    {
+        return (
+            bound_expr.syntax().text().to_string(),
+            collect_variable_references(bound_expr),
+        );
+    }
+
+    (
+        expr.syntax().text().to_string(),
+        collect_variable_references(expr),
+    )
+}
+
+fn collect_variable_references(expr: &ast::Expr) -> Vec<String> {
+    let mut vars = BTreeSet::new();
+    for path_expr in expr.syntax().descendants().filter_map(ast::PathExpr::cast) {
+        if let Some(segment) = path_expr
+            .syntax()
+            .text()
+            .to_string()
+            .split("::")
+            .next()
+            .map(str::to_string)
+            && is_plain_ident(&segment)
+        {
+            vars.insert(segment);
+        }
+    }
+    vars.into_iter().collect()
+}
+
+fn block_pat_roots(block: &ast::BlockExpr) -> Vec<String> {
+    for stmt in block.statements() {
+        let ast::Stmt::Item(item) = stmt else {
+            continue;
+        };
+        let ast::Item::Struct(strukt) = item else {
+            continue;
+        };
+        if !struct_has_pat_attr(&strukt) {
+            continue;
+        }
+        return strukt
+            .syntax()
+            .descendants()
+            .filter_map(ast::RecordField::cast)
+            .filter_map(|field| field.name().map(|name| name.syntax().text().to_string()))
+            .collect();
+    }
+    Vec::new()
+}
+
+fn struct_has_pat_attr(strukt: &ast::Struct) -> bool {
+    strukt
+        .attrs()
+        .any(|attr| attr.syntax().text().to_string().contains("pat_vars"))
+}
+
+fn is_plain_ident(text: &str) -> bool {
+    !text.is_empty() && text.chars().all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn ident_pat_name(pat: ast::Pat) -> Option<String> {
@@ -382,6 +475,60 @@ fn demo() {
         assert_eq!(ir.edges.len(), 2);
         assert_eq!(ir.roots, vec!["l", "r", "p"]);
         assert_eq!(ir.constraints.len(), 1);
+        assert_eq!(ir.constraints[0].source_text, "eq");
+        assert_eq!(
+            ir.constraints[0].resolved_text,
+            "x1.handle().eq(&(x.handle() + (&1_i64).as_handle()))"
+        );
+    }
+
+    #[test]
+    fn resolves_assertion_variables_and_targets() {
+        let src = r#"
+fn demo() {
+    MyTx::add_rule("demo", ruleset, || {
+        let l = Const::query();
+        let r = Const::query();
+        let p = Add::query(&l, &r);
+        let l_r_eq = l.handle().eq(&r.handle());
+        DemoPat::new(l, r, p).assert(l_r_eq)
+    }, |ctx, pat| {});
+}
+"#;
+        let ir = extract(src, "let l_r_eq =");
+        assert_eq!(ir.roots, vec!["l", "r", "p"]);
+        assert_eq!(ir.constraints.len(), 1);
+        assert_eq!(ir.constraints[0].source_text, "l_r_eq");
+        assert_eq!(ir.constraints[0].resolved_text, "l.handle().eq(&r.handle())");
+        assert_eq!(ir.constraints[0].referenced_vars, vec!["l", "r"]);
+    }
+
+    #[test]
+    fn extracts_pat_vars_catch_assertion_roots() {
+        let src = r#"
+fn demo() {
+    MyTx::add_rule("demo", ruleset, || {
+        let l = Const::query();
+        let r = Const::query();
+        let p = Add::query(&l, &r);
+        let l_h_eq_r_h = l.handle().eq(&r.handle());
+        {
+            #[eggplant::pat_vars_catch]
+            struct AddPat {
+                l: Const,
+                r: Const,
+                p: Add,
+            }
+        }
+        .assert(l_h_eq_r_h)
+    }, |ctx, pat| {});
+}
+"#;
+        let ir = extract(src, "#[eggplant::pat_vars_catch]");
+        assert_eq!(ir.roots, vec!["l", "r", "p"]);
+        assert_eq!(ir.constraints.len(), 1);
+        assert_eq!(ir.constraints[0].resolved_text, "l.handle().eq(&r.handle())");
+        assert_eq!(ir.constraints[0].referenced_vars, vec!["l", "r"]);
     }
 
     #[test]
