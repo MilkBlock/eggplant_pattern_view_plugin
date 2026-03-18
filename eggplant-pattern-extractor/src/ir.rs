@@ -15,7 +15,7 @@ impl TextSpan {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ScopeKind {
-    AddRulePatternClosure,
+    AddRuleCall,
     PatternFunction,
 }
 
@@ -60,6 +60,23 @@ pub struct PatternConstraint {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ActionEffect {
+    pub id: String,
+    pub source_text: String,
+    pub referenced_pat_vars: Vec<String>,
+    pub range: TextSpan,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SeedFact {
+    pub id: String,
+    pub source_text: String,
+    pub committed_root: String,
+    pub referenced_vars: Vec<String>,
+    pub range: TextSpan,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Severity {
     Error,
@@ -80,5 +97,7 @@ pub struct PatternIr {
     pub edges: Vec<PatternEdge>,
     pub roots: Vec<String>,
     pub constraints: Vec<PatternConstraint>,
+    pub action_effects: Vec<ActionEffect>,
+    pub seed_facts: Vec<SeedFact>,
     pub diagnostics: Vec<Diagnostic>,
 }

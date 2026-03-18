@@ -31,11 +31,14 @@ suite("eggplant pattern headless tests", () => {
     assert.equal(result.status, 0, result.stderr);
     const ir = JSON.parse(result.stdout) as PatternIr;
 
+    assert.equal(ir.scope.kind, "add_rule_call");
     assert.deepEqual(ir.roots, ["l", "r", "p"]);
     assert.equal(ir.nodes.length, 3);
     assert.equal(ir.edges.length, 2);
     assert.equal(ir.constraints[0].source_text, "eq");
     assert.match(ir.constraints[0].resolved_text, /x1\.handle\(\)\.eq/);
+    assert.equal(ir.action_effects.length, 2);
+    assert.equal(ir.seed_facts.length, 1);
   });
 
   test("extractor resolves assertion references for block host patterns", () => {
@@ -57,6 +60,39 @@ suite("eggplant pattern headless tests", () => {
     assert.equal(ir.constraints[0].source_text, "l_r_eq");
     assert.equal(ir.constraints[0].resolved_text, "l.handle().eq(&r.handle())");
     assert.deepEqual(ir.constraints[0].referenced_vars, ["l", "r"]);
+    assert.equal(ir.action_effects.length, 2);
+    assert.equal(ir.seed_facts.length, 1);
+  });
+
+  test("extractor keeps inline assertions and unique ids", () => {
+    const source = `
+fn demo() {
+  MyTx::add_rule("demo", ruleset, || {
+    let l = Const::query();
+    let r = Const::query();
+    let p = Add::query(&l, &r);
+    DemoPat::new(l, r, p)
+      .assert(l.handle().eq(&r.handle()))
+      .assert(r.handle().eq(&l.handle()))
+  }, |ctx, pat| {
+    let folded = ctx.insert_const(6);
+    ctx.union(pat.p, folded);
+  });
+}
+`;
+    const offset = source.indexOf(".assert(l.handle()");
+    const result = spawnSync(EXTRACTOR_PATH, ["--offset", String(offset)], {
+      cwd: WORKSPACE_ROOT,
+      input: source,
+      encoding: "utf8"
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const ir = JSON.parse(result.stdout) as PatternIr;
+    assert.equal(ir.constraints.length, 2);
+    assert.equal(ir.constraints[0].source_text, "l.handle().eq(&r.handle())");
+    assert.equal(ir.constraints[1].source_text, "r.handle().eq(&l.handle())");
+    assert.notEqual(ir.constraints[0].id, ir.constraints[1].id);
   });
 
   test("extractor reports unsupported non-pattern scope", () => {
@@ -120,6 +156,23 @@ suite("eggplant pattern headless tests", () => {
           range: { start: 6, end: 7 }
         }
       ],
+      action_effects: [
+        {
+          id: "effect_0",
+          source_text: "ctx.union(pat.q, folded)",
+          referenced_pat_vars: ["q"],
+          range: { start: 8, end: 9 }
+        }
+      ],
+      seed_facts: [
+        {
+          id: "seed_0",
+          source_text: "expr.commit()",
+          committed_root: "expr",
+          referenced_vars: ["expr"],
+          range: { start: 10, end: 11 }
+        }
+      ],
       diagnostics: []
     };
 
@@ -132,5 +185,10 @@ suite("eggplant pattern headless tests", () => {
     assert.match(dot, /lhs\.handle\(\)\.eq/);
     assert.match(dot, /"constraint:constraint_0" -> "lhs"/);
     assert.match(dot, /"constraint:constraint_0" -> "rhs"/);
+    assert.equal(/"constraint:constraint_0" -> "q"/.test(dot), false);
+    assert.match(dot, /cluster_actions/);
+    assert.match(dot, /ctx\.union\(pat\.q, folded\)/);
+    assert.match(dot, /cluster_seed_facts/);
+    assert.match(dot, /expr\.commit\(\)/);
   });
 });

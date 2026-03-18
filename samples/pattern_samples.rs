@@ -1,4 +1,6 @@
 fn add_rule_demo() {
+    let expr = Add::new(&Const::new(1), &Const::new(2));
+    expr.commit();
     MyTx::add_rule(
         "demo",
         ruleset,
@@ -9,7 +11,10 @@ fn add_rule_demo() {
             let eq = x1.handle().eq(&(x.handle() + (&1_i64).as_handle()));
             DemoPat::new(l, r, p).assert(eq)
         },
-        |ctx, pat| {},
+        |ctx, pat| {
+            let op_value = ctx.insert_const(3);
+            ctx.union(pat.p, op_value);
+        },
     );
 }
 
@@ -21,6 +26,8 @@ fn step_pat<PR: PatRecSgl>() -> StepPat<PR> {
 }
 
 fn add_rule_assert_block_demo() {
+    let expr2 = Add::new(&Const::new(3), &Const::new(3));
+    expr2.commit();
     MyTx::add_rule(
         "demo_assert_block",
         ruleset,
@@ -39,7 +46,10 @@ fn add_rule_assert_block_demo() {
             }
             .assert(l_r_eq)
         },
-        |ctx, pat| {},
+        |ctx, pat| {
+            let folded = ctx.insert_const(6);
+            ctx.union(pat.p, folded);
+        },
     );
 }
 

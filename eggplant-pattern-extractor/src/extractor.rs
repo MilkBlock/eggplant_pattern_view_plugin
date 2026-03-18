@@ -6,8 +6,8 @@ use ra_ap_syntax::{
 use std::collections::{BTreeSet, HashMap};
 
 use crate::ir::{
-    Diagnostic, PatternConstraint, PatternEdge, PatternIr, PatternNode, ScopeInfo, ScopeKind,
-    TextSpan,
+    ActionEffect, Diagnostic, PatternConstraint, PatternEdge, PatternIr, PatternNode, ScopeInfo,
+    ScopeKind, SeedFact, TextSpan,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -27,7 +27,7 @@ impl Default for ExtractOptions {
 
 #[derive(Debug, Clone)]
 enum Scope {
-    Closure(ast::ClosureExpr),
+    RuleCall(ast::CallExpr),
     Function(ast::Fn),
 }
 
@@ -48,7 +48,7 @@ pub fn extract_pattern(source: &str, options: ExtractOptions) -> Result<PatternI
 
     let scope = find_scope(syntax, offset).ok_or_else(|| anyhow!("no supported pattern scope found at cursor"))?;
     let mut ir = match scope {
-        Scope::Closure(closure) => extract_from_closure(closure),
+        Scope::RuleCall(call) => extract_from_rule_call(call),
         Scope::Function(function) => extract_from_function(function),
     }?;
     ir.diagnostics.append(&mut diagnostics);
@@ -56,10 +56,13 @@ pub fn extract_pattern(source: &str, options: ExtractOptions) -> Result<PatternI
 }
 
 fn find_scope(root: &SyntaxNode, offset: TextSize) -> Option<Scope> {
-    if let Some(closure) = algo::find_node_at_offset::<ast::ClosureExpr>(root, offset)
-        && is_add_rule_pattern_closure(&closure)
+    if let Some(call) = root
+        .token_at_offset(offset)
+        .into_iter()
+        .flat_map(|token| token.parent_ancestors().filter_map(ast::CallExpr::cast))
+        .find(is_add_rule_call)
     {
-        return Some(Scope::Closure(closure));
+        return Some(Scope::RuleCall(call));
     }
 
     if let Some(function) = algo::find_node_at_offset::<ast::Fn>(root, offset)
@@ -71,26 +74,12 @@ fn find_scope(root: &SyntaxNode, offset: TextSize) -> Option<Scope> {
     None
 }
 
-fn is_add_rule_pattern_closure(closure: &ast::ClosureExpr) -> bool {
-    let Some(call) = closure.syntax().ancestors().find_map(ast::CallExpr::cast) else {
-        return false;
-    };
+fn is_add_rule_call(call: &ast::CallExpr) -> bool {
     let Some(callee) = call.expr() else {
         return false;
     };
     let callee_text = callee.syntax().text().to_string();
-    if !callee_text.ends_with("add_rule") {
-        return false;
-    }
-    let Some(arg_list) = call.arg_list() else {
-        return false;
-    };
-    arg_list
-        .args()
-        .enumerate()
-        .find(|(_, arg)| arg.syntax().text_range() == closure.syntax().text_range())
-        .map(|(idx, _)| idx == 2)
-        .unwrap_or(false)
+    callee_text.ends_with("add_rule")
 }
 
 fn function_looks_like_pattern(function: &ast::Fn) -> bool {
@@ -110,8 +99,19 @@ fn function_looks_like_pattern(function: &ast::Fn) -> bool {
     has_pat_new && has_query
 }
 
-fn extract_from_closure(closure: ast::ClosureExpr) -> Result<PatternIr> {
-    let Some(body) = closure.body() else {
+fn extract_from_rule_call(call: ast::CallExpr) -> Result<PatternIr> {
+    let args = call
+        .arg_list()
+        .ok_or_else(|| anyhow!("add_rule call has no arg list"))?
+        .args()
+        .collect::<Vec<_>>();
+    let pattern_closure = args
+        .get(2)
+        .and_then(expr_as_closure)
+        .ok_or_else(|| anyhow!("add_rule pattern closure not found"))?;
+    let action_closure = args.get(3).and_then(expr_as_closure);
+    let enclosing_function = call.syntax().ancestors().find_map(ast::Fn::cast);
+    let Some(body) = pattern_closure.body() else {
         return Err(anyhow!("pattern closure has no body"));
     };
     let block = match body {
@@ -121,9 +121,11 @@ fn extract_from_closure(closure: ast::ClosureExpr) -> Result<PatternIr> {
     extract_from_block(
         block,
         ScopeInfo {
-            kind: ScopeKind::AddRulePatternClosure,
-            text_range: span_from_text_range(closure.syntax().text_range()),
+            kind: ScopeKind::AddRuleCall,
+            text_range: span_from_text_range(call.syntax().text_range()),
         },
+        action_closure.and_then(closure_block_body),
+        enclosing_function.and_then(|function| function.body()),
     )
 }
 
@@ -137,16 +139,26 @@ fn extract_from_function(function: ast::Fn) -> Result<PatternIr> {
             kind: ScopeKind::PatternFunction,
             text_range: span_from_text_range(function.syntax().text_range()),
         },
+        None,
+        None,
     )
 }
 
-fn extract_from_block(block: ast::BlockExpr, scope: ScopeInfo) -> Result<PatternIr> {
+fn extract_from_block(
+    block: ast::BlockExpr,
+    scope: ScopeInfo,
+    action_block: Option<ast::BlockExpr>,
+    enclosing_function_body: Option<ast::BlockExpr>,
+) -> Result<PatternIr> {
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
     let mut roots = Vec::new();
     let mut constraints = Vec::new();
+    let mut action_effects = Vec::new();
+    let mut seed_facts = Vec::new();
     let mut diagnostics = Vec::new();
     let mut local_bindings = HashMap::new();
+    let mut next_constraint_id = 0usize;
 
     for stmt in block.statements() {
         match stmt {
@@ -174,6 +186,7 @@ fn extract_from_block(block: ast::BlockExpr, scope: ScopeInfo) -> Result<Pattern
                     collect_roots_and_constraints(
                         &expr,
                         &local_bindings,
+                        &mut next_constraint_id,
                         &mut roots,
                         &mut constraints,
                         &mut diagnostics,
@@ -188,10 +201,29 @@ fn extract_from_block(block: ast::BlockExpr, scope: ScopeInfo) -> Result<Pattern
         collect_roots_and_constraints(
             &tail_expr,
             &local_bindings,
+            &mut next_constraint_id,
             &mut roots,
             &mut constraints,
             &mut diagnostics,
         );
+    }
+
+    let known_pattern_vars = collect_known_pattern_vars(&nodes, &roots);
+    for constraint in &mut constraints {
+        constraint.referenced_vars = constraint
+            .referenced_vars
+            .iter()
+            .filter(|name| known_pattern_vars.contains(name.as_str()))
+            .cloned()
+            .collect();
+    }
+
+    if let Some(action_block) = action_block {
+        action_effects = extract_action_effects(&action_block, &known_pattern_vars);
+    }
+
+    if let Some(function_body) = enclosing_function_body {
+        seed_facts = extract_seed_facts(&function_body);
     }
 
     if roots.is_empty() {
@@ -208,6 +240,8 @@ fn extract_from_block(block: ast::BlockExpr, scope: ScopeInfo) -> Result<Pattern
         edges,
         roots,
         constraints,
+        action_effects,
+        seed_facts,
         diagnostics,
     })
 }
@@ -264,16 +298,18 @@ fn query_spec(expr: &ast::Expr) -> Option<QuerySpec> {
 fn collect_roots_and_constraints(
     expr: &ast::Expr,
     local_bindings: &HashMap<String, ast::Expr>,
+    next_constraint_id: &mut usize,
     roots: &mut Vec<String>,
     constraints: &mut Vec<PatternConstraint>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let (base, extracted_constraints) = unwrap_assert_chain(expr.clone(), local_bindings);
-    constraints.extend(extracted_constraints);
+    let (base, extracted_constraints) =
+        unwrap_assert_chain(expr.clone(), local_bindings, next_constraint_id);
 
-    if let Some(call) = ast::CallExpr::cast(base.syntax().clone())
+    if let Some(call) = expr_as_call(&base)
         && call_path(&call).is_some_and(|path| path.ends_with("::new"))
     {
+        constraints.extend(extracted_constraints);
         let mut found = 0usize;
         for arg in call.arg_list().into_iter().flat_map(|args| args.args()) {
             if let Some(name) = expr_variable_name(arg) {
@@ -292,7 +328,7 @@ fn collect_roots_and_constraints(
         return;
     }
 
-    if let Some(block) = ast::BlockExpr::cast(base.syntax().clone()) {
+    if let Some(block) = expr_as_block(&base) {
         let extracted_roots = block_pat_roots(&block);
         if extracted_roots.is_empty() {
             diagnostics.push(Diagnostic {
@@ -301,6 +337,7 @@ fn collect_roots_and_constraints(
                 range: Some(span_from_text_range(block.syntax().text_range())),
             });
         } else {
+            constraints.extend(extracted_constraints);
             roots.extend(extracted_roots);
         }
     }
@@ -309,12 +346,13 @@ fn collect_roots_and_constraints(
 fn unwrap_assert_chain(
     expr: ast::Expr,
     local_bindings: &HashMap<String, ast::Expr>,
+    next_constraint_id: &mut usize,
 ) -> (ast::Expr, Vec<PatternConstraint>) {
     let mut current = expr;
     let mut constraints = Vec::new();
 
     loop {
-        let Some(method_call) = ast::MethodCallExpr::cast(current.syntax().clone()) else {
+        let Some(method_call) = expr_as_method_call(&current) else {
             break;
         };
         let Some(name_ref) = method_call.name_ref() else {
@@ -328,12 +366,13 @@ fn unwrap_assert_chain(
         if let Some(arg) = method_call.arg_list().and_then(|args| args.args().next()) {
             let (resolved_text, referenced_vars) = resolve_constraint(&arg, local_bindings);
             constraints.push(PatternConstraint {
-                id: format!("constraint_{}", constraints.len()),
+                id: format!("constraint_{}", *next_constraint_id),
                 source_text: arg.syntax().text().to_string(),
                 resolved_text,
                 referenced_vars,
                 range: span_from_text_range(arg.syntax().text_range()),
             });
+            *next_constraint_id += 1;
         }
 
         let Some(receiver) = method_call.receiver() else {
@@ -381,6 +420,129 @@ fn collect_variable_references(expr: &ast::Expr) -> Vec<String> {
         }
     }
     vars.into_iter().collect()
+}
+
+fn collect_known_pattern_vars(nodes: &[PatternNode], roots: &[String]) -> BTreeSet<String> {
+    let mut vars = BTreeSet::new();
+    for node in nodes {
+        vars.insert(node.id.clone());
+    }
+    for root in roots {
+        vars.insert(root.clone());
+    }
+    vars
+}
+
+fn closure_block_body(closure: ast::ClosureExpr) -> Option<ast::BlockExpr> {
+    match closure.body()? {
+        ast::Expr::BlockExpr(block) => Some(block),
+        _ => None,
+    }
+}
+
+fn expr_as_closure(expr: &ast::Expr) -> Option<ast::ClosureExpr> {
+    ast::ClosureExpr::cast(expr.syntax().clone())
+}
+
+fn expr_as_call(expr: &ast::Expr) -> Option<ast::CallExpr> {
+    match expr {
+        ast::Expr::CallExpr(call) => Some(call.clone()),
+        _ => ast::CallExpr::cast(expr.syntax().clone()),
+    }
+}
+
+fn expr_as_block(expr: &ast::Expr) -> Option<ast::BlockExpr> {
+    match expr {
+        ast::Expr::BlockExpr(block) => Some(block.clone()),
+        _ => ast::BlockExpr::cast(expr.syntax().clone()),
+    }
+}
+
+fn expr_as_method_call(expr: &ast::Expr) -> Option<ast::MethodCallExpr> {
+    match expr {
+        ast::Expr::MethodCallExpr(method_call) => Some(method_call.clone()),
+        _ => ast::MethodCallExpr::cast(expr.syntax().clone()),
+    }
+}
+
+fn extract_action_effects(
+    block: &ast::BlockExpr,
+    known_pattern_vars: &BTreeSet<String>,
+) -> Vec<ActionEffect> {
+    let mut effects = Vec::new();
+    let mut next_effect_id = 0usize;
+    for method_call in block.syntax().descendants().filter_map(ast::MethodCallExpr::cast) {
+        let Some(receiver) = method_call.receiver() else {
+            continue;
+        };
+        if expr_variable_name(receiver) != Some("ctx".to_string()) {
+            continue;
+        }
+        let Some(name_ref) = method_call.name_ref() else {
+            continue;
+        };
+        let method_name = name_ref.syntax().text().to_string();
+        if method_name != "union" && !method_name.starts_with("insert_") {
+            continue;
+        }
+        let referenced_pat_vars = collect_pat_field_references(method_call.syntax())
+            .into_iter()
+            .filter(|name| known_pattern_vars.contains(name))
+            .collect::<Vec<_>>();
+        effects.push(ActionEffect {
+            id: format!("effect_{next_effect_id}"),
+            source_text: method_call.syntax().text().to_string(),
+            referenced_pat_vars,
+            range: span_from_text_range(method_call.syntax().text_range()),
+        });
+        next_effect_id += 1;
+    }
+    effects
+}
+
+fn collect_pat_field_references(node: &SyntaxNode) -> Vec<String> {
+    let mut vars = BTreeSet::new();
+    for path_expr in node.descendants().filter_map(ast::PathExpr::cast) {
+        let text = path_expr.syntax().text().to_string();
+        if let Some(rest) = text.strip_prefix("pat.") {
+            if let Some(field) = rest.split('.').next() {
+                vars.insert(field.to_string());
+            }
+        }
+    }
+    vars.into_iter().collect()
+}
+
+fn extract_seed_facts(function_body: &ast::BlockExpr) -> Vec<SeedFact> {
+    let mut facts = Vec::new();
+    let mut next_fact_id = 0usize;
+    for method_call in function_body
+        .syntax()
+        .descendants()
+        .filter_map(ast::MethodCallExpr::cast)
+    {
+        let Some(name_ref) = method_call.name_ref() else {
+            continue;
+        };
+        if name_ref.syntax().text() != "commit" {
+            continue;
+        }
+        let Some(receiver) = method_call.receiver() else {
+            continue;
+        };
+        let referenced_vars = collect_variable_references(&receiver)
+            .into_iter()
+            .collect::<Vec<_>>();
+        facts.push(SeedFact {
+            id: format!("seed_{next_fact_id}"),
+            source_text: method_call.syntax().text().to_string(),
+            committed_root: receiver.syntax().text().to_string(),
+            referenced_vars,
+            range: span_from_text_range(method_call.syntax().text_range()),
+        });
+        next_fact_id += 1;
+    }
+    facts
 }
 
 fn block_pat_roots(block: &ast::BlockExpr) -> Vec<String> {
@@ -460,17 +622,22 @@ mod tests {
     fn extracts_add_rule_pattern_closure() {
         let src = r#"
 fn demo() {
+    let expr = Add::new(&Const::new(1), &Const::new(2));
+    expr.commit();
     MyTx::add_rule("demo", ruleset, || {
         let l = Const::query();
         let r = Const::query();
         let p = Add::query(&l, &r);
         let eq = x1.handle().eq(&(x.handle() + (&1_i64).as_handle()));
         DemoPat::new(l, r, p).assert(eq)
-    }, |ctx, pat| {});
+    }, |ctx, pat| {
+        let op_value = ctx.insert_const(3);
+        ctx.union(pat.p, op_value);
+    });
 }
 "#;
         let ir = extract(src, "let p =");
-        assert!(matches!(ir.scope.kind, ScopeKind::AddRulePatternClosure));
+        assert!(matches!(ir.scope.kind, ScopeKind::AddRuleCall));
         assert_eq!(ir.nodes.len(), 3);
         assert_eq!(ir.edges.len(), 2);
         assert_eq!(ir.roots, vec!["l", "r", "p"]);
@@ -480,6 +647,9 @@ fn demo() {
             ir.constraints[0].resolved_text,
             "x1.handle().eq(&(x.handle() + (&1_i64).as_handle()))"
         );
+        assert!(ir.constraints[0].referenced_vars.is_empty());
+        assert_eq!(ir.action_effects.len(), 2);
+        assert_eq!(ir.seed_facts.len(), 1);
     }
 
     #[test]
@@ -501,6 +671,8 @@ fn demo() {
         assert_eq!(ir.constraints[0].source_text, "l_r_eq");
         assert_eq!(ir.constraints[0].resolved_text, "l.handle().eq(&r.handle())");
         assert_eq!(ir.constraints[0].referenced_vars, vec!["l", "r"]);
+        let assert_arg_offset = src.rfind("l_r_eq").unwrap();
+        assert_eq!(ir.constraints[0].range.start, assert_arg_offset);
     }
 
     #[test]
@@ -532,6 +704,85 @@ fn demo() {
     }
 
     #[test]
+    fn keeps_inline_assertion_text() {
+        let src = r#"
+fn demo() {
+    MyTx::add_rule("demo", ruleset, || {
+        let l = Const::query();
+        let r = Const::query();
+        let p = Add::query(&l, &r);
+        DemoPat::new(l, r, p).assert(l.handle().eq(&r.handle()))
+    }, |ctx, pat| {});
+}
+"#;
+        let ir = extract(src, ".assert(");
+        assert_eq!(ir.constraints.len(), 1);
+        assert_eq!(ir.constraints[0].source_text, "l.handle().eq(&r.handle())");
+        assert_eq!(ir.constraints[0].resolved_text, "l.handle().eq(&r.handle())");
+        assert_eq!(ir.constraints[0].referenced_vars, vec!["l", "r"]);
+    }
+
+    #[test]
+    fn preserves_multi_assert_order_and_unique_ids() {
+        let src = r#"
+fn demo() {
+    MyTx::add_rule("demo", ruleset, || {
+        let l = Const::query();
+        let r = Const::query();
+        let p = Add::query(&l, &r);
+        let eq1 = l.handle().eq(&r.handle());
+        let eq2 = r.handle().eq(&l.handle());
+        DemoPat::new(l, r, p).assert(eq1).assert(eq2)
+    }, |ctx, pat| {});
+}
+"#;
+        let ir = extract(src, "eq2");
+        assert_eq!(ir.constraints.len(), 2);
+        assert_eq!(ir.constraints[0].source_text, "eq1");
+        assert_eq!(ir.constraints[1].source_text, "eq2");
+        assert_ne!(ir.constraints[0].id, ir.constraints[1].id);
+    }
+
+    #[test]
+    fn keeps_constraint_ids_unique_across_pattern_hosts() {
+        let src = r#"
+fn demo() {
+    let l = Const::query();
+    let r = Const::query();
+    let p = Add::query(&l, &r);
+    let eq = l.handle().eq(&r.handle());
+    DemoPat::new(l, r, p).assert(eq);
+    DemoPat::new(l, r, p).assert(eq)
+}
+"#;
+        let ir = extract(src, "DemoPat::new(l, r, p).assert(eq);");
+        assert_eq!(ir.constraints.len(), 2);
+        assert_eq!(ir.constraints[0].id, "constraint_0");
+        assert_eq!(ir.constraints[1].id, "constraint_1");
+    }
+
+    #[test]
+    fn ignores_non_pattern_blocks_followed_by_assert_like_methods() {
+        let src = r#"
+fn helper() {
+    let l = Const::query();
+    let r = Const::query();
+    let p = Add::query(&l, &r);
+    let eq = l.handle().eq(&r.handle());
+    {
+        let tmp = 1;
+        tmp
+    }
+    .assert(eq);
+    DemoPat::new(l, r, p)
+}
+"#;
+        let ir = extract(src, "DemoPat::new");
+        assert_eq!(ir.roots, vec!["l", "r", "p"]);
+        assert!(ir.constraints.is_empty());
+    }
+
+    #[test]
     fn extracts_pattern_function() {
         let src = r#"
 fn step_pat<PR: PatRecSgl>() -> StepPat<PR> {
@@ -545,6 +796,8 @@ fn step_pat<PR: PatRecSgl>() -> StepPat<PR> {
         assert!(matches!(ir.scope.kind, ScopeKind::PatternFunction));
         assert_eq!(ir.nodes.len(), 3);
         assert_eq!(ir.roots, vec!["l", "r", "p"]);
+        assert!(ir.action_effects.is_empty());
+        assert!(ir.seed_facts.is_empty());
     }
 
     #[test]

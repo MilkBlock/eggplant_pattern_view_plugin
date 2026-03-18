@@ -4,7 +4,7 @@ export interface TextSpan {
 }
 
 export interface ScopeInfo {
-  kind: "add_rule_pattern_closure" | "pattern_function";
+  kind: "add_rule_call" | "pattern_function";
   text_range: TextSpan;
 }
 
@@ -32,6 +32,21 @@ export interface PatternConstraint {
   range: TextSpan;
 }
 
+export interface ActionEffect {
+  id: string;
+  source_text: string;
+  referenced_pat_vars: string[];
+  range: TextSpan;
+}
+
+export interface SeedFact {
+  id: string;
+  source_text: string;
+  committed_root: string;
+  referenced_vars: string[];
+  range: TextSpan;
+}
+
 export interface Diagnostic {
   severity: "error" | "warning";
   message: string;
@@ -44,5 +59,7 @@ export interface PatternIr {
   edges: PatternEdge[];
   roots: string[];
   constraints: PatternConstraint[];
+  action_effects: ActionEffect[];
+  seed_facts: SeedFact[];
   diagnostics: Diagnostic[];
 }
