@@ -31,6 +31,12 @@ enum Scope {
     Function(ast::Fn),
 }
 
+#[derive(Debug, Clone)]
+struct ActionClosureBindings {
+    ctx_name: String,
+    pat_name: String,
+}
+
 pub fn extract_pattern(source: &str, options: ExtractOptions) -> Result<PatternIr> {
     let parse = SourceFile::parse(source, options.edition);
     let file = parse.tree();
@@ -116,6 +122,9 @@ fn extract_from_rule_call(call: ast::CallExpr) -> Result<PatternIr> {
         .and_then(expr_as_closure)
         .ok_or_else(|| anyhow!("add_rule pattern closure not found"))?;
     let action_closure = args.get(3).and_then(expr_as_closure);
+    let action_bindings = action_closure
+        .as_ref()
+        .and_then(action_closure_bindings);
     let enclosing_function = call.syntax().ancestors().find_map(ast::Fn::cast);
     let Some(body) = pattern_closure.body() else {
         return Err(anyhow!("pattern closure has no body"));
@@ -131,6 +140,7 @@ fn extract_from_rule_call(call: ast::CallExpr) -> Result<PatternIr> {
             text_range: span_from_text_range(call.syntax().text_range()),
         },
         action_closure.and_then(closure_block_body),
+        action_bindings,
         enclosing_function.and_then(|function| function.body()),
         Some(call),
     )
@@ -149,6 +159,7 @@ fn extract_from_function(function: ast::Fn) -> Result<PatternIr> {
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -156,6 +167,7 @@ fn extract_from_block(
     block: ast::BlockExpr,
     scope: ScopeInfo,
     action_block: Option<ast::BlockExpr>,
+    action_bindings: Option<ActionClosureBindings>,
     enclosing_function_body: Option<ast::BlockExpr>,
     rule_call: Option<ast::CallExpr>,
 ) -> Result<PatternIr> {
@@ -227,8 +239,10 @@ fn extract_from_block(
             .collect();
     }
 
-    if let Some(action_block) = action_block {
-        action_effects = extract_action_effects(&action_block, &known_pattern_vars);
+    if let Some(action_block) = action_block
+        && let Some(action_bindings) = action_bindings
+    {
+        action_effects = extract_action_effects(&action_block, &action_bindings, &known_pattern_vars);
     }
 
     if let Some(function_body) = enclosing_function_body
@@ -472,6 +486,7 @@ fn expr_as_method_call(expr: &ast::Expr) -> Option<ast::MethodCallExpr> {
 
 fn extract_action_effects(
     block: &ast::BlockExpr,
+    bindings: &ActionClosureBindings,
     known_pattern_vars: &BTreeSet<String>,
 ) -> Vec<ActionEffect> {
     let mut effects = Vec::new();
@@ -480,7 +495,7 @@ fn extract_action_effects(
         let Some(receiver) = method_call.receiver() else {
             continue;
         };
-        if expr_variable_name(receiver) != Some("ctx".to_string()) {
+        if expr_variable_name(receiver) != Some(bindings.ctx_name.clone()) {
             continue;
         }
         let Some(name_ref) = method_call.name_ref() else {
@@ -490,7 +505,7 @@ fn extract_action_effects(
         if method_name != "union" && !method_name.starts_with("insert_") {
             continue;
         }
-        let referenced_pat_vars = collect_pat_field_references(method_call.syntax())
+        let referenced_pat_vars = collect_pat_field_references(method_call.syntax(), &bindings.pat_name)
             .into_iter()
             .filter(|name| known_pattern_vars.contains(name))
             .collect::<Vec<_>>();
@@ -505,10 +520,10 @@ fn extract_action_effects(
     effects
 }
 
-fn collect_pat_field_references(node: &SyntaxNode) -> Vec<String> {
+fn collect_pat_field_references(node: &SyntaxNode, pat_name: &str) -> Vec<String> {
     let mut vars = BTreeSet::new();
     for field_expr in node.descendants().filter_map(ast::FieldExpr::cast) {
-        let Some(first_pat_field) = first_pat_field_name(&field_expr) else {
+        let Some(first_pat_field) = first_pat_field_name(&field_expr, pat_name) else {
             continue;
         };
         vars.insert(first_pat_field);
@@ -520,6 +535,11 @@ fn extract_seed_facts(function_body: &ast::BlockExpr, rule_call: &ast::CallExpr)
     let mut facts = Vec::new();
     let mut next_fact_id = 0usize;
     let rule_range = rule_call.syntax().text_range();
+    let enclosing_item_range = function_body
+        .syntax()
+        .ancestors()
+        .find_map(ast::Item::cast)
+        .map(|item| item.syntax().text_range());
     for method_call in function_body
         .syntax()
         .descendants()
@@ -537,6 +557,15 @@ fn extract_seed_facts(function_body: &ast::BlockExpr, rule_call: &ast::CallExpr)
             .skip(1)
             .any(|ancestor| ast::ClosureExpr::can_cast(ancestor.kind()))
         {
+            continue;
+        }
+        let nearest_item_range = method_call
+            .syntax()
+            .ancestors()
+            .skip(1)
+            .find_map(ast::Item::cast)
+            .map(|item| item.syntax().text_range());
+        if nearest_item_range != enclosing_item_range {
             continue;
         }
         let commit_range = method_call.syntax().text_range();
@@ -564,13 +593,13 @@ fn extract_seed_facts(function_body: &ast::BlockExpr, rule_call: &ast::CallExpr)
     facts
 }
 
-fn first_pat_field_name(field_expr: &ast::FieldExpr) -> Option<String> {
+fn first_pat_field_name(field_expr: &ast::FieldExpr, pat_name: &str) -> Option<String> {
     let mut current = field_expr.clone();
     loop {
         let receiver = current.expr()?;
         match receiver {
             ast::Expr::PathExpr(path) => {
-                if path.syntax().text() == "pat" {
+                if path.syntax().text() == pat_name {
                     return current
                         .name_ref()
                         .map(|name_ref| name_ref.syntax().text().to_string());
@@ -583,6 +612,13 @@ fn first_pat_field_name(field_expr: &ast::FieldExpr) -> Option<String> {
             _ => return None,
         }
     }
+}
+
+fn action_closure_bindings(closure: &ast::ClosureExpr) -> Option<ActionClosureBindings> {
+    let mut params = closure.param_list()?.params();
+    let ctx_name = ident_pat_name(params.next()?.pat()?)?;
+    let pat_name = ident_pat_name(params.next()?.pat()?)?;
+    Some(ActionClosureBindings { ctx_name, pat_name })
 }
 
 fn block_pat_roots(block: &ast::BlockExpr) -> Vec<String> {
@@ -825,6 +861,26 @@ fn demo() {
     }
 
     #[test]
+    fn extracts_action_effects_with_non_default_binding_names() {
+        let src = r#"
+fn demo() {
+    MyTx::add_rule("demo", ruleset, || {
+        let l = Const::query();
+        let p = Add::query(&l, &l);
+        DemoPat::new(l, p)
+    }, |tx, matched| {
+        let folded = tx.insert_const(tx.devalue(matched.l.num));
+        tx.union(matched.p, folded);
+    });
+}
+"#;
+        let ir = extract(src, "tx.insert_const");
+        assert_eq!(ir.action_effects.len(), 2);
+        assert_eq!(ir.action_effects[0].referenced_pat_vars, vec!["l"]);
+        assert_eq!(ir.action_effects[1].referenced_pat_vars, vec!["p"]);
+    }
+
+    #[test]
     fn ignores_unrelated_add_rule_calls() {
         let src = r#"
 fn demo() {
@@ -892,6 +948,32 @@ fn demo() {
         assert_eq!(ir.seed_facts.len(), 1);
         assert_eq!(ir.seed_facts[0].committed_root, "before");
         assert_eq!(ir.seed_facts[0].source_text, "before.commit()");
+    }
+
+    #[test]
+    fn seed_facts_ignore_nested_item_bodies() {
+        let src = r#"
+fn demo() {
+    let before = Add::new(&Const::new(1), &Const::new(2));
+    before.commit();
+    fn helper() {
+        let nested = Add::new(&Const::new(5), &Const::new(6));
+        nested.commit();
+    }
+    MyTx::add_rule("demo", ruleset, || {
+        let l = Const::query();
+        let r = Const::query();
+        let p = Add::query(&l, &r);
+        DemoPat::new(l, r, p)
+    }, |ctx, pat| {
+        let folded = ctx.insert_const(6);
+        ctx.union(pat.p, folded);
+    });
+}
+"#;
+        let ir = extract(src, "DemoPat::new");
+        assert_eq!(ir.seed_facts.len(), 1);
+        assert_eq!(ir.seed_facts[0].committed_root, "before");
     }
 
     #[test]
