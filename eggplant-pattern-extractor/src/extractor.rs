@@ -502,12 +502,28 @@ fn extract_action_effects(
 
 fn collect_pat_field_references(node: &SyntaxNode) -> Vec<String> {
     let mut vars = BTreeSet::new();
-    for path_expr in node.descendants().filter_map(ast::PathExpr::cast) {
-        let text = path_expr.syntax().text().to_string();
-        if let Some(rest) = text.strip_prefix("pat.") {
-            if let Some(field) = rest.split('.').next() {
-                vars.insert(field.to_string());
+    for field_expr in node.descendants().filter_map(ast::FieldExpr::cast) {
+        let Some(receiver) = field_expr.expr() else {
+            continue;
+        };
+        let Some(name_ref) = field_expr.name_ref() else {
+            continue;
+        };
+        match receiver {
+            ast::Expr::PathExpr(path) => {
+                if path.syntax().text() == "pat" {
+                    vars.insert(name_ref.syntax().text().to_string());
+                }
             }
+            ast::Expr::FieldExpr(inner) => {
+                if let Some(inner_receiver) = inner.expr()
+                    && let ast::Expr::PathExpr(path) = inner_receiver
+                    && path.syntax().text() == "pat"
+                {
+                    vars.insert(name_ref.syntax().text().to_string());
+                }
+            }
+            _ => {}
         }
     }
     vars.into_iter().collect()
@@ -649,6 +665,8 @@ fn demo() {
         );
         assert!(ir.constraints[0].referenced_vars.is_empty());
         assert_eq!(ir.action_effects.len(), 2);
+        assert_eq!(ir.action_effects[1].source_text, "ctx.union(pat.p, op_value)");
+        assert_eq!(ir.action_effects[1].referenced_pat_vars, vec!["p"]);
         assert_eq!(ir.seed_facts.len(), 1);
     }
 
@@ -759,6 +777,26 @@ fn demo() {
         assert_eq!(ir.constraints.len(), 2);
         assert_eq!(ir.constraints[0].id, "constraint_0");
         assert_eq!(ir.constraints[1].id, "constraint_1");
+    }
+
+    #[test]
+    fn captures_nested_pat_field_reads_in_action_effects() {
+        let src = r#"
+fn demo() {
+    MyTx::add_rule("demo", ruleset, || {
+        let l = Const::query();
+        let p = Add::query(&l, &l);
+        DemoPat::new(l, p)
+    }, |ctx, pat| {
+        let folded = ctx.insert_const(ctx.devalue(pat.l.num));
+        ctx.union(pat.p, folded);
+    });
+}
+"#;
+        let ir = extract(src, "ctx.devalue");
+        assert_eq!(ir.action_effects.len(), 2);
+        assert_eq!(ir.action_effects[0].referenced_pat_vars, vec!["l"]);
+        assert_eq!(ir.action_effects[1].referenced_pat_vars, vec!["p"]);
     }
 
     #[test]

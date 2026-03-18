@@ -38,7 +38,12 @@ suite("eggplant pattern headless tests", () => {
     assert.equal(ir.constraints[0].source_text, "eq");
     assert.match(ir.constraints[0].resolved_text, /x1\.handle\(\)\.eq/);
     assert.equal(ir.action_effects.length, 2);
+    assert.equal(ir.action_effects[1].source_text, "ctx.union(pat.p, op_value)");
+    assert.deepEqual(ir.action_effects[1].referenced_pat_vars, ["p"]);
     assert.equal(ir.seed_facts.length, 1);
+
+    const dot = patternIrToDot(ir);
+    assert.match(dot, /"effect:effect_1" -> "p"/);
   });
 
   test("extractor resolves assertion references for block host patterns", () => {
