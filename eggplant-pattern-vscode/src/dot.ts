@@ -51,12 +51,23 @@ export function patternIrToDot(ir: PatternIr): string {
     lines.push(`    label=${quote("Action Effects")};`);
     lines.push("    color=\"#a55d35\";");
     lines.push("    style=rounded;");
+    const actionBindingMap = new Map(
+      ir.action_effects
+        .filter((effect) => effect.bound_var !== null)
+        .map((effect) => [effect.bound_var as string, `effect:${effect.id}`])
+    );
     for (const effect of ir.action_effects) {
       const id = `effect:${effect.id}`;
       lines.push(`    ${quote(id)} [label=${quote(effect.source_text)}, shape=note, fillcolor=\"#fff0e8\", color=\"#a55d35\"];`);
       const targets = effect.referenced_pat_vars.filter((name) => nodeSet.has(name) || rootSet.has(name));
       for (const target of targets) {
         lines.push(`    ${quote(id)} -> ${quote(target)} [style=dashed, color=\"#c47a4a\"];`);
+      }
+      for (const actionVar of effect.referenced_action_vars) {
+        const target = actionBindingMap.get(actionVar);
+        if (target) {
+          lines.push(`    ${quote(id)} -> ${quote(target)} [style=dashed, color=\"#c47a4a\"];`);
+        }
       }
     }
     lines.push("  }");

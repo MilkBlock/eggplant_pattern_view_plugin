@@ -34,7 +34,7 @@ enum Scope {
 #[derive(Debug, Clone)]
 struct ActionClosureBindings {
     ctx_name: String,
-    pat_name: String,
+    pat_name: Option<String>,
 }
 
 pub fn extract_pattern(source: &str, options: ExtractOptions) -> Result<PatternIr> {
@@ -251,7 +251,7 @@ fn extract_from_block(
         seed_facts = extract_seed_facts(&function_body, &rule_call);
     }
 
-    if roots.is_empty() {
+    if roots.is_empty() && action_effects.is_empty() {
         diagnostics.push(Diagnostic {
             severity: crate::ir::Severity::Warning,
             message: "no supported pattern roots found in scope".into(),
@@ -494,6 +494,7 @@ fn extract_action_effects(
     bindings: &ActionClosureBindings,
     known_pattern_vars: &BTreeSet<String>,
 ) -> Vec<ActionEffect> {
+    let action_bindings = collect_action_local_bindings(block, &bindings.ctx_name);
     let mut effects = Vec::new();
     let mut next_effect_id = 0usize;
     for method_call in block.syntax().descendants().filter_map(ast::MethodCallExpr::cast) {
@@ -519,14 +520,25 @@ fn extract_action_effects(
         if method_name != "union" && !method_name.starts_with("insert_") {
             continue;
         }
-        let referenced_pat_vars = collect_pat_field_references(method_call.syntax(), &bindings.pat_name)
+        let referenced_pat_vars = collect_pat_field_references(method_call.syntax(), bindings.pat_name.as_deref())
             .into_iter()
             .filter(|name| known_pattern_vars.contains(name))
             .collect::<Vec<_>>();
+        let referenced_action_vars = method_call
+            .arg_list()
+            .into_iter()
+            .flat_map(|args| args.args())
+            .flat_map(|arg| collect_variable_references(&arg))
+            .filter(|name| action_bindings.contains(name))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
         effects.push(ActionEffect {
             id: format!("effect_{next_effect_id}"),
+            bound_var: enclosing_let_binding_name(method_call.syntax()),
             source_text: method_call.syntax().text().to_string(),
             referenced_pat_vars,
+            referenced_action_vars,
             range: span_from_text_range(method_call.syntax().text_range()),
         });
         next_effect_id += 1;
@@ -534,7 +546,34 @@ fn extract_action_effects(
     effects
 }
 
-fn collect_pat_field_references(node: &SyntaxNode, pat_name: &str) -> Vec<String> {
+fn collect_action_local_bindings(block: &ast::BlockExpr, ctx_name: &str) -> BTreeSet<String> {
+    block
+        .statements()
+        .filter_map(|stmt| match stmt {
+            ast::Stmt::LetStmt(let_stmt) => Some(let_stmt),
+            _ => None,
+        })
+        .filter_map(|let_stmt| {
+            let init = let_stmt.initializer()?;
+            let method_call = expr_as_method_call(&init)?;
+            let receiver = method_call.receiver()?;
+            (expr_variable_name(receiver) == Some(ctx_name.to_string()))
+                .then(|| ident_pat_name(let_stmt.pat()?))
+                .flatten()
+        })
+        .collect()
+}
+
+fn enclosing_let_binding_name(node: &SyntaxNode) -> Option<String> {
+    let let_stmt = node.ancestors().find_map(ast::LetStmt::cast)?;
+    let init = let_stmt.initializer()?;
+    (init.syntax() == node).then(|| ident_pat_name(let_stmt.pat()?)).flatten()
+}
+
+fn collect_pat_field_references(node: &SyntaxNode, pat_name: Option<&str>) -> Vec<String> {
+    let Some(pat_name) = pat_name else {
+        return Vec::new();
+    };
     let mut vars = BTreeSet::new();
     for field_expr in node.descendants().filter_map(ast::FieldExpr::cast) {
         let Some(first_pat_field) = first_pat_field_name(&field_expr, pat_name) else {
@@ -631,7 +670,10 @@ fn first_pat_field_name(field_expr: &ast::FieldExpr, pat_name: &str) -> Option<S
 fn action_closure_bindings(closure: &ast::ClosureExpr) -> Option<ActionClosureBindings> {
     let mut params = closure.param_list()?.params();
     let ctx_name = ident_pat_name(params.next()?.pat()?)?;
-    let pat_name = ident_pat_name(params.next()?.pat()?)?;
+    let pat_name = params
+        .next()
+        .and_then(|param| param.pat())
+        .and_then(ident_pat_name);
     Some(ActionClosureBindings { ctx_name, pat_name })
 }
 
@@ -892,8 +934,10 @@ fn demo() {
 "#;
         let ir = extract(src, "tx.insert_const");
         assert_eq!(ir.action_effects.len(), 2);
+        assert_eq!(ir.action_effects[0].bound_var.as_deref(), Some("folded"));
         assert_eq!(ir.action_effects[0].referenced_pat_vars, vec!["l"]);
         assert_eq!(ir.action_effects[1].referenced_pat_vars, vec!["p"]);
+        assert_eq!(ir.action_effects[1].referenced_action_vars, vec!["folded"]);
     }
 
     #[test]
@@ -917,6 +961,30 @@ fn demo() {
         assert_eq!(ir.action_effects.len(), 2);
         assert_eq!(ir.action_effects[0].source_text, "ctx.insert_const(3)");
         assert_eq!(ir.action_effects[1].source_text, "ctx.union(pat.p, folded)");
+    }
+
+    #[test]
+    fn extracts_action_effects_for_wildcard_pat_seed_rules() {
+        let src = r#"
+fn demo() {
+    MyTx::add_rule("seed", ruleset, || {
+        #[eggplant::pat_vars_catch]
+        struct Unit {}
+    }, |ctx, _pat| {
+        let x = ctx.insert_m_var("x".to_owned());
+        let ln_x = ctx.insert_m_ln(x.clone());
+        ctx.insert_m_integral(ln_x, x.clone());
+    });
+}
+"#;
+        let ir = extract(src, "ctx.insert_m_ln");
+        assert!(ir.diagnostics.is_empty());
+        assert!(ir.roots.is_empty());
+        assert_eq!(ir.action_effects.len(), 3);
+        assert_eq!(ir.action_effects[0].bound_var.as_deref(), Some("x"));
+        assert_eq!(ir.action_effects[1].bound_var.as_deref(), Some("ln_x"));
+        assert_eq!(ir.action_effects[1].referenced_action_vars, vec!["x"]);
+        assert_eq!(ir.action_effects[2].referenced_action_vars, vec!["ln_x", "x"]);
     }
 
     #[test]

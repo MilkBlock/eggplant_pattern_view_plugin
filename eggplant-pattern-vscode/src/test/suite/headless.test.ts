@@ -164,8 +164,10 @@ fn demo() {
       action_effects: [
         {
           id: "effect_0",
+          bound_var: null,
           source_text: "ctx.union(pat.q, folded)",
           referenced_pat_vars: ["q"],
+          referenced_action_vars: [],
           range: { start: 8, end: 9 }
         }
       ],
@@ -195,5 +197,52 @@ fn demo() {
     assert.match(dot, /ctx\.union\(pat\.q, folded\)/);
     assert.match(dot, /cluster_seed_facts/);
     assert.match(dot, /expr\.commit\(\)/);
+  });
+
+  test("dot generation links action local bindings for seed rules", () => {
+    const ir: PatternIr = {
+      scope: {
+        kind: "add_rule_call",
+        text_range: { start: 0, end: 20 }
+      },
+      nodes: [],
+      edges: [],
+      roots: [],
+      constraints: [],
+      action_effects: [
+        {
+          id: "effect_0",
+          bound_var: "x",
+          source_text: "ctx.insert_m_var(\"x\".to_owned())",
+          referenced_pat_vars: [],
+          referenced_action_vars: [],
+          range: { start: 0, end: 1 }
+        },
+        {
+          id: "effect_1",
+          bound_var: "ln_x",
+          source_text: "ctx.insert_m_ln(x.clone())",
+          referenced_pat_vars: [],
+          referenced_action_vars: ["x"],
+          range: { start: 2, end: 3 }
+        },
+        {
+          id: "effect_2",
+          bound_var: null,
+          source_text: "ctx.insert_m_integral(ln_x, x.clone())",
+          referenced_pat_vars: [],
+          referenced_action_vars: ["ln_x", "x"],
+          range: { start: 4, end: 5 }
+        }
+      ],
+      seed_facts: [],
+      diagnostics: []
+    };
+
+    const dot = patternIrToDot(ir);
+
+    assert.match(dot, /"effect:effect_1" -> "effect:effect_0"/);
+    assert.match(dot, /"effect:effect_2" -> "effect:effect_1"/);
+    assert.match(dot, /"effect:effect_2" -> "effect:effect_0"/);
   });
 });

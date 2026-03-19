@@ -62,8 +62,10 @@ pub struct PatternConstraint {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ActionEffect {
     pub id: String,
+    pub bound_var: Option<String>,
     pub source_text: String,
     pub referenced_pat_vars: Vec<String>,
+    pub referenced_action_vars: Vec<String>,
     pub range: TextSpan,
 }
 

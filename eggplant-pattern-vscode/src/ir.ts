@@ -34,8 +34,10 @@ export interface PatternConstraint {
 
 export interface ActionEffect {
   id: string;
+  bound_var: string | null;
   source_text: string;
   referenced_pat_vars: string[];
+  referenced_action_vars: string[];
   range: TextSpan;
 }
 
