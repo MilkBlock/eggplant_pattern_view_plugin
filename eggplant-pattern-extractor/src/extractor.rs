@@ -89,7 +89,7 @@ fn is_add_rule_call(call: &ast::CallExpr) -> bool {
         return false;
     }
     call.arg_list()
-        .and_then(|args| args.args().nth(2))
+        .and_then(|args| args.args().nth(3))
         .and_then(|arg| expr_as_closure(&arg))
         .is_some()
 }
@@ -117,22 +117,15 @@ fn extract_from_rule_call(call: ast::CallExpr) -> Result<PatternIr> {
         .ok_or_else(|| anyhow!("add_rule call has no arg list"))?
         .args()
         .collect::<Vec<_>>();
-    let pattern_closure = args
+    let pattern_arg = args
         .get(2)
-        .and_then(expr_as_closure)
-        .ok_or_else(|| anyhow!("add_rule pattern closure not found"))?;
+        .ok_or_else(|| anyhow!("add_rule pattern argument not found"))?;
     let action_closure = args.get(3).and_then(expr_as_closure);
     let action_bindings = action_closure
         .as_ref()
         .and_then(action_closure_bindings);
     let enclosing_function = call.syntax().ancestors().find_map(ast::Fn::cast);
-    let Some(body) = pattern_closure.body() else {
-        return Err(anyhow!("pattern closure has no body"));
-    };
-    let block = match body {
-        ast::Expr::BlockExpr(block) => block,
-        _ => return Err(anyhow!("pattern closure body is not a block")),
-    };
+    let block = resolve_rule_pattern_block(&call, pattern_arg)?;
     extract_from_block(
         block,
         ScopeInfo {
@@ -144,6 +137,40 @@ fn extract_from_rule_call(call: ast::CallExpr) -> Result<PatternIr> {
         enclosing_function.and_then(|function| function.body()),
         Some(call),
     )
+}
+
+fn resolve_rule_pattern_block(call: &ast::CallExpr, pattern_arg: &ast::Expr) -> Result<ast::BlockExpr> {
+    if let Some(pattern_closure) = expr_as_closure(pattern_arg) {
+        let Some(body) = pattern_closure.body() else {
+            return Err(anyhow!("pattern closure has no body"));
+        };
+        return match body {
+            ast::Expr::BlockExpr(block) => Ok(block),
+            _ => Err(anyhow!("pattern closure body is not a block")),
+        };
+    }
+
+    let pattern_fn_name = expr_variable_name(pattern_arg.clone())
+        .and_then(|name| name.split("::").last().map(str::to_string))
+        .ok_or_else(|| anyhow!("add_rule pattern closure or function not found"))?;
+    let file_root = call
+        .syntax()
+        .ancestors()
+        .last()
+        .ok_or_else(|| anyhow!("failed to resolve syntax root for add_rule call"))?;
+    let pattern_fn = file_root
+        .descendants()
+        .filter_map(ast::Fn::cast)
+        .find(|function| {
+            function
+                .name()
+                .is_some_and(|name| name.syntax().text().to_string() == pattern_fn_name)
+                && function_looks_like_pattern(function)
+        })
+        .ok_or_else(|| anyhow!("referenced pattern function not found: {pattern_fn_name}"))?;
+    pattern_fn
+        .body()
+        .ok_or_else(|| anyhow!("pattern function has no body"))
 }
 
 fn extract_from_function(function: ast::Fn) -> Result<PatternIr> {
@@ -985,6 +1012,44 @@ fn demo() {
         assert_eq!(ir.action_effects[1].bound_var.as_deref(), Some("ln_x"));
         assert_eq!(ir.action_effects[1].referenced_action_vars, vec!["x"]);
         assert_eq!(ir.action_effects[2].referenced_action_vars, vec!["ln_x", "x"]);
+    }
+
+    #[test]
+    fn extracts_add_rule_with_pattern_function_reference_from_action_scope() {
+        let src = r#"
+#[eggplant::pat_vars]
+struct MulDistribPat<PR: PatRecSgl> {
+    a: Math,
+    b: Math,
+    c: Math,
+    mul: MMul,
+}
+
+fn mul_distrib_pat<PR: PatRecSgl>() -> MulDistribPat<PR> {
+    let a = Math::query_leaf();
+    let b = Math::query_leaf();
+    let c = Math::query_leaf();
+    let add = MAdd::query(&b, &c);
+    let mul = MMul::query(&a, &add);
+    MulDistribPat::new(a, b, c, mul)
+}
+
+fn demo(rs: Ruleset) {
+    MyTx::add_rule("mul_distrib", rs, mul_distrib_pat, |ctx, pat| {
+        let ab = ctx.insert_m_mul(pat.a, pat.b);
+        let ac = ctx.insert_m_mul(pat.a, pat.c);
+        let rhs = ctx.insert_m_add(ab, ac);
+        ctx.union(pat.mul, rhs);
+    });
+}
+"#;
+        let ir = extract(src, "let rhs = ctx.insert_m_add(ab, ac);");
+        assert!(matches!(ir.scope.kind, ScopeKind::AddRuleCall));
+        assert_eq!(ir.roots, vec!["a", "b", "c", "mul"]);
+        assert_eq!(ir.action_effects.len(), 4);
+        assert_eq!(ir.action_effects[2].bound_var.as_deref(), Some("rhs"));
+        assert_eq!(ir.action_effects[2].referenced_action_vars, vec!["ab", "ac"]);
+        assert_eq!(ir.action_effects[3].referenced_pat_vars, vec!["mul"]);
     }
 
     #[test]
