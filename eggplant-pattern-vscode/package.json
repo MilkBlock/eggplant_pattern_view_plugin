@@ -14,7 +14,11 @@
   ],
   "activationEvents": [
     "onLanguage:rust",
-    "onCommand:eggplant-pattern.preview"
+    "onCommand:eggplant-pattern.preview",
+    "onCommand:eggplant-pattern.showPatternDot",
+    "onCommand:eggplant-pattern.showActionDot",
+    "onCommand:eggplant-pattern.showCombinedDot",
+    "onCommand:eggplant-pattern.selectDotView"
   ],
   "main": "./out/extension.js",
   "extensionDependencies": [
@@ -25,8 +29,33 @@
       {
         "command": "eggplant-pattern.preview",
         "title": "Eggplant Pattern: Preview Current Scope"
+      },
+      {
+        "command": "eggplant-pattern.selectDotView",
+        "title": "Eggplant Pattern: Select DOT View"
+      },
+      {
+        "command": "eggplant-pattern.showPatternDot",
+        "title": "Eggplant Pattern: Show pattern.dot"
+      },
+      {
+        "command": "eggplant-pattern.showActionDot",
+        "title": "Eggplant Pattern: Show action.dot"
+      },
+      {
+        "command": "eggplant-pattern.showCombinedDot",
+        "title": "Eggplant Pattern: Show action + pattern.dot"
       }
     ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "eggplant-pattern.selectDotView",
+          "group": "navigation",
+          "when": "resourceLangId == rust"
+        }
+      ]
+    },
     "configuration": {
       "title": "Eggplant Pattern Preview",
       "properties": {
@@ -50,6 +79,12 @@
           "type": "string",
           "default": "graphviz-interactive-preview.preview.beside",
           "description": "Command used to display DOT preview content. Override only for testing or custom preview hosts."
+        },
+        "eggplantPattern.defaultDotView": {
+          "type": "string",
+          "enum": ["auto", "pattern", "action", "combined"],
+          "default": "auto",
+          "description": "Default DOT view mode. 'auto' chooses pattern/action/combined based on the cursor location."
         }
       }
     }

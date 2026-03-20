@@ -3,7 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { spawnSync } from "child_process";
 import { suite, test } from "mocha";
-import { patternIrToDot } from "../../dot";
+import { patternIrToDot, patternIrToDotWithMode } from "../../dot";
 import { PatternIr } from "../../ir";
 
 const WORKSPACE_ROOT = path.resolve(__dirname, "../../../../");
@@ -119,7 +119,9 @@ fn demo() {
     const ir: PatternIr = {
       scope: {
         kind: "pattern_function",
-        text_range: { start: 0, end: 10 }
+        text_range: { start: 0, end: 10 },
+        pattern_range: { start: 0, end: 10 },
+        action_range: null
       },
       nodes: [
         {
@@ -203,7 +205,9 @@ fn demo() {
     const ir: PatternIr = {
       scope: {
         kind: "add_rule_call",
-        text_range: { start: 0, end: 20 }
+        text_range: { start: 0, end: 20 },
+        pattern_range: { start: 0, end: 8 },
+        action_range: { start: 9, end: 20 }
       },
       nodes: [],
       edges: [],
@@ -241,8 +245,67 @@ fn demo() {
 
     const dot = patternIrToDot(ir);
 
+    assert.ok(dot.includes("MVar(\\\"x\\\".to_owned())"));
+    assert.match(dot, /MLn\(x\.clone\(\)\)/);
+    assert.match(dot, /MIntegral\(ln_x, x\.clone\(\)\)/);
     assert.match(dot, /"effect:effect_1" -> "effect:effect_0"/);
     assert.match(dot, /"effect:effect_2" -> "effect:effect_1"/);
     assert.match(dot, /"effect:effect_2" -> "effect:effect_0"/);
+  });
+
+  test("dot generation supports action-only and pattern-only views", () => {
+    const ir: PatternIr = {
+      scope: {
+        kind: "add_rule_call",
+        text_range: { start: 0, end: 20 },
+        pattern_range: { start: 0, end: 8 },
+        action_range: { start: 9, end: 20 }
+      },
+      nodes: [
+        {
+          id: "a",
+          kind: "query_leaf",
+          dsl_type: "Math",
+          label: "a: Math",
+          range: { start: 0, end: 1 },
+          inputs: []
+        },
+        {
+          id: "mul",
+          kind: "query",
+          dsl_type: "MMul",
+          label: "mul: MMul",
+          range: { start: 2, end: 3 },
+          inputs: ["a"]
+        }
+      ],
+      edges: [
+        { from: "mul", to: "a", kind: "operand", index: 0 }
+      ],
+      roots: ["a", "mul"],
+      constraints: [],
+      action_effects: [
+        {
+          id: "effect_0",
+          bound_var: null,
+          source_text: "ctx.insert_m_mul(pat.a, pat.a)",
+          referenced_pat_vars: ["a"],
+          referenced_action_vars: [],
+          range: { start: 10, end: 12 }
+        }
+      ],
+      seed_facts: [],
+      diagnostics: []
+    };
+
+    const patternDot = patternIrToDotWithMode(ir, "pattern");
+    assert.match(patternDot, /"mul" -> "a"/);
+    assert.equal(patternDot.includes("cluster_actions"), false);
+
+    const actionDot = patternIrToDotWithMode(ir, "action");
+    assert.equal(actionDot.includes("\"mul\" -> \"a\""), false);
+    assert.match(actionDot, /cluster_actions/);
+    assert.match(actionDot, /MMul\(pat\.a, pat\.a\)/);
+    assert.match(actionDot, /"effect:effect_0" -> "a"/);
   });
 });

@@ -131,6 +131,10 @@ fn extract_from_rule_call(call: ast::CallExpr) -> Result<PatternIr> {
         ScopeInfo {
             kind: ScopeKind::AddRuleCall,
             text_range: span_from_text_range(call.syntax().text_range()),
+            pattern_range: Some(span_from_text_range(pattern_arg.syntax().text_range())),
+            action_range: action_closure
+                .as_ref()
+                .map(|closure| span_from_text_range(closure.syntax().text_range())),
         },
         action_closure.and_then(closure_block_body),
         action_bindings,
@@ -177,11 +181,14 @@ fn extract_from_function(function: ast::Fn) -> Result<PatternIr> {
     let Some(body) = function.body() else {
         return Err(anyhow!("pattern function has no body"));
     };
+    let pattern_range = span_from_text_range(body.syntax().text_range());
     extract_from_block(
         body,
         ScopeInfo {
             kind: ScopeKind::PatternFunction,
             text_range: span_from_text_range(function.syntax().text_range()),
+            pattern_range: Some(pattern_range),
+            action_range: None,
         },
         None,
         None,

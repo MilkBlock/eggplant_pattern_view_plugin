@@ -49,6 +49,7 @@ suite("eggplant pattern extension", () => {
     await vscode.workspace.getConfiguration().update("eggplantPattern.extractorPath", undefined, vscode.ConfigurationTarget.Global);
     await vscode.workspace.getConfiguration().update("eggplantPattern.debounceMs", undefined, vscode.ConfigurationTarget.Global);
     await vscode.workspace.getConfiguration().update("eggplantPattern.previewCommand", undefined, vscode.ConfigurationTarget.Global);
+    await vscode.workspace.getConfiguration().update("eggplantPattern.defaultDotView", undefined, vscode.ConfigurationTarget.Global);
   });
 
   setup(async () => {
@@ -56,6 +57,7 @@ suite("eggplant pattern extension", () => {
     warningMessages.length = 0;
     await vscode.workspace.getConfiguration().update("eggplantPattern.autoPreview", false, vscode.ConfigurationTarget.Global);
     await vscode.workspace.getConfiguration().update("eggplantPattern.previewCommand", MOCK_PREVIEW_COMMAND, vscode.ConfigurationTarget.Global);
+    await vscode.workspace.getConfiguration().update("eggplantPattern.defaultDotView", "auto", vscode.ConfigurationTarget.Global);
   });
 
   test("manual preview renders add_rule closure scope", async () => {
@@ -67,8 +69,53 @@ suite("eggplant pattern extension", () => {
 
     assert.equal(previewCalls.length, 1);
     assert.equal(previewCalls[0].allowMultiplePanels, false);
+    assert.match(previewCalls[0].title, /pattern\.dot/);
     assert.match(previewCalls[0].content, /digraph EggplantPattern/);
     assert.match(previewCalls[0].content, /"p" -> "l"/);
+  });
+
+  test("manual preview from action code defaults to action.dot", async () => {
+    const editor = await openEditor(RUST_FIXTURE);
+    resetObservations();
+    placeCursor(editor, "ctx.union(pat.p, op_value)");
+
+    await vscode.commands.executeCommand("eggplant-pattern.preview");
+
+    assert.equal(previewCalls.length, 1);
+    assert.match(previewCalls[0].title, /action\.dot/);
+    assert.match(previewCalls[0].content, /cluster_actions/);
+    assert.equal(/"p" -> "l"/.test(previewCalls[0].content), false);
+  });
+
+  test("manual preview from add_rule token defaults to combined dot", async () => {
+    const editor = await openEditor(RUST_FIXTURE);
+    resetObservations();
+    placeCursor(editor, "MyTx::add_rule");
+
+    await vscode.commands.executeCommand("eggplant-pattern.preview");
+
+    assert.equal(previewCalls.length, 1);
+    assert.match(previewCalls[0].title, /action \+ pattern\.dot/);
+    assert.match(previewCalls[0].content, /cluster_actions/);
+    assert.match(previewCalls[0].content, /"p" -> "l"/);
+  });
+
+  test("manual mode commands re-render the current preview", async () => {
+    const editor = await openEditor(RUST_FIXTURE);
+    resetObservations();
+    placeCursor(editor, "MyTx::add_rule");
+
+    await vscode.commands.executeCommand("eggplant-pattern.preview");
+    await vscode.commands.executeCommand("eggplant-pattern.showActionDot");
+    await vscode.commands.executeCommand("eggplant-pattern.showPatternDot");
+    await vscode.commands.executeCommand("eggplant-pattern.showCombinedDot");
+
+    assert.equal(previewCalls.length, 4);
+    assert.match(previewCalls[1].title, /action\.dot/);
+    assert.equal(/"p" -> "l"/.test(previewCalls[1].content), false);
+    assert.match(previewCalls[2].title, /pattern\.dot/);
+    assert.equal(/cluster_actions/.test(previewCalls[2].content), false);
+    assert.match(previewCalls[3].title, /action \+ pattern\.dot/);
   });
 
   const graphvizSmokeTest = RUN_GRAPHVIZ_SMOKE_TEST ? test : test.skip;

@@ -23,6 +23,8 @@ pub enum ScopeKind {
 pub struct ScopeInfo {
     pub kind: ScopeKind,
     pub text_range: TextSpan,
+    pub pattern_range: Option<TextSpan>,
+    pub action_range: Option<TextSpan>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

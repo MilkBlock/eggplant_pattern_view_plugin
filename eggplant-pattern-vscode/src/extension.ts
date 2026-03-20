@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { patternIrToDot } from "./dot";
+import { DotViewMode, patternIrToDotWithMode } from "./dot";
 import { ExtractorError, runExtractor } from "./extractor";
 import { PatternIr } from "./ir";
 
@@ -20,6 +20,40 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
       await controller.requestPreview(editor, true);
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("eggplant-pattern.selectDotView", async () => {
+      const picked = await vscode.window.showQuickPick(
+        [
+          { label: "pattern.dot", mode: "pattern" as DotViewMode },
+          { label: "action.dot", mode: "action" as DotViewMode },
+          { label: "action + pattern.dot", mode: "combined" as DotViewMode }
+        ],
+        { placeHolder: "Select DOT view mode for the current preview" }
+      );
+      if (picked) {
+        await controller.showCurrentMode(picked.mode);
+      }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("eggplant-pattern.showPatternDot", async () => {
+      await controller.showCurrentMode("pattern");
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("eggplant-pattern.showActionDot", async () => {
+      await controller.showCurrentMode("action");
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("eggplant-pattern.showCombinedDot", async () => {
+      await controller.showCurrentMode("combined");
     })
   );
 
@@ -51,6 +85,7 @@ class PreviewController {
   private pending: PreviewRequest | undefined;
   private nextRequestId = 0;
   private lastAutoWarning: string | undefined;
+  private lastPreview: LastPreview | undefined;
 
   scheduleRefresh(editor?: vscode.TextEditor): void {
     const activeEditor = editor ?? vscode.window.activeTextEditor;
@@ -74,9 +109,37 @@ class PreviewController {
     this.pending = {
       editor,
       manual,
-      id: ++this.nextRequestId
+      id: ++this.nextRequestId,
+      forcedMode: undefined
     };
 
+    if (!this.running) {
+      await this.drainQueue();
+    }
+  }
+
+  async showCurrentMode(mode: DotViewMode): Promise<void> {
+    if (this.lastPreview) {
+      await renderDot(this.lastPreview.editor, this.lastPreview.ir, mode);
+      return;
+    }
+
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+      void vscode.window.showWarningMessage("Open a Rust editor to preview an eggplant pattern.");
+      return;
+    }
+    if (editor.document.languageId !== "rust") {
+      void vscode.window.showWarningMessage("Eggplant pattern preview only runs for Rust files.");
+      return;
+    }
+
+    this.pending = {
+      editor,
+      manual: true,
+      id: ++this.nextRequestId,
+      forcedMode: mode
+    };
     if (!this.running) {
       await this.drainQueue();
     }
@@ -103,7 +166,12 @@ class PreviewController {
       if (this.pending && this.pending.id > request.id) {
         return;
       }
-      await renderDot(request.editor, ir);
+      const mode = request.forcedMode ?? resolveDotViewMode(ir, offset);
+      await renderDot(request.editor, ir, mode);
+      this.lastPreview = {
+        editor: request.editor,
+        ir
+      };
       this.lastAutoWarning = undefined;
     } catch (error) {
       if (this.pending && this.pending.id > request.id) {
@@ -123,9 +191,37 @@ class PreviewController {
   }
 }
 
-async function renderDot(editor: vscode.TextEditor, ir: PatternIr): Promise<void> {
-  const dot = patternIrToDot(ir);
-  await showPreview(editor, dot);
+function containsOffset(range: { start: number; end: number } | null, offset: number): boolean {
+  return range !== null && offset >= range.start && offset <= range.end;
+}
+
+function configuredDefaultDotView(): DotViewMode | "auto" {
+  return vscode.workspace.getConfiguration().get<DotViewMode | "auto">(
+    "eggplantPattern.defaultDotView",
+    "auto"
+  );
+}
+
+function resolveDotViewMode(ir: PatternIr, offset: number): DotViewMode {
+  const configured = configuredDefaultDotView();
+  if (configured !== "auto") {
+    return configured;
+  }
+  if (ir.scope.kind === "pattern_function") {
+    return "pattern";
+  }
+  if (containsOffset(ir.scope.action_range, offset)) {
+    return "action";
+  }
+  if (containsOffset(ir.scope.pattern_range, offset)) {
+    return "pattern";
+  }
+  return "combined";
+}
+
+async function renderDot(editor: vscode.TextEditor, ir: PatternIr, mode: DotViewMode): Promise<void> {
+  const dot = patternIrToDotWithMode(ir, mode);
+  await showPreview(editor, dot, mode);
 }
 
 async function renderNotice(editor: vscode.TextEditor, message: string): Promise<void> {
@@ -136,7 +232,7 @@ async function renderNotice(editor: vscode.TextEditor, message: string): Promise
     `  status [label=${JSON.stringify(message)}];`,
     "}"
   ].join("\n");
-  await showPreview(editor, dot);
+  await showPreview(editor, dot, "combined");
 }
 
 async function tryRenderNotice(editor: vscode.TextEditor, message: string): Promise<boolean> {
@@ -149,12 +245,23 @@ async function tryRenderNotice(editor: vscode.TextEditor, message: string): Prom
   }
 }
 
-async function showPreview(editor: vscode.TextEditor, content: string): Promise<void> {
+function modeLabel(mode: DotViewMode): string {
+  switch (mode) {
+    case "pattern":
+      return "pattern.dot";
+    case "action":
+      return "action.dot";
+    case "combined":
+      return "action + pattern.dot";
+  }
+}
+
+async function showPreview(editor: vscode.TextEditor, content: string, mode: DotViewMode): Promise<void> {
   const previewCommand = vscode.workspace.getConfiguration().get<string>(
     "eggplantPattern.previewCommand",
     GRAPHVIZ_PREVIEW_COMMAND
   );
-  const title = `Eggplant Pattern: ${editor.document.fileName.split("/").pop() ?? "Preview"}`;
+  const title = `Eggplant Pattern (${modeLabel(mode)}): ${editor.document.fileName.split("/").pop() ?? "Preview"}`;
   try {
     await vscode.commands.executeCommand(previewCommand, {
       document: editor.document,
@@ -199,6 +306,12 @@ interface PreviewRequest {
   editor: vscode.TextEditor;
   manual: boolean;
   id: number;
+  forcedMode: DotViewMode | undefined;
+}
+
+interface LastPreview {
+  editor: vscode.TextEditor;
+  ir: PatternIr;
 }
 
 export function deactivate(): void {}

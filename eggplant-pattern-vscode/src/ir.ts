@@ -6,6 +6,8 @@ export interface TextSpan {
 export interface ScopeInfo {
   kind: "add_rule_call" | "pattern_function";
   text_range: TextSpan;
+  pattern_range: TextSpan | null;
+  action_range: TextSpan | null;
 }
 
 export interface PatternNode {
