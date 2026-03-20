@@ -1,0 +1,111 @@
+{
+  "name": "eggplant-pattern-vscode",
+  "displayName": "Eggplant Pattern Preview",
+  "description": "Live preview of cursor-scoped eggplant Rust patterns in VSCode.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Visualization"
+  ],
+  "activationEvents": [
+    "onLanguage:rust",
+    "onCommand:eggplant-pattern.preview",
+    "onCommand:eggplant-pattern.showPatternDot",
+    "onCommand:eggplant-pattern.showActionDot",
+    "onCommand:eggplant-pattern.showCombinedDot",
+    "onCommand:eggplant-pattern.selectDotView"
+  ],
+  "main": "./out/extension.js",
+  "extensionDependencies": [
+    "tintinweb.graphviz-interactive-preview"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "eggplant-pattern.preview",
+        "title": "Eggplant Pattern: Preview Current Scope"
+      },
+      {
+        "command": "eggplant-pattern.selectDotView",
+        "title": "Eggplant Pattern: Select DOT View"
+      },
+      {
+        "command": "eggplant-pattern.showPatternDot",
+        "title": "Eggplant Pattern: Show pattern.dot"
+      },
+      {
+        "command": "eggplant-pattern.showActionDot",
+        "title": "Eggplant Pattern: Show action.dot"
+      },
+      {
+        "command": "eggplant-pattern.showCombinedDot",
+        "title": "Eggplant Pattern: Show action + pattern.dot"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "eggplant-pattern.selectDotView",
+          "group": "navigation",
+          "when": "resourceLangId == rust"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Eggplant Pattern Preview",
+      "properties": {
+        "eggplantPattern.extractorPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional absolute path to the eggplant-pattern-extractor binary."
+        },
+        "eggplantPattern.autoPreview": {
+          "type": "boolean",
+          "default": true,
+          "description": "Refresh the preview automatically when the cursor or document changes in Rust files."
+        },
+        "eggplantPattern.debounceMs": {
+          "type": "number",
+          "default": 200,
+          "minimum": 0,
+          "description": "Debounce delay before re-running extraction after editor changes."
+        },
+        "eggplantPattern.previewCommand": {
+          "type": "string",
+          "default": "graphviz-interactive-preview.preview.beside",
+          "description": "Command used to display DOT preview content. Override only for testing or custom preview hosts."
+        },
+        "eggplantPattern.defaultDotView": {
+          "type": "string",
+          "enum": ["auto", "pattern", "action", "combined"],
+          "default": "auto",
+          "description": "Default DOT view mode. 'auto' chooses pattern/action/combined based on the cursor location."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build:extractor": "cargo build --manifest-path ../eggplant-pattern-extractor/Cargo.toml",
+    "compile": "tsc -p .",
+    "watch": "tsc -w -p .",
+    "pretest": "npm run build:extractor && npm run compile",
+    "pretest:extension-host": "npm run build:extractor && npm run compile",
+    "pretest:extension-host:graphviz": "npm run build:extractor && npm run compile",
+    "test": "node ./out/test/runHeadless.js",
+    "test:extension-host": "node ./out/test/runTest.js",
+    "test:extension-host:graphviz": "node -e \"process.env.EGGPLANT_RUN_GRAPHVIZ_SMOKE_TEST='1'; require('./out/test/runTest.js');\""
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^20.14.10",
+    "@types/vscode": "^1.90.0",
+    "@vscode/test-electron": "^2.5.2",
+    "mocha": "^10.8.2",
+    "typescript": "^5.5.4"
+  }
+}
