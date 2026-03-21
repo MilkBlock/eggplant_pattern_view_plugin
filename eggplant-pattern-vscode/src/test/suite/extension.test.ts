@@ -214,6 +214,24 @@ suite("eggplant pattern extension", () => {
     assert.match(preview.title, /recursive, dag-expand/);
   });
 
+  test("auto preview keeps detail and recursive strategy across scope changes", async () => {
+    const editor = await openEditor(RUST_FIXTURE);
+    await vscode.workspace.getConfiguration().update("eggplantPattern.autoPreview", true, vscode.ConfigurationTarget.Global);
+
+    placeCursor(editor, "ctx.insert_m_integral(pat.f, pat.x)");
+    await vscode.commands.executeCommand("eggplant-pattern.preview");
+    await dispatchPreviewPanelTestMessage({ type: "changeLabelStyle", labelStyle: "recursive" });
+    await dispatchPreviewPanelTestMessage({ type: "changeRecursiveStrategy", recursiveStrategy: "dag-expand" });
+    await waitForPreviewState((state) => state.labelStyle === "recursive" && state.recursiveStrategy === "dag-expand");
+
+    placeCursor(editor, "let p = Add::query");
+
+    const preview = await waitForPreviewState(
+      (state) => state.mode === "pattern" && state.labelStyle === "recursive" && state.recursiveStrategy === "dag-expand"
+    );
+    assert.match(preview.title, /recursive, dag-expand/);
+  });
+
   test("extractor resolution prefers bundled binary by default", async () => {
     assert.ok(fs.existsSync(BUNDLED_EXTRACTOR_PATH), `Expected bundled extractor at ${BUNDLED_EXTRACTOR_PATH}`);
     await vscode.workspace.getConfiguration().update("eggplantPattern.extractorPath", "", vscode.ConfigurationTarget.Global);

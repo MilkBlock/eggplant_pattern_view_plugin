@@ -87,6 +87,8 @@ class PreviewController {
   private nextRequestId = 0;
   private lastAutoWarning: string | undefined;
   private lastPreview: LastPreview | undefined;
+  private currentLabelStyle: DotLabelStyle;
+  private currentRecursiveStrategy: RecursiveStrategy;
   private readonly callbacks: {
     onModeChange: (mode: DotViewMode) => Promise<void>;
     onLabelStyleChange: (labelStyle: DotLabelStyle) => Promise<void>;
@@ -95,6 +97,8 @@ class PreviewController {
   };
 
   constructor(private readonly extensionUri: vscode.Uri) {
+    this.currentLabelStyle = configuredDefaultLabelStyle();
+    this.currentRecursiveStrategy = configuredDefaultRecursiveStrategy();
     this.callbacks = {
       onModeChange: async (mode) => {
         await this.showCurrentMode(mode);
@@ -174,6 +178,7 @@ class PreviewController {
   }
 
   async showCurrentLabelStyle(labelStyle: DotLabelStyle): Promise<void> {
+    this.currentLabelStyle = labelStyle;
     await vscode.workspace.getConfiguration().update(
       "eggplantPattern.defaultLabelStyle",
       labelStyle,
@@ -187,13 +192,14 @@ class PreviewController {
         this.lastPreview.ir,
         this.currentMode(),
         labelStyle,
-        this.recursiveStrategy(),
+        this.currentRecursiveStrategy,
         null
       );
     }
   }
 
   async showCurrentRecursiveStrategy(strategy: RecursiveStrategy): Promise<void> {
+    this.currentRecursiveStrategy = strategy;
     await vscode.workspace.getConfiguration().update(
       "eggplantPattern.defaultRecursiveStrategy",
       strategy,
@@ -206,7 +212,7 @@ class PreviewController {
         this.lastPreview.editor,
         this.lastPreview.ir,
         this.currentMode(),
-        this.labelStyle(),
+        this.currentLabelStyle,
         strategy,
         null
       );
@@ -235,7 +241,7 @@ class PreviewController {
         return;
       }
       const mode = request.forcedMode ?? resolveDotViewMode(ir, offset);
-      await renderDot(this.panel(!request.manual), request.editor, ir, mode, this.labelStyle(), this.recursiveStrategy(), null);
+      await renderDot(this.panel(!request.manual), request.editor, ir, mode, this.currentLabelStyle, this.currentRecursiveStrategy, null);
       this.lastPreview = {
         editor: request.editor,
         ir
@@ -263,11 +269,11 @@ class PreviewController {
   }
 
   private labelStyle(): DotLabelStyle {
-    return configuredDefaultLabelStyle();
+    return this.currentLabelStyle;
   }
 
   private recursiveStrategy(): RecursiveStrategy {
-    return configuredDefaultRecursiveStrategy();
+    return this.currentRecursiveStrategy;
   }
 
   private currentMode(): DotViewMode {
