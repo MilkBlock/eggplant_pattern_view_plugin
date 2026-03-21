@@ -1,4 +1,5 @@
 use anyhow::{Result, anyhow};
+use regex::Regex;
 use ra_ap_syntax::{
     AstNode, Edition, SourceFile, SyntaxNode, TextRange, TextSize, algo,
     ast::{self, HasArgList, HasAttrs, HasName},
@@ -6,8 +7,8 @@ use ra_ap_syntax::{
 use std::collections::{BTreeSet, HashMap};
 
 use crate::ir::{
-    ActionEffect, Diagnostic, PatternConstraint, PatternEdge, PatternIr, PatternNode, ScopeInfo,
-    ScopeKind, SeedFact, TextSpan,
+    ActionEffect, Diagnostic, DisplayTemplate, PatternConstraint, PatternEdge, PatternIr,
+    PatternNode, ScopeInfo, ScopeKind, SeedFact, TextSpan,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -53,10 +54,12 @@ pub fn extract_pattern(source: &str, options: ExtractOptions) -> Result<PatternI
         .collect::<Vec<_>>();
 
     let scope = find_scope(syntax, offset).ok_or_else(|| anyhow!("no supported pattern scope found at cursor"))?;
+    let display_templates = extract_display_templates(source);
     let mut ir = match scope {
         Scope::RuleCall(call) => extract_from_rule_call(call),
         Scope::Function(function) => extract_from_function(function),
     }?;
+    ir.display_templates = display_templates;
     ir.diagnostics.append(&mut diagnostics);
     Ok(ir)
 }
@@ -301,8 +304,46 @@ fn extract_from_block(
         constraints,
         action_effects,
         seed_facts,
+        display_templates: Vec::new(),
         diagnostics,
     })
+}
+
+fn extract_display_templates(source: &str) -> Vec<DisplayTemplate> {
+    let attr_re = Regex::new(
+        r#"(?s)#\s*\[\s*eggplant::display\("(?P<template>(?:\\.|[^"])*)"\)\s*\]\s*(?P<variant>[A-Za-z_][A-Za-z0-9_]*)\s*(?:\{(?P<fields>[^}]*)\})?"#,
+    )
+    .expect("valid display regex");
+    let field_re =
+        Regex::new(r#"(?m)([A-Za-z_][A-Za-z0-9_]*)\s*:"#).expect("valid display field regex");
+
+    attr_re
+        .captures_iter(source)
+        .map(|caps| {
+            let template = caps
+                .name("template")
+                .map(|value| value.as_str().replace("\\\"", "\""))
+                .unwrap_or_default();
+            let variant_name = caps
+                .name("variant")
+                .map(|value| value.as_str().to_string())
+                .unwrap_or_default();
+            let fields = caps
+                .name("fields")
+                .map(|body| {
+                    field_re
+                        .captures_iter(body.as_str())
+                        .filter_map(|field_caps| field_caps.get(1).map(|name| name.as_str().to_string()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            DisplayTemplate {
+                variant_name,
+                template,
+                fields,
+            }
+        })
+        .collect()
 }
 
 fn extract_let_node(let_stmt: &ast::LetStmt) -> Option<PatternNode> {
@@ -818,6 +859,39 @@ fn demo() {
         assert_eq!(ir.action_effects[1].source_text, "ctx.union(pat.p, op_value)");
         assert_eq!(ir.action_effects[1].referenced_pat_vars, vec!["p"]);
         assert_eq!(ir.seed_facts.len(), 1);
+    }
+
+    #[test]
+    fn extracts_display_templates_from_dsl_enum() {
+        let src = r#"
+#[eggplant::dsl]
+enum DisplayMath {
+    #[eggplant::display("{x} + {f}")]
+    MDiff { x: DisplayMath, f: DisplayMath },
+    #[eggplant::display("integ {f} {x}")]
+    MIntegral { f: DisplayMath, x: DisplayMath },
+}
+
+fn demo() {
+    MyTx::add_rule("demo", ruleset, || {
+        let x = DisplayMath::query_leaf();
+        let f = DisplayMath::query_leaf();
+        let root = MDiff::query(&x, &f);
+        DemoPat::new(x, f, root)
+    }, |ctx, pat| {
+        let out = ctx.insert_m_integral(pat.f, pat.x);
+        ctx.union(pat.root, out);
+    });
+}
+"#;
+        let ir = extract(src, "ctx.insert_m_integral");
+        assert_eq!(ir.display_templates.len(), 2);
+        assert_eq!(ir.display_templates[0].variant_name, "MDiff");
+        assert_eq!(ir.display_templates[0].template, "{x} + {f}");
+        assert_eq!(ir.display_templates[0].fields, vec!["x", "f"]);
+        assert_eq!(ir.display_templates[1].variant_name, "MIntegral");
+        assert_eq!(ir.display_templates[1].template, "integ {f} {x}");
+        assert_eq!(ir.display_templates[1].fields, vec!["f", "x"]);
     }
 
     #[test]

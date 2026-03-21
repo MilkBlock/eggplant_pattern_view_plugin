@@ -51,6 +51,12 @@ export interface SeedFact {
   range: TextSpan;
 }
 
+export interface DisplayTemplate {
+  variant_name: string;
+  template: string;
+  fields: string[];
+}
+
 export interface Diagnostic {
   severity: "error" | "warning";
   message: string;
@@ -65,5 +71,6 @@ export interface PatternIr {
   constraints: PatternConstraint[];
   action_effects: ActionEffect[];
   seed_facts: SeedFact[];
+  display_templates: DisplayTemplate[];
   diagnostics: Diagnostic[];
 }

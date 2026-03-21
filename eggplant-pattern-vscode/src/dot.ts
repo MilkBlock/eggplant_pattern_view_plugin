@@ -1,4 +1,4 @@
-import { PatternIr } from "./ir";
+import { DisplayTemplate, PatternIr } from "./ir";
 
 export type DotViewMode = "pattern" | "action" | "combined";
 export type DotLabelStyle = "compact" | "full";
@@ -46,17 +46,62 @@ function semanticInsertLabel(sourceText: string): string {
   return `${toVariantTypeName(insertTarget)}(${args})`;
 }
 
-function actionEffectLabel(sourceText: string, labelStyle: DotLabelStyle): string {
-  const semantic = semanticInsertLabel(sourceText);
+function findDisplayTemplate(ir: PatternIr, variantName: string): DisplayTemplate | undefined {
+  return ir.display_templates.find((template) => template.variant_name === variantName);
+}
+
+function applyDisplayTemplate(template: DisplayTemplate, args: string[]): string | null {
+  if (template.fields.length !== args.length) {
+    return null;
+  }
+
+  let rendered = template.template;
+  for (let index = 0; index < template.fields.length; index += 1) {
+    rendered = rendered.split(`{${template.fields[index]}}`).join(args[index]);
+  }
+  return rendered;
+}
+
+function parseSemanticInsert(sourceText: string): { variantName: string; args: string[]; semantic: string } | null {
+  const trimmed = sourceText.trim();
+  const insertMatch = trimmed.match(/^[A-Za-z_][A-Za-z0-9_]*\.insert_([A-Za-z0-9_]+)\((.*)\)$/);
+  if (!insertMatch) {
+    return null;
+  }
+
+  const [, insertTarget, args] = insertMatch;
+  const variantName = toVariantTypeName(insertTarget);
+  return {
+    variantName,
+    args: args.split(",").map((arg) => compactExpression(arg)),
+    semantic: `${variantName}(${args})`,
+  };
+}
+
+function actionEffectLabel(ir: PatternIr, sourceText: string, labelStyle: DotLabelStyle): string {
+  const parsed = parseSemanticInsert(sourceText);
+  const semantic = parsed?.semantic ?? semanticInsertLabel(sourceText);
   if (labelStyle === "full") {
     return semantic;
+  }
+  if (parsed) {
+    const template = findDisplayTemplate(ir, parsed.variantName);
+    const rendered = template ? applyDisplayTemplate(template, parsed.args) : null;
+    if (rendered) {
+      return rendered;
+    }
   }
   return compactExpression(semantic);
 }
 
-function nodeLabel(label: string, dslType: string, labelStyle: DotLabelStyle): string {
+function nodeLabel(ir: PatternIr, label: string, dslType: string, inputs: string[], labelStyle: DotLabelStyle): string {
   if (labelStyle === "full") {
     return label;
+  }
+  const template = findDisplayTemplate(ir, dslType);
+  const rendered = template ? applyDisplayTemplate(template, inputs.map((input) => compactExpression(input))) : null;
+  if (rendered) {
+    return rendered;
   }
   return dslType;
 }
@@ -99,7 +144,7 @@ export function patternIrToDotWithMode(ir: PatternIr, mode: DotViewMode, labelSt
   if (showPattern) {
     for (const node of ir.nodes) {
       const attrs: string[] = [
-        `label=${quote(nodeLabel(node.label, node.dsl_type, labelStyle))}`,
+        `label=${quote(nodeLabel(ir, node.label, node.dsl_type, node.inputs, labelStyle))}`,
         `shape=${node.kind === "query_leaf" ? "ellipse" : "box"}`
       ];
       if (rootSet.has(node.id)) {
@@ -150,7 +195,7 @@ export function patternIrToDotWithMode(ir: PatternIr, mode: DotViewMode, labelSt
     );
     for (const effect of ir.action_effects) {
       const id = `effect:${effect.id}`;
-      lines.push(`    ${quote(id)} [label=${quote(actionEffectLabel(effect.source_text, labelStyle))}, shape=note, fillcolor=\"#fff0e8\", color=\"#a55d35\"];`);
+      lines.push(`    ${quote(id)} [label=${quote(actionEffectLabel(ir, effect.source_text, labelStyle))}, shape=note, fillcolor=\"#fff0e8\", color=\"#a55d35\"];`);
       const targets = effect.referenced_pat_vars.filter((name) =>
         showPattern ? (nodeSet.has(name) || rootSet.has(name)) : actionAnchorVars.includes(name)
       );

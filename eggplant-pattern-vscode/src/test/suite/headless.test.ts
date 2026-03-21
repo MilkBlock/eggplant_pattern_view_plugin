@@ -182,6 +182,7 @@ fn demo() {
           range: { start: 10, end: 11 }
         }
       ],
+      display_templates: [],
       diagnostics: []
     };
 
@@ -240,6 +241,7 @@ fn demo() {
         }
       ],
       seed_facts: [],
+      display_templates: [],
       diagnostics: []
     };
 
@@ -295,6 +297,7 @@ fn demo() {
         }
       ],
       seed_facts: [],
+      display_templates: [],
       diagnostics: []
     };
 
@@ -357,6 +360,13 @@ fn demo() {
           range: { start: 6, end: 7 }
         }
       ],
+      display_templates: [
+        {
+          variant_name: "MIntegral",
+          template: "integ {f} {x}",
+          fields: ["f", "x"]
+        }
+      ],
       diagnostics: []
     };
 
@@ -371,5 +381,42 @@ fn demo() {
     assert.match(fullDot, /label="lhs: DisplayMath"/);
     assert.match(fullDot, /lhs\.handle\(\)\.eq/);
     assert.match(fullDot, /ctx\.union\(pat\.lhs, rhs\.clone\(\)\)/);
+  });
+
+  test("compact labels prefer display templates when available", () => {
+    const ir: PatternIr = {
+      scope: {
+        kind: "add_rule_call",
+        text_range: { start: 0, end: 10 },
+        pattern_range: { start: 0, end: 4 },
+        action_range: { start: 5, end: 10 }
+      },
+      nodes: [],
+      edges: [],
+      roots: [],
+      constraints: [],
+      action_effects: [
+        {
+          id: "effect_0",
+          bound_var: null,
+          source_text: "ctx.insert_m_integral(lhs.clone(), rhs.clone())",
+          referenced_pat_vars: [],
+          referenced_action_vars: [],
+          range: { start: 1, end: 2 }
+        }
+      ],
+      seed_facts: [],
+      display_templates: [
+        {
+          variant_name: "MIntegral",
+          template: "integ {f} {x}",
+          fields: ["f", "x"]
+        }
+      ],
+      diagnostics: []
+    };
+
+    const compactDot = patternIrToDotWithMode(ir, "action", "compact");
+    assert.match(compactDot, /integ lhs rhs/);
   });
 });
