@@ -191,6 +191,7 @@ fn demo() {
       ],
       display_templates: [],
       typst_templates: [],
+      precedence_templates: [],
       diagnostics: []
     };
 
@@ -251,6 +252,7 @@ fn demo() {
       seed_facts: [],
       display_templates: [],
       typst_templates: [],
+      precedence_templates: [],
       diagnostics: []
     };
 
@@ -308,6 +310,7 @@ fn demo() {
       seed_facts: [],
       display_templates: [],
       typst_templates: [],
+      precedence_templates: [],
       diagnostics: []
     };
 
@@ -378,6 +381,7 @@ fn demo() {
         }
       ],
       typst_templates: [],
+      precedence_templates: [],
       diagnostics: []
     };
 
@@ -431,6 +435,7 @@ fn demo() {
           fields: ["f", "x"]
         }
       ],
+      precedence_templates: [],
       diagnostics: []
     };
 
@@ -471,12 +476,61 @@ fn demo() {
         { variant_name: "Mul", template: "{lhs} * {rhs}", fields: ["lhs", "rhs"] }
       ],
       typst_templates: [],
+      precedence_templates: [
+        { variant_name: "Add", precedence: 10 },
+        { variant_name: "Mul", precedence: 20 }
+      ],
       diagnostics: []
     };
 
     const recursiveDot = patternIrToDotWithMode(ir, "pattern", "recursive", "tree-safe");
     assert.match(recursiveDot, /label="y \+ z"/);
     assert.match(recursiveDot, /label="x \* \(y \+ z\)"/);
+  });
+
+  test("recursive precedence avoids redundant parentheses for tighter child expressions", () => {
+    const ir: PatternIr = {
+      scope: {
+        kind: "pattern_function",
+        text_range: { start: 0, end: 10 },
+        pattern_range: { start: 0, end: 10 },
+        action_range: null
+      },
+      nodes: [
+        { id: "x", kind: "query_leaf", dsl_type: "X", label: "x: X", range: { start: 0, end: 1 }, inputs: [] },
+        { id: "y", kind: "query_leaf", dsl_type: "Y", label: "y: Y", range: { start: 2, end: 3 }, inputs: [] },
+        { id: "z", kind: "query_leaf", dsl_type: "Z", label: "z: Z", range: { start: 4, end: 5 }, inputs: [] },
+        { id: "mul", kind: "query", dsl_type: "Mul", label: "mul: Mul", range: { start: 6, end: 7 }, inputs: ["y", "z"] },
+        { id: "root", kind: "query", dsl_type: "Add", label: "root: Add", range: { start: 8, end: 9 }, inputs: ["x", "mul"] }
+      ],
+      edges: [
+        { from: "mul", to: "y", kind: "operand", index: 0 },
+        { from: "mul", to: "z", kind: "operand", index: 1 },
+        { from: "root", to: "x", kind: "operand", index: 0 },
+        { from: "root", to: "mul", kind: "operand", index: 1 }
+      ],
+      roots: ["root"],
+      constraints: [],
+      action_effects: [],
+      seed_facts: [],
+      display_templates: [
+        { variant_name: "X", template: "x", fields: [] },
+        { variant_name: "Y", template: "y", fields: [] },
+        { variant_name: "Z", template: "z", fields: [] },
+        { variant_name: "Add", template: "{lhs} + {rhs}", fields: ["lhs", "rhs"] },
+        { variant_name: "Mul", template: "{lhs} * {rhs}", fields: ["lhs", "rhs"] }
+      ],
+      typst_templates: [],
+      precedence_templates: [
+        { variant_name: "Add", precedence: 10 },
+        { variant_name: "Mul", precedence: 20 }
+      ],
+      diagnostics: []
+    };
+
+    const recursiveDot = patternIrToDotWithMode(ir, "pattern", "recursive", "tree-safe");
+    assert.match(recursiveDot, /label="x \+ y \* z"/);
+    assert.doesNotMatch(recursiveDot, /label="x \+ \(y \* z\)"/);
   });
 
   test("recursive strategy distinguishes tree-safe fallback from dag expansion", () => {
@@ -510,6 +564,10 @@ fn demo() {
         { variant_name: "Mul", template: "{lhs} * {rhs}", fields: ["lhs", "rhs"] }
       ],
       typst_templates: [],
+      precedence_templates: [
+        { variant_name: "Add", precedence: 10 },
+        { variant_name: "Mul", precedence: 20 }
+      ],
       diagnostics: []
     };
 

@@ -95,6 +95,12 @@ pub struct TypstTemplate {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PrecedenceTemplate {
+    pub variant_name: String,
+    pub precedence: u16,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Severity {
     Error,
@@ -119,5 +125,6 @@ pub struct PatternIr {
     pub seed_facts: Vec<SeedFact>,
     pub display_templates: Vec<DisplayTemplate>,
     pub typst_templates: Vec<TypstTemplate>,
+    pub precedence_templates: Vec<PrecedenceTemplate>,
     pub diagnostics: Vec<Diagnostic>,
 }

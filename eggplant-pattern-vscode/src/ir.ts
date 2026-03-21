@@ -63,6 +63,11 @@ export interface TypstTemplate {
   fields: string[];
 }
 
+export interface PrecedenceTemplate {
+  variant_name: string;
+  precedence: number;
+}
+
 export interface Diagnostic {
   severity: "error" | "warning";
   message: string;
@@ -79,5 +84,6 @@ export interface PatternIr {
   seed_facts: SeedFact[];
   display_templates: DisplayTemplate[];
   typst_templates: TypstTemplate[];
+  precedence_templates: PrecedenceTemplate[];
   diagnostics: Diagnostic[];
 }

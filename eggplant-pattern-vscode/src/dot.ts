@@ -9,6 +9,11 @@ export interface TypstReplacementSource {
   source: string;
 }
 
+interface RenderedTemplateField {
+  precedence: number;
+  text: string;
+}
+
 function quote(value: string): string {
   return JSON.stringify(value);
 }
@@ -67,16 +72,72 @@ function findPreferredTemplate(
   return findTypstTemplate(ir, variantName) ?? findDisplayTemplate(ir, variantName);
 }
 
-function applyDisplayTemplate(template: DisplayTemplate, args: string[]): string | null {
+function variantPrecedence(ir: PatternIr, variantName: string): number {
+  return ir.precedence_templates.find((template) => template.variant_name === variantName)?.precedence ?? Number.MAX_SAFE_INTEGER;
+}
+
+function renderTemplateWithPrecedence(
+  template: DisplayTemplate | TypstTemplate,
+  parentPrecedence: number,
+  fields: Array<{ name: string; value: RenderedTemplateField }>
+): string | null {
+  const chars = Array.from(template.template);
+  let rendered = "";
+  let idx = 0;
+
+  while (idx < chars.length) {
+    if (chars[idx] === "{") {
+      if (chars[idx + 1] === "{") {
+        rendered += "{";
+        idx += 2;
+        continue;
+      }
+
+      const start = idx + 1;
+      let end = start;
+      while (end < chars.length && chars[end] !== "}") {
+        end += 1;
+      }
+      if (end >= chars.length) {
+        return null;
+      }
+
+      const placeholder = chars.slice(start, end).join("");
+      const field = fields.find((entry) => entry.name === placeholder);
+      if (!field) {
+        return null;
+      }
+
+      rendered += field.value.precedence < parentPrecedence ? `(${field.value.text})` : field.value.text;
+      idx = end + 1;
+      continue;
+    }
+
+    if (chars[idx] === "}" && chars[idx + 1] === "}") {
+      rendered += "}";
+      idx += 2;
+      continue;
+    }
+
+    rendered += chars[idx];
+    idx += 1;
+  }
+
+  return rendered;
+}
+
+function applyDisplayTemplate(template: DisplayTemplate | TypstTemplate, args: string[]): string | null {
   if (template.fields.length !== args.length) {
     return null;
   }
-
-  let rendered = template.template;
-  for (let index = 0; index < template.fields.length; index += 1) {
-    rendered = rendered.split(`{${template.fields[index]}}`).join(args[index]);
-  }
-  return rendered;
+  return renderTemplateWithPrecedence(
+    template,
+    Number.MAX_SAFE_INTEGER,
+    template.fields.map((name, index) => ({
+      name,
+      value: { text: args[index], precedence: Number.MAX_SAFE_INTEGER }
+    }))
+  );
 }
 
 function parseArgsList(rawArgs: string): string[] {
@@ -118,20 +179,9 @@ function parseSemanticInsert(sourceText: string): { variantName: string; args: s
   };
 }
 
-function needsParens(value: string): boolean {
-  return /[\s+\-*/]/.test(value) && !/^\([^()]+\)$/.test(value);
-}
-
-function wrapRecursiveArg(value: string, isComposite: boolean): string {
-  if (!isComposite) {
-    return value;
-  }
-  return needsParens(value) ? `(${value})` : value;
-}
-
 interface RecursivePatternResult {
   text: string;
-  composite: boolean;
+  precedence: number;
 }
 
 function recursivePatternLabel(
@@ -146,7 +196,7 @@ function recursivePatternLabel(
   if (!node) {
     return {
       text: compactExpression(nodeId),
-      composite: false,
+      precedence: Number.MAX_SAFE_INTEGER,
     };
   }
   if (seen.has(nodeId)) {
@@ -159,34 +209,40 @@ function recursivePatternLabel(
   const template = findPreferredTemplate(ir, node.dsl_type);
   if (!template) {
     return node.inputs.length === 0
-      ? { text: compactExpression(node.id), composite: false }
+      ? { text: compactExpression(node.id), precedence: Number.MAX_SAFE_INTEGER }
       : null;
   }
 
   const nextSeen = new Set(seen);
   nextSeen.add(nodeId);
-  const renderedArgs: string[] = [];
+  const renderedArgs: Array<{ name: string; value: RenderedTemplateField }> = [];
   for (const input of node.inputs) {
     const child = recursivePatternLabel(ir, nodeById, incomingCounts, input, strategy, nextSeen);
     if (!child) {
       return null;
     }
-    renderedArgs.push(wrapRecursiveArg(child.text, child.composite));
+    renderedArgs.push({
+      name: template.fields[renderedArgs.length],
+      value: {
+        text: child.text,
+        precedence: child.precedence
+      }
+    });
   }
 
-  const rendered = applyDisplayTemplate(template, renderedArgs);
+  const rendered = renderTemplateWithPrecedence(template, variantPrecedence(ir, node.dsl_type), renderedArgs);
   if (!rendered) {
     return null;
   }
   return {
     text: rendered,
-    composite: node.inputs.length > 0,
+    precedence: variantPrecedence(ir, node.dsl_type),
   };
 }
 
 interface RecursiveActionResult {
   text: string;
-  composite: boolean;
+  precedence: number;
 }
 
 function recursiveActionLabel(
@@ -218,14 +274,17 @@ function recursiveActionLabel(
 
   const nextSeen = new Set(seen);
   nextSeen.add(effectId);
-  const renderedArgs = parsed.args.map((arg) => {
+  const renderedArgs = parsed.args.map((arg, index) => {
     const trimmed = compactExpression(arg);
     if (effectByBinding.has(trimmed)) {
       const childEffectId = effectByBinding.get(trimmed);
       if (childEffectId) {
         const child = recursiveActionLabel(ir, strategy, effectByBinding, nodeById, incomingCounts, childEffectId, nextSeen);
         if (child) {
-          return wrapRecursiveArg(child.text, child.composite);
+          return {
+            name: template.fields[index],
+            value: { text: child.text, precedence: child.precedence }
+          };
         }
       }
     }
@@ -233,26 +292,36 @@ function recursiveActionLabel(
     if (nodeById.has(patVar)) {
       const child = recursivePatternLabel(ir, nodeById, incomingCounts, patVar, strategy, new Set());
       if (child) {
-        return wrapRecursiveArg(child.text, child.composite);
+        return {
+          name: template.fields[index],
+          value: { text: child.text, precedence: child.precedence }
+        };
       }
       if (strategy === "tree-safe") {
         return null;
       }
     }
-    return trimmed;
+    return {
+      name: template.fields[index],
+      value: { text: trimmed, precedence: Number.MAX_SAFE_INTEGER }
+    };
   });
 
   if (renderedArgs.some((arg) => arg === null)) {
     return null;
   }
 
-  const rendered = applyDisplayTemplate(template, renderedArgs as string[]);
+  const rendered = renderTemplateWithPrecedence(
+    template,
+    variantPrecedence(ir, parsed.variantName),
+    renderedArgs as Array<{ name: string; value: RenderedTemplateField }>
+  );
   if (!rendered) {
     return null;
   }
   return {
     text: rendered,
-    composite: true,
+    precedence: variantPrecedence(ir, parsed.variantName),
   };
 }
 

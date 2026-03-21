@@ -8,7 +8,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use crate::ir::{
     ActionEffect, Diagnostic, DisplayTemplate, PatternConstraint, PatternEdge, PatternIr,
-    PatternNode, ScopeInfo, ScopeKind, SeedFact, TextSpan, TypstTemplate,
+    PatternNode, PrecedenceTemplate, ScopeInfo, ScopeKind, SeedFact, TextSpan, TypstTemplate,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -56,12 +56,14 @@ pub fn extract_pattern(source: &str, options: ExtractOptions) -> Result<PatternI
     let scope = find_scope(syntax, offset).ok_or_else(|| anyhow!("no supported pattern scope found at cursor"))?;
     let display_templates = extract_display_templates(source);
     let typst_templates = extract_typst_templates(source);
+    let precedence_templates = extract_precedence_templates(source);
     let mut ir = match scope {
         Scope::RuleCall(call) => extract_from_rule_call(call),
         Scope::Function(function) => extract_from_function(function),
     }?;
     ir.display_templates = display_templates;
     ir.typst_templates = typst_templates;
+    ir.precedence_templates = precedence_templates;
     ir.diagnostics.append(&mut diagnostics);
     Ok(ir)
 }
@@ -308,6 +310,7 @@ fn extract_from_block(
         seed_facts,
         display_templates: Vec::new(),
         typst_templates: Vec::new(),
+        precedence_templates: Vec::new(),
         diagnostics,
     })
 }
@@ -330,6 +333,25 @@ fn extract_typst_templates(source: &str) -> Vec<TypstTemplate> {
             variant_name: template.variant_name,
             template: template.template,
             fields: template.fields,
+        })
+        .collect()
+}
+
+fn extract_precedence_templates(source: &str) -> Vec<PrecedenceTemplate> {
+    let attr_re = Regex::new(
+        r#"(?s)#\s*\[\s*(?:eggplant::)?precedence\((?P<precedence>\d+)\)\s*\]\s*(?:#\s*\[[^\]]+\]\s*)*(?P<variant>[A-Za-z_][A-Za-z0-9_]*)\s*(?:\{[^}]*\})?"#
+    )
+    .expect("valid precedence regex");
+
+    attr_re
+        .captures_iter(source)
+        .filter_map(|caps| {
+            let variant_name = caps.name("variant")?.as_str().to_string();
+            let precedence = caps.name("precedence")?.as_str().parse::<u16>().ok()?;
+            Some(PrecedenceTemplate {
+                variant_name,
+                precedence,
+            })
         })
         .collect()
 }
@@ -898,6 +920,7 @@ fn demo() {
 enum DisplayMath {
     #[eggplant::display("{x} + {f}")]
     #[eggplant::typst("diff({x}, {f})")]
+    #[eggplant::precedence(5)]
     MDiff { x: DisplayMath, f: DisplayMath },
     #[eggplant::display("integ {f} {x}")]
     #[typst("integral({f}, {x})")]
@@ -931,6 +954,9 @@ fn demo() {
         assert_eq!(ir.typst_templates[1].variant_name, "MIntegral");
         assert_eq!(ir.typst_templates[1].template, "integral({f}, {x})");
         assert_eq!(ir.typst_templates[1].fields, vec!["f", "x"]);
+        assert_eq!(ir.precedence_templates.len(), 1);
+        assert_eq!(ir.precedence_templates[0].variant_name, "MDiff");
+        assert_eq!(ir.precedence_templates[0].precedence, 5);
     }
 
     #[test]
