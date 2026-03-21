@@ -3,10 +3,10 @@ import * as fs from "fs";
 import * as path from "path";
 import { spawnSync } from "child_process";
 import { suite, test } from "mocha";
-import { patternIrToDot, patternIrToDotWithMode } from "../../dot";
+import { collectTypstReplacementSources, patternIrToDot, patternIrToDotWithMode } from "../../dot";
 import { PatternIr } from "../../ir";
 import { mergeExternalMetadata, metadataCacheMatches } from "../../metadataSources";
-import { normalizeTypstMathSource } from "../../typst";
+import { normalizeTypstMathSource, renderTypstSnippets } from "../../typst";
 
 const WORKSPACE_ROOT = path.resolve(__dirname, "../../../../");
 const FIXTURE_PATH = path.resolve(WORKSPACE_ROOT, "samples", "pattern_samples.rs");
@@ -163,6 +163,34 @@ suite("eggplant pattern headless tests", () => {
     assert.match(recursiveDot, /label="x\^3 - 7 \* x\^2"/);
     assert.doesNotMatch(recursiveDot, /insert_m_const\(2\)/);
     assert.doesNotMatch(recursiveDot, /"x"\^2/);
+  });
+
+  test("typst sources keep multi-letter action vars renderable in math_microbenchmark", async () => {
+    const source = fs.readFileSync(MATH_METADATA_FIXTURE, "utf8");
+    const offset = source.indexOf("let sqrt_five = ctx.insert_m_sqrt(five.clone());");
+    assert.notEqual(offset, -1);
+
+    const result = spawnSync(EXTRACTOR_PATH, ["--offset", String(offset)], {
+      cwd: WORKSPACE_ROOT,
+      input: source,
+      encoding: "utf8"
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const ir = JSON.parse(result.stdout) as PatternIr;
+
+    const typstSources = collectTypstReplacementSources(ir, "action", "recursive", "dag-expand");
+    const sqrtFive = typstSources.find((entry) => entry.targetId === "effect:effect_33");
+    const denom = typstSources.find((entry) => entry.targetId === "effect:effect_41");
+
+    assert.equal(sqrtFive?.source, 'sqrt("five")');
+    assert.equal(denom?.source, 'frac(1, (frac((1 + sqrt("five")), 2)  - frac((1 - sqrt("five")), 2) )) ');
+
+    const renderings = await renderTypstSnippets(
+      typstSources.filter((entry) => entry.targetId === "effect:effect_33" || entry.targetId === "effect:effect_41")
+    );
+    assert.ok(renderings["effect:effect_33"]);
+    assert.ok(renderings["effect:effect_41"]);
   });
 
   test("extractor keeps inline assertions and unique ids", () => {

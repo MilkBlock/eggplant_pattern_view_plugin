@@ -67,6 +67,20 @@ function displayAtomicExpression(value: string): string {
   return stringLiteralMatch[1].replace(/\\"/g, "\"").replace(/\\\\/g, "\\");
 }
 
+function typstAtomicExpression(value: string): string {
+  const compacted = compactExpression(value);
+  const stringLiteralMatch = compacted.match(/^"((?:\\.|[^"])*)"$/);
+  if (!stringLiteralMatch) {
+    return compacted;
+  }
+
+  const unescaped = stringLiteralMatch[1].replace(/\\"/g, "\"").replace(/\\\\/g, "\\");
+  if (/^[A-Za-z]$/.test(unescaped)) {
+    return unescaped;
+  }
+  return JSON.stringify(unescaped);
+}
+
 function compactConstraintLabel(sourceText: string, resolvedText: string): string {
   const compactResolved = compactExpression(resolvedText);
   const primitiveOperators: Array<[string, string]> = [
@@ -371,13 +385,14 @@ function recursiveActionArgLabel(
   nodeById: Map<string, PatternNode>,
   incomingCounts: Map<string, number>,
   arg: string,
-  seen: Set<string>
+  seen: Set<string>,
+  atomicRenderer: (value: string) => string
 ): RecursiveActionResult | null {
   const trimmed = compactExpression(arg);
   if (effectByBinding.has(trimmed)) {
     const childEffectId = effectByBinding.get(trimmed);
     if (childEffectId) {
-      const child = recursiveActionLabel(ir, strategy, effectByBinding, nodeById, incomingCounts, childEffectId, seen);
+      const child = recursiveActionLabel(ir, strategy, effectByBinding, nodeById, incomingCounts, childEffectId, seen, atomicRenderer);
       if (child) {
         return child;
       }
@@ -392,7 +407,7 @@ function recursiveActionArgLabel(
     }
 
     const renderedArgs = inlineInsert.args.map((childArg, index) => {
-      const child = recursiveActionArgLabel(ir, strategy, effectByBinding, nodeById, incomingCounts, childArg, seen);
+      const child = recursiveActionArgLabel(ir, strategy, effectByBinding, nodeById, incomingCounts, childArg, seen, atomicRenderer);
       if (!child) {
         return null;
       }
@@ -433,7 +448,7 @@ function recursiveActionArgLabel(
   }
 
   return {
-    text: displayAtomicExpression(trimmed),
+    text: atomicRenderer(trimmed),
     precedence: Number.MAX_SAFE_INTEGER,
     isAtomic: true,
   };
@@ -446,7 +461,8 @@ function recursiveActionLabel(
   nodeById: Map<string, PatternNode>,
   incomingCounts: Map<string, number>,
   effectId: string,
-  seen: Set<string>
+  seen: Set<string>,
+  atomicRenderer: (value: string) => string = displayAtomicExpression
 ): RecursiveActionResult | null {
   if (seen.has(effectId)) {
     return null;
@@ -469,7 +485,7 @@ function recursiveActionLabel(
   const nextSeen = new Set(seen);
   nextSeen.add(effectId);
   const renderedArgs = parsed.args.map((arg, index) => {
-    const child = recursiveActionArgLabel(ir, strategy, effectByBinding, nodeById, incomingCounts, arg, nextSeen);
+    const child = recursiveActionArgLabel(ir, strategy, effectByBinding, nodeById, incomingCounts, arg, nextSeen, atomicRenderer);
     if (child) {
       return {
         name: template.fields[index],
@@ -478,7 +494,7 @@ function recursiveActionLabel(
     }
     return {
       name: template.fields[index],
-      value: { text: displayAtomicExpression(arg), precedence: Number.MAX_SAFE_INTEGER, isAtomic: true }
+      value: { text: atomicRenderer(arg), precedence: Number.MAX_SAFE_INTEGER, isAtomic: true }
     };
   });
 
@@ -517,7 +533,7 @@ function actionEffectLabel(
     return semantic;
   }
   if (labelStyle === "recursive") {
-    const rendered = recursiveActionLabel(ir, strategy, effectByBinding, nodeById, incomingCounts, effectId, new Set());
+    const rendered = recursiveActionLabel(ir, strategy, effectByBinding, nodeById, incomingCounts, effectId, new Set(), displayAtomicExpression);
     if (rendered) {
       return rendered.text;
     }
@@ -536,6 +552,43 @@ function actionEffectLabel(
     }
   }
   return compactExpression(semantic);
+}
+
+function actionEffectTypstSource(
+  ir: PatternIr,
+  sourceText: string,
+  labelStyle: DotLabelStyle,
+  strategy: RecursiveStrategy,
+  effectByBinding: Map<string, string>,
+  nodeById: Map<string, PatternNode>,
+  incomingCounts: Map<string, number>,
+  effectId: string
+): string {
+  const parsed = parseSemanticInsert(sourceText);
+  if (!parsed) {
+    return compactExpression(sourceText);
+  }
+
+  if (labelStyle === "recursive") {
+    const rendered = recursiveActionLabel(ir, strategy, effectByBinding, nodeById, incomingCounts, effectId, new Set(), typstAtomicExpression);
+    if (rendered) {
+      return rendered.text;
+    }
+  }
+
+  const template = findTypstTemplate(ir, parsed.variantName);
+  const rendered = template
+    ? applyDisplayTemplate(
+        template,
+        parsed.args.map((arg) => typstAtomicExpression(arg)),
+        variantPrecedence(ir, parsed.variantName)
+      )
+    : null;
+  if (rendered) {
+    return rendered;
+  }
+
+  return actionEffectLabel(ir, sourceText, labelStyle, strategy, effectByBinding, nodeById, incomingCounts, effectId);
 }
 
 function nodeLabel(
@@ -760,7 +813,7 @@ export function collectTypstReplacementSources(
       }
       sources.push({
         targetId: `effect:${effect.id}`,
-        source: actionEffectLabel(ir, effect.source_text, labelStyle, recursiveStrategy, effectByBinding, nodeById, incomingCounts, effect.id)
+        source: actionEffectTypstSource(ir, effect.source_text, labelStyle, recursiveStrategy, effectByBinding, nodeById, incomingCounts, effect.id)
       });
     }
   }
