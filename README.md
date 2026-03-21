@@ -3,14 +3,13 @@
 Local workspace for an MVP eggplant pattern visualizer built from two repo-local components:
 
 - `eggplant-pattern-extractor/`: Rust CLI that parses Rust source and emits `PatternIR` JSON for the cursor-scoped pattern.
-- `eggplant-pattern-vscode/`: VSCode extension that invokes the extractor, converts `PatternIR` to DOT, and forwards it to Graphviz preview.
+- `eggplant-pattern-vscode/`: VSCode extension that invokes the extractor, converts `PatternIR` to DOT, renders SVG via Graphviz in the extension host, and shows it in a built-in webview preview panel.
 
 ## Requirements
 
 - Rust toolchain with `cargo`
 - Node.js and `npm`
 - VSCode
-- VSCode extension `tintinweb.graphviz-interactive-preview`
 
 ## Build
 
@@ -42,21 +41,13 @@ npm run test:extension-host
 
 That script now rebuilds the extractor and recompiles the extension before launching the VSCode test host.
 
-The extension-host harness reuses a locally installed `tintinweb.graphviz-interactive-preview` extension when available; otherwise it falls back to installing that extension into a temporary test extensions directory so the packaged extension dependency can activate.
-
-By default, `npm run test:extension-host` validates the eggplant extension behavior without asserting Graphviz-specific preview-host behavior. It does not require you to preinstall the Graphviz extension locally. To run the optional Graphviz smoke check, use:
-
-```bash
-cd eggplant-pattern-vscode
-npm run test:extension-host:graphviz
-```
-
 ## Run In VSCode
 
 1. Open `eggplant-pattern-vscode/` in VSCode.
 2. Start the extension host with `F5`.
 3. In the extension host, open a Rust file containing a supported eggplant pattern.
 4. Run `Eggplant Pattern: Preview Current Scope`, or leave `eggplantPattern.autoPreview` enabled for automatic refresh.
+5. Use the built-in preview panel toolbar to switch between `pattern.dot`, `action.dot`, and `action + pattern.dot`.
 
 By default, the extension looks for a bundled platform binary at:
 
@@ -123,5 +114,4 @@ Unsupported scopes render a diagnostic preview instead of reusing stale graph da
 ## Limitations / Unsupported
 
 - The MVP recognizes only the supported pattern shapes listed above; other Rust scopes return a diagnostic notice instead of a graph.
-- The preview depends on a DOT preview command. The default is `tintinweb.graphviz-interactive-preview`, but `eggplantPattern.previewCommand` can be overridden for testing or alternate preview hosts.
-- The current automated validation focuses on extension-host command flow and preview payload generation. It does not assert Graphviz panel pixels or richer Graphviz extension behavior.
+- The built-in preview panel currently focuses on dropdown mode switching and graph rendering; richer interactions such as node click-to-source are not implemented yet.

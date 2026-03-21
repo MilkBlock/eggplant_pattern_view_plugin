@@ -33,9 +33,6 @@
     "package.json",
     "README.md"
   ],
-  "extensionDependencies": [
-    "tintinweb.graphviz-interactive-preview"
-  ],
   "contributes": {
     "commands": [
       {
@@ -87,14 +84,14 @@
           "minimum": 0,
           "description": "Debounce delay before re-running extraction after editor changes."
         },
-        "eggplantPattern.previewCommand": {
-          "type": "string",
-          "default": "graphviz-interactive-preview.preview.beside",
-          "description": "Command used to display DOT preview content. Override only for testing or custom preview hosts."
-        },
         "eggplantPattern.defaultDotView": {
           "type": "string",
-          "enum": ["auto", "pattern", "action", "combined"],
+          "enum": [
+            "auto",
+            "pattern",
+            "action",
+            "combined"
+          ],
           "default": "auto",
           "description": "Default DOT view mode. 'auto' chooses pattern/action/combined based on the cursor location."
         }
@@ -113,10 +110,8 @@
     "publish:vsix": "npm run package:vsix && npx @vscode/vsce publish --packagePath *.vsix",
     "pretest": "npm run build:extractor && npm run bundle:extractor && npm run compile",
     "pretest:extension-host": "npm run build:extractor && npm run bundle:extractor && npm run compile",
-    "pretest:extension-host:graphviz": "npm run build:extractor && npm run bundle:extractor && npm run compile",
     "test": "node ./out/test/runHeadless.js",
-    "test:extension-host": "node ./out/test/runTest.js",
-    "test:extension-host:graphviz": "node -e \"process.env.EGGPLANT_RUN_GRAPHVIZ_SMOKE_TEST='1'; require('./out/test/runTest.js');\""
+    "test:extension-host": "node ./out/test/runTest.js"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
@@ -125,5 +120,8 @@
     "@vscode/test-electron": "^2.5.2",
     "mocha": "^10.8.2",
     "typescript": "^5.5.4"
+  },
+  "dependencies": {
+    "@viz-js/viz": "^3.25.0"
   }
 }

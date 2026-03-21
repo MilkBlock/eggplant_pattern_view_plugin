@@ -4,12 +4,13 @@ VSCode shell for the `eggplant-pattern-extractor` Rust CLI.
 
 ## Current status
 
-This first shell:
+This extension:
 
 - listens to Rust cursor/document changes
 - calls the local Rust extractor with the current cursor offset
 - converts `PatternIR` to DOT
-- forwards DOT to `tintinweb.graphviz-interactive-preview`
+- renders DOT to SVG with Graphviz in the extension host
+- shows the graph in a built-in VSCode webview panel with an in-panel dropdown
 
 ## Development
 
@@ -38,8 +39,7 @@ npm run test:extension-host
 ```
 
 - `npm test` runs the headless-safe suite.
-- `npm run test:extension-host` runs extension-host validation without requiring a locally preinstalled Graphviz extension; the harness provisions the packaged dependency for the test profile.
-- `npm run test:extension-host:graphviz` enables the optional Graphviz smoke test.
+- `npm run test:extension-host` runs extension-host validation for the built-in preview panel, including mode switching through the panel message path.
 
 For one-shot local packaging, use:
 
@@ -64,7 +64,7 @@ For CI/release packaging, the repository includes `.github/workflows/release-ext
 
 Marketplace notes:
 
-- `package.json.publisher` is still `local` for repo development
-- CI overrides it with `VSCE_PUBLISHER` before packaging/publishing
+- `package.json.publisher` is set for Marketplace publishing
+- CI overrides it with `VSCE_PUBLISHER` before packaging/publishing when needed
 - publish requires a Visual Studio Marketplace publisher plus a PAT with marketplace publish rights
-- the extension package now ships with a checked-in `LICENSE`; update it if you later decide to open-source the project
+- the extension package ships with a checked-in `LICENSE`

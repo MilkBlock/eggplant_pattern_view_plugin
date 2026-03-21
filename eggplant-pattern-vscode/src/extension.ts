@@ -2,12 +2,12 @@ import * as vscode from "vscode";
 import { DotViewMode, patternIrToDotWithMode } from "./dot";
 import { configureExtractorResolution, ExtractorError, runExtractor } from "./extractor";
 import { PatternIr } from "./ir";
-
-const GRAPHVIZ_PREVIEW_COMMAND = "graphviz-interactive-preview.preview.beside";
+import { PreviewPanel } from "./previewPanel";
+import { dotToSvg } from "./svg";
 
 export function activate(context: vscode.ExtensionContext): void {
   configureExtractorResolution(context.extensionPath);
-  const controller = new PreviewController();
+  const controller = new PreviewController(context.extensionUri);
 
   context.subscriptions.push(
     vscode.commands.registerCommand("eggplant-pattern.preview", async () => {
@@ -87,6 +87,24 @@ class PreviewController {
   private nextRequestId = 0;
   private lastAutoWarning: string | undefined;
   private lastPreview: LastPreview | undefined;
+  private readonly callbacks: {
+    onModeChange: (mode: DotViewMode) => Promise<void>;
+    onRefresh: () => Promise<void>;
+  };
+
+  constructor(private readonly extensionUri: vscode.Uri) {
+    this.callbacks = {
+      onModeChange: async (mode) => {
+        await this.showCurrentMode(mode);
+      },
+      onRefresh: async () => {
+        const editor = this.lastPreview?.editor ?? vscode.window.activeTextEditor;
+        if (editor) {
+          await this.requestPreview(editor, true);
+        }
+      }
+    };
+  }
 
   scheduleRefresh(editor?: vscode.TextEditor): void {
     const activeEditor = editor ?? vscode.window.activeTextEditor;
@@ -121,7 +139,7 @@ class PreviewController {
 
   async showCurrentMode(mode: DotViewMode): Promise<void> {
     if (this.lastPreview) {
-      await renderDot(this.lastPreview.editor, this.lastPreview.ir, mode);
+      await renderDot(this.panel(), this.lastPreview.editor, this.lastPreview.ir, mode, null);
       return;
     }
 
@@ -168,7 +186,7 @@ class PreviewController {
         return;
       }
       const mode = request.forcedMode ?? resolveDotViewMode(ir, offset);
-      await renderDot(request.editor, ir, mode);
+      await renderDot(this.panel(), request.editor, ir, mode, null);
       this.lastPreview = {
         editor: request.editor,
         ir
@@ -181,7 +199,7 @@ class PreviewController {
 
       const message = formatPreviewError(error);
       const suppressRepeatedAutoWarning = !request.manual && message === this.lastAutoWarning;
-      const renderedNotice = await tryRenderNotice(request.editor, message);
+      const renderedNotice = await tryRenderNotice(this.panel(), request.editor, message);
       if (!suppressRepeatedAutoWarning && (request.manual || !renderedNotice)) {
         if (!request.manual) {
           this.lastAutoWarning = message;
@@ -189,6 +207,10 @@ class PreviewController {
         void vscode.window.showWarningMessage(`Eggplant pattern preview failed: ${message}`);
       }
     }
+  }
+
+  private panel(): PreviewPanel {
+    return PreviewPanel.createOrShow(this.extensionUri, this.callbacks);
   }
 }
 
@@ -220,12 +242,27 @@ function resolveDotViewMode(ir: PatternIr, offset: number): DotViewMode {
   return "combined";
 }
 
-async function renderDot(editor: vscode.TextEditor, ir: PatternIr, mode: DotViewMode): Promise<void> {
+async function renderDot(
+  panel: PreviewPanel,
+  editor: vscode.TextEditor,
+  ir: PatternIr,
+  mode: DotViewMode,
+  notice: string | null
+): Promise<void> {
   const dot = patternIrToDotWithMode(ir, mode);
-  await showPreview(editor, dot, mode);
+  const svg = await dotToSvg(dot);
+  await panel.render({
+    title: `Eggplant Pattern (${modeLabel(mode)}): ${editor.document.fileName.split("/").pop() ?? "Preview"}`,
+    mode,
+    fileName: editor.document.fileName.split("/").pop() ?? "Preview",
+    dot,
+    svg,
+    notice
+  });
+  panel.reveal();
 }
 
-async function renderNotice(editor: vscode.TextEditor, message: string): Promise<void> {
+async function renderNotice(panel: PreviewPanel, editor: vscode.TextEditor, message: string): Promise<void> {
   const dot = [
     "digraph EggplantPatternStatus {",
     "  graph [pad=0.3];",
@@ -233,12 +270,21 @@ async function renderNotice(editor: vscode.TextEditor, message: string): Promise
     `  status [label=${JSON.stringify(message)}];`,
     "}"
   ].join("\n");
-  await showPreview(editor, dot, "combined");
+  const svg = await dotToSvg(dot);
+  await panel.render({
+    title: `Eggplant Pattern (${modeLabel("combined")}): ${editor.document.fileName.split("/").pop() ?? "Preview"}`,
+    mode: "combined",
+    fileName: editor.document.fileName.split("/").pop() ?? "Preview",
+    dot,
+    svg,
+    notice: message
+  });
+  panel.reveal();
 }
 
-async function tryRenderNotice(editor: vscode.TextEditor, message: string): Promise<boolean> {
+async function tryRenderNotice(panel: PreviewPanel, editor: vscode.TextEditor, message: string): Promise<boolean> {
   try {
-    await renderNotice(editor, message);
+    await renderNotice(panel, editor, message);
     return true;
   } catch (error) {
     console.error("Eggplant pattern preview notice failed:", error);
@@ -257,50 +303,11 @@ function modeLabel(mode: DotViewMode): string {
   }
 }
 
-async function showPreview(editor: vscode.TextEditor, content: string, mode: DotViewMode): Promise<void> {
-  const previewCommand = vscode.workspace.getConfiguration().get<string>(
-    "eggplantPattern.previewCommand",
-    GRAPHVIZ_PREVIEW_COMMAND
-  );
-  const title = `Eggplant Pattern (${modeLabel(mode)}): ${editor.document.fileName.split("/").pop() ?? "Preview"}`;
-  try {
-    await vscode.commands.executeCommand(previewCommand, {
-      document: editor.document,
-      uri: editor.document.uri,
-      content,
-      title,
-      allowMultiplePanels: false
-    });
-  } catch (error) {
-    if (await isMissingCommandError(previewCommand)) {
-      throw new PreviewHostUnavailableError(previewCommand);
-    }
-    throw error;
-  }
-}
-
 function formatPreviewError(error: unknown): string {
-  if (error instanceof PreviewHostUnavailableError) {
-    return error.message;
-  }
   if (error instanceof ExtractorError) {
     return error.message;
   }
   return error instanceof Error ? error.message : String(error);
-}
-
-class PreviewHostUnavailableError extends Error {
-  constructor(commandId: string) {
-    const installHint = commandId === GRAPHVIZ_PREVIEW_COMMAND
-      ? "Install the tintinweb.graphviz-interactive-preview VSCode extension or set eggplantPattern.previewCommand to a different preview command."
-      : `Register or configure a different preview command than '${commandId}'.`;
-    super(`Preview command '${commandId}' is unavailable. ${installHint}`);
-  }
-}
-
-async function isMissingCommandError(commandId: string): Promise<boolean> {
-  const availableCommands = await vscode.commands.getCommands(true);
-  return !availableCommands.includes(commandId);
 }
 
 interface PreviewRequest {
