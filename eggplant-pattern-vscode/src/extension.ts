@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import * as path from "path";
 import { collectTypstReplacementSources, DotLabelStyle, DotViewMode, patternIrToDotWithMode, RecursiveStrategy } from "./dot";
 import { configureExtractorResolution, ExtractorError, runExtractor } from "./extractor";
 import { PatternIr } from "./ir";
@@ -94,6 +95,8 @@ class PreviewController {
   private currentLabelStyle: DotLabelStyle;
   private currentRecursiveStrategy: RecursiveStrategy;
   private metadataSourceFiles: string[];
+  private metadataWatchers: vscode.Disposable[] = [];
+  private metadataRefreshTimer: NodeJS.Timeout | undefined;
   private readonly callbacks: {
     onModeChange: (mode: DotViewMode) => Promise<void>;
     onLabelStyleChange: (labelStyle: DotLabelStyle) => Promise<void>;
@@ -130,6 +133,7 @@ class PreviewController {
         }
       }
     };
+    this.resetMetadataWatchers();
   }
 
   scheduleRefresh(editor?: vscode.TextEditor): void {
@@ -310,6 +314,7 @@ class PreviewController {
     this.metadataSourceFiles = Array.from(new Set(selected));
     await this.context.workspaceState.update(PreviewController.metadataSourceStateKey, this.metadataSourceFiles);
     clearMetadataSourceCache();
+    this.resetMetadataWatchers();
     if (this.lastPreview) {
       await this.requestPreview(this.lastPreview.editor, true, true);
     }
@@ -319,9 +324,48 @@ class PreviewController {
     this.metadataSourceFiles = [];
     await this.context.workspaceState.update(PreviewController.metadataSourceStateKey, this.metadataSourceFiles);
     clearMetadataSourceCache();
+    this.resetMetadataWatchers();
     if (this.lastPreview) {
       await this.requestPreview(this.lastPreview.editor, true, true);
     }
+  }
+
+  private resetMetadataWatchers(): void {
+    for (const watcher of this.metadataWatchers) {
+      watcher.dispose();
+    }
+    this.metadataWatchers = [];
+
+    for (const filePath of this.metadataSourceFiles) {
+      const pattern = new vscode.RelativePattern(path.dirname(filePath), path.basename(filePath));
+      const watcher = vscode.workspace.createFileSystemWatcher(pattern);
+      const onChange = () => {
+        clearMetadataSourceCache([filePath]);
+        this.scheduleMetadataSourceRefresh();
+      };
+      this.metadataWatchers.push(
+        watcher,
+        watcher.onDidChange(onChange),
+        watcher.onDidCreate(onChange),
+        watcher.onDidDelete(onChange)
+      );
+    }
+  }
+
+  private scheduleMetadataSourceRefresh(): void {
+    if (!this.lastPreview) {
+      return;
+    }
+    const debounceMs = vscode.workspace.getConfiguration().get<number>("eggplantPattern.debounceMs", 200);
+    if (this.metadataRefreshTimer) {
+      clearTimeout(this.metadataRefreshTimer);
+    }
+    this.metadataRefreshTimer = setTimeout(() => {
+      const editor = this.lastPreview?.editor;
+      if (editor) {
+        void this.requestPreview(editor, false, true);
+      }
+    }, debounceMs);
   }
 }
 

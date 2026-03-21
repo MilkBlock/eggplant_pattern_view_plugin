@@ -5,11 +5,12 @@ import { spawnSync } from "child_process";
 import { suite, test } from "mocha";
 import { patternIrToDot, patternIrToDotWithMode } from "../../dot";
 import { PatternIr } from "../../ir";
-import { mergeExternalMetadata } from "../../metadataSources";
+import { mergeExternalMetadata, metadataCacheMatches } from "../../metadataSources";
 import { normalizeTypstMathSource } from "../../typst";
 
 const WORKSPACE_ROOT = path.resolve(__dirname, "../../../../");
 const FIXTURE_PATH = path.resolve(WORKSPACE_ROOT, "samples", "pattern_samples.rs");
+const MATH_METADATA_FIXTURE = "/Users/mineralsteins/Repos/egg_related/eggplant_backup/benches/runners/eggplant_rewrite/math_microbenchmark.rs";
 const EXTRACTOR_PATH = path.resolve(
   WORKSPACE_ROOT,
   "eggplant-pattern-extractor",
@@ -135,6 +136,12 @@ suite("eggplant pattern headless tests", () => {
 
     const dot = patternIrToDotWithMode(merged, "pattern", "compact");
     assert.match(dot, /label="a \* b"/);
+  });
+
+  test("metadata cache matching requires both mtime and size", () => {
+    assert.equal(metadataCacheMatches({ mtimeMs: 10, size: 20 }, { mtimeMs: 10, size: 20 }), true);
+    assert.equal(metadataCacheMatches({ mtimeMs: 10, size: 20 }, { mtimeMs: 10, size: 21 }), false);
+    assert.equal(metadataCacheMatches({ mtimeMs: 10, size: 20 }, { mtimeMs: 11, size: 20 }), false);
   });
 
   test("extractor keeps inline assertions and unique ids", () => {

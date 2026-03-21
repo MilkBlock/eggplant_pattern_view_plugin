@@ -9,9 +9,17 @@ interface ParsedMetadataFile {
 
 interface CachedMetadataFile extends ParsedMetadataFile {
   mtimeMs: number;
+  size: number;
 }
 
 const metadataCache = new Map<string, CachedMetadataFile>();
+
+export function metadataCacheMatches(
+  cached: { mtimeMs: number; size: number },
+  stat: { mtimeMs: number; size: number }
+): boolean {
+  return cached.mtimeMs === stat.mtimeMs && cached.size === stat.size;
+}
 
 function extractTemplates(source: string, attrName: "display" | "typst"): Array<DisplayTemplate | TypstTemplate> {
   const pattern = new RegExp(
@@ -113,7 +121,7 @@ export async function loadMetadataSources(paths: readonly string[]): Promise<Par
     try {
       const stat = await fs.promises.stat(filePath);
       const cached = metadataCache.get(filePath);
-      if (cached && cached.mtimeMs === stat.mtimeMs) {
+      if (cached && metadataCacheMatches(cached, stat)) {
         loaded.push(cached);
         continue;
       }
@@ -121,7 +129,8 @@ export async function loadMetadataSources(paths: readonly string[]): Promise<Par
       const parsed = parseMetadataSource(source);
       const nextCached: CachedMetadataFile = {
         ...parsed,
-        mtimeMs: stat.mtimeMs
+        mtimeMs: stat.mtimeMs,
+        size: stat.size
       };
       metadataCache.set(filePath, nextCached);
       loaded.push(nextCached);
