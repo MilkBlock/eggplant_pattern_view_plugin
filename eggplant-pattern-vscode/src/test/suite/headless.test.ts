@@ -398,6 +398,66 @@ fn demo() {
     assert.match(fullDot, /ctx\.union\(pat\.lhs, rhs\.clone\(\)\)/);
   });
 
+  test("compact labels hardcode known constraint primitives", () => {
+    const makeIr = (resolvedText: string): PatternIr => ({
+      scope: {
+        kind: "pattern_function",
+        text_range: { start: 0, end: 10 },
+        pattern_range: { start: 0, end: 10 },
+        action_range: null
+      },
+      nodes: [
+        {
+          id: "lhs",
+          kind: "query_leaf",
+          dsl_type: "Value",
+          label: "lhs: Value",
+          range: { start: 0, end: 1 },
+          inputs: []
+        },
+        {
+          id: "rhs",
+          kind: "query_leaf",
+          dsl_type: "Value",
+          label: "rhs: Value",
+          range: { start: 2, end: 3 },
+          inputs: []
+        }
+      ],
+      edges: [],
+      roots: ["lhs", "rhs"],
+      constraints: [
+        {
+          id: "constraint_0",
+          source_text: "constraint_alias",
+          resolved_text: resolvedText,
+          referenced_vars: ["lhs", "rhs"],
+          range: { start: 4, end: 5 }
+        }
+      ],
+      action_effects: [],
+      seed_facts: [],
+      display_templates: [],
+      typst_templates: [],
+      precedence_templates: [],
+      diagnostics: []
+    });
+
+    const cases: Array<[string, string]> = [
+      ["lhs.handle().eq(&rhs.handle())", "lhs == rhs"],
+      ["lhs.handle().ne(&rhs.handle())", "lhs != rhs"],
+      ["lhs.handle().lt(&rhs.handle())", "lhs < rhs"],
+      ["lhs.handle().le(&rhs.handle())", "lhs <= rhs"],
+      ["lhs.handle().gt(&rhs.handle())", "lhs > rhs"],
+      ["lhs.handle().ge(&rhs.handle())", "lhs >= rhs"]
+    ];
+
+    for (const [resolvedText, expectedLabel] of cases) {
+      const dot = patternIrToDotWithMode(makeIr(resolvedText), "pattern", "compact");
+      assert.match(dot, new RegExp(`label=\"${expectedLabel.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}\"`));
+    }
+  });
+
   test("compact labels prefer display templates when available", () => {
     const ir: PatternIr = {
       scope: {
