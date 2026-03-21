@@ -21,7 +21,7 @@ export function activate(context: vscode.ExtensionContext): void {
         void vscode.window.showWarningMessage("Eggplant pattern preview only runs for Rust files.");
         return;
       }
-      await controller.requestPreview(editor, true);
+      await controller.requestPreview(editor, true, false);
     })
   );
 
@@ -88,6 +88,7 @@ class PreviewController {
   private nextRequestId = 0;
   private lastAutoWarning: string | undefined;
   private lastPreview: LastPreview | undefined;
+  private currentModeOverride: DotViewMode | undefined;
   private currentLabelStyle: DotLabelStyle;
   private currentRecursiveStrategy: RecursiveStrategy;
   private readonly callbacks: {
@@ -113,7 +114,7 @@ class PreviewController {
       onRefresh: async () => {
         const editor = this.lastPreview?.editor ?? vscode.window.activeTextEditor;
         if (editor) {
-          await this.requestPreview(editor, true);
+          await this.requestPreview(editor, true, true);
         }
       }
     };
@@ -133,17 +134,20 @@ class PreviewController {
       clearTimeout(this.refreshTimer);
     }
     this.refreshTimer = setTimeout(() => {
-      void this.requestPreview(activeEditor, false);
+      void this.requestPreview(activeEditor, false, true);
     }, debounceMs);
   }
 
-  async requestPreview(editor: vscode.TextEditor, manual: boolean): Promise<void> {
+  async requestPreview(editor: vscode.TextEditor, manual: boolean, preserveModeOverride: boolean): Promise<void> {
+    if (!preserveModeOverride) {
+      this.currentModeOverride = undefined;
+    }
     this.panel(!manual);
     this.pending = {
       editor,
       manual,
       id: ++this.nextRequestId,
-      forcedMode: undefined
+      forcedMode: preserveModeOverride ? this.currentModeOverride : undefined
     };
 
     if (!this.running) {
@@ -152,6 +156,7 @@ class PreviewController {
   }
 
   async showCurrentMode(mode: DotViewMode): Promise<void> {
+    this.currentModeOverride = mode;
     if (this.lastPreview) {
       await renderDot(this.panel(true), this.lastPreview.editor, this.lastPreview.ir, mode, this.labelStyle(), this.recursiveStrategy(), null);
       return;
@@ -241,7 +246,7 @@ class PreviewController {
       if (this.pending && this.pending.id > request.id) {
         return;
       }
-      const mode = request.forcedMode ?? resolveDotViewMode(ir, offset);
+      const mode = request.forcedMode ?? this.currentModeOverride ?? resolveDotViewMode(ir, offset);
       await renderDot(this.panel(!request.manual), request.editor, ir, mode, this.currentLabelStyle, this.currentRecursiveStrategy, null);
       this.lastPreview = {
         editor: request.editor,
@@ -278,7 +283,7 @@ class PreviewController {
   }
 
   private currentMode(): DotViewMode {
-    return PreviewPanel.current()?.snapshot()?.mode ?? "combined";
+    return this.currentModeOverride ?? PreviewPanel.current()?.snapshot()?.mode ?? "combined";
   }
 }
 

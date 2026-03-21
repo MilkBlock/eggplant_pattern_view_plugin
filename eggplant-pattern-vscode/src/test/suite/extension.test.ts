@@ -175,6 +175,23 @@ suite("eggplant pattern extension", () => {
     assert.equal(/"p" -> "l"/.test(preview.dot), false);
   });
 
+  test("manual dot mode survives auto refresh at the same cursor position", async () => {
+    const editor = await openEditor(RUST_FIXTURE);
+    await vscode.workspace.getConfiguration().update("eggplantPattern.autoPreview", true, vscode.ConfigurationTarget.Global);
+    placeCursor(editor, "ctx.union(pat.p, op_value)");
+
+    await vscode.commands.executeCommand("eggplant-pattern.preview");
+    await dispatchPreviewPanelTestMessage({ type: "changeMode", mode: "combined" });
+    await waitForPreviewState((state) => state.mode === "combined");
+
+    placeCursor(editor, "ctx.insert_m_integral(pat.f, pat.x)");
+
+    const preview = await waitForPreviewState((state) => state.mode === "combined");
+    assert.match(preview.title, /action \+ pattern\.dot/);
+    assert.match(preview.dot, /cluster_actions/);
+    assert.match(preview.dot, /"diff" -> "x"|\"diff\" -> \"f\"|\"p\" -> \"l\"/);
+  });
+
   test("detail dropdown switches between compact and full labels", async () => {
     const editor = await openEditor(RUST_FIXTURE);
     placeCursor(editor, "ctx.union(pat.p, op_value)");
