@@ -33,7 +33,7 @@ async function renderTypstSnippetUncached(source: string): Promise<RenderedTypst
     const document = [
       "#set page(width: auto, height: auto, margin: 0pt)",
       "#set par(justify: false)",
-      source
+      `#box(inset: (x: 1.2pt, y: 1.6pt))[${source}]`
     ].join("\n");
     const stdout = await runTypst(document);
     return {
