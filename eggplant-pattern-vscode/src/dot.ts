@@ -40,11 +40,25 @@ function compactExpression(value: string): string {
 
 function compactConstraintLabel(sourceText: string, resolvedText: string): string {
   const compactResolved = compactExpression(resolvedText);
-  const eqMatch = compactResolved.match(/^([A-Za-z_][A-Za-z0-9_]*)\.eq\(([A-Za-z_][A-Za-z0-9_]*)\)$/);
-  if (eqMatch) {
-    return `${eqMatch[1]} == ${eqMatch[2]}`;
+  const primitiveOperators: Array<[string, string]> = [
+    ["eq", "=="],
+    ["ne", "!="],
+    ["lt", "<"],
+    ["le", "<="],
+    ["gt", ">"],
+    ["ge", ">="],
+  ];
+
+  for (const [primitive, operator] of primitiveOperators) {
+    const primitiveMatch = compactResolved.match(
+      new RegExp(`^(.+)\\.${primitive}\\((.+)\\)$`)
+    );
+    if (primitiveMatch) {
+      return `${primitiveMatch[1]} ${operator} ${primitiveMatch[2]}`;
+    }
   }
-  return sourceText.length < compactResolved.length ? sourceText : compactResolved;
+  const fallback = sourceText.length < compactResolved.length ? sourceText : compactResolved;
+  return `${fallback} [raw]`;
 }
 
 function semanticInsertLabel(sourceText: string): string {
