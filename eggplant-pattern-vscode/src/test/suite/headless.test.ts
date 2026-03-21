@@ -5,6 +5,7 @@ import { spawnSync } from "child_process";
 import { suite, test } from "mocha";
 import { patternIrToDot, patternIrToDotWithMode } from "../../dot";
 import { PatternIr } from "../../ir";
+import { mergeExternalMetadata } from "../../metadataSources";
 import { normalizeTypstMathSource } from "../../typst";
 
 const WORKSPACE_ROOT = path.resolve(__dirname, "../../../../");
@@ -74,6 +75,66 @@ suite("eggplant pattern headless tests", () => {
     assert.deepEqual(ir.constraints[0].referenced_vars, ["l", "r"]);
     assert.equal(ir.action_effects.length, 2);
     assert.equal(ir.seed_facts.length, 1);
+  });
+
+  test("external metadata sources merge typst templates into the preview ir", () => {
+    const ir: PatternIr = {
+      scope: {
+        kind: "pattern_function",
+        text_range: { start: 0, end: 10 },
+        pattern_range: { start: 0, end: 10 },
+        action_range: null
+      },
+      nodes: [
+        {
+          id: "a",
+          kind: "query_leaf",
+          dsl_type: "Math",
+          label: "a: Math",
+          range: { start: 0, end: 1 },
+          inputs: []
+        },
+        {
+          id: "b",
+          kind: "query_leaf",
+          dsl_type: "Math",
+          label: "b: Math",
+          range: { start: 2, end: 3 },
+          inputs: []
+        },
+        {
+          id: "mul",
+          kind: "query",
+          dsl_type: "MMul",
+          label: "mul: MMul",
+          range: { start: 4, end: 5 },
+          inputs: ["a", "b"]
+        }
+      ],
+      edges: [
+        { from: "mul", to: "a", kind: "operand", index: 0 },
+        { from: "mul", to: "b", kind: "operand", index: 1 }
+      ],
+      roots: ["mul"],
+      constraints: [],
+      action_effects: [],
+      seed_facts: [],
+      display_templates: [],
+      typst_templates: [],
+      precedence_templates: [],
+      diagnostics: []
+    };
+
+    const merged = mergeExternalMetadata(ir, [
+      {
+        display_templates: [],
+        typst_templates: [{ variant_name: "MMul", template: "{a} * {b}", fields: ["a", "b"] }],
+        precedence_templates: [{ variant_name: "MMul", precedence: 60 }]
+      }
+    ]);
+
+    const dot = patternIrToDotWithMode(merged, "pattern", "compact");
+    assert.match(dot, /label="a \* b"/);
   });
 
   test("extractor keeps inline assertions and unique ids", () => {

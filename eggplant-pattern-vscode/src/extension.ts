@@ -2,13 +2,14 @@ import * as vscode from "vscode";
 import { collectTypstReplacementSources, DotLabelStyle, DotViewMode, patternIrToDotWithMode, RecursiveStrategy } from "./dot";
 import { configureExtractorResolution, ExtractorError, runExtractor } from "./extractor";
 import { PatternIr } from "./ir";
+import { clearMetadataSourceCache, loadMetadataSources, mergeExternalMetadata, pickMetadataSourceFiles } from "./metadataSources";
 import { PreviewPanel } from "./previewPanel";
 import { dotToSvg } from "./svg";
 import { renderTypstSnippets } from "./typst";
 
 export function activate(context: vscode.ExtensionContext): void {
   configureExtractorResolution(context.extensionPath);
-  const controller = new PreviewController(context.extensionUri);
+  const controller = new PreviewController(context);
 
   context.subscriptions.push(
     vscode.commands.registerCommand("eggplant-pattern.preview", async () => {
@@ -82,6 +83,7 @@ export function activate(context: vscode.ExtensionContext): void {
 }
 
 class PreviewController {
+  private static readonly metadataSourceStateKey = "eggplantPattern.metadataSourceFiles";
   private refreshTimer: NodeJS.Timeout | undefined;
   private running = false;
   private pending: PreviewRequest | undefined;
@@ -91,16 +93,20 @@ class PreviewController {
   private currentModeOverride: DotViewMode | undefined;
   private currentLabelStyle: DotLabelStyle;
   private currentRecursiveStrategy: RecursiveStrategy;
+  private metadataSourceFiles: string[];
   private readonly callbacks: {
     onModeChange: (mode: DotViewMode) => Promise<void>;
     onLabelStyleChange: (labelStyle: DotLabelStyle) => Promise<void>;
     onRecursiveStrategyChange: (strategy: RecursiveStrategy) => Promise<void>;
+    onSelectMetadataSources: () => Promise<void>;
+    onClearMetadataSources: () => Promise<void>;
     onRefresh: () => Promise<void>;
   };
 
-  constructor(private readonly extensionUri: vscode.Uri) {
+  constructor(private readonly context: vscode.ExtensionContext) {
     this.currentLabelStyle = configuredDefaultLabelStyle();
     this.currentRecursiveStrategy = configuredDefaultRecursiveStrategy();
+    this.metadataSourceFiles = context.workspaceState.get<string[]>(PreviewController.metadataSourceStateKey, []);
     this.callbacks = {
       onModeChange: async (mode) => {
         await this.showCurrentMode(mode);
@@ -110,6 +116,12 @@ class PreviewController {
       },
       onRecursiveStrategyChange: async (strategy) => {
         await this.showCurrentRecursiveStrategy(strategy);
+      },
+      onSelectMetadataSources: async () => {
+        await this.selectMetadataSources();
+      },
+      onClearMetadataSources: async () => {
+        await this.clearMetadataSources();
       },
       onRefresh: async () => {
         const editor = this.lastPreview?.editor ?? vscode.window.activeTextEditor;
@@ -158,7 +170,7 @@ class PreviewController {
   async showCurrentMode(mode: DotViewMode): Promise<void> {
     this.currentModeOverride = mode;
     if (this.lastPreview) {
-      await renderDot(this.panel(true), this.lastPreview.editor, this.lastPreview.ir, mode, this.labelStyle(), this.recursiveStrategy(), null);
+      await renderDot(this.panel(true), this.lastPreview.editor, this.lastPreview.ir, mode, this.labelStyle(), this.recursiveStrategy(), this.metadataSourceFiles, null);
       return;
     }
 
@@ -199,6 +211,7 @@ class PreviewController {
         this.currentMode(),
         labelStyle,
         this.currentRecursiveStrategy,
+        this.metadataSourceFiles,
         null
       );
     }
@@ -220,6 +233,7 @@ class PreviewController {
         this.currentMode(),
         this.currentLabelStyle,
         strategy,
+        this.metadataSourceFiles,
         null
       );
     }
@@ -242,12 +256,14 @@ class PreviewController {
   private async runRequest(request: PreviewRequest): Promise<void> {
     try {
       const offset = request.editor.document.offsetAt(request.editor.selection.active);
-      const ir = await runExtractor(request.editor.document, offset);
+      const extractedIr = await runExtractor(request.editor.document, offset);
+      const externalMetadata = await loadMetadataSources(this.metadataSourceFiles);
+      const ir = mergeExternalMetadata(extractedIr, externalMetadata);
       if (this.pending && this.pending.id > request.id) {
         return;
       }
       const mode = request.forcedMode ?? this.currentModeOverride ?? resolveDotViewMode(ir, offset);
-      await renderDot(this.panel(!request.manual), request.editor, ir, mode, this.currentLabelStyle, this.currentRecursiveStrategy, null);
+      await renderDot(this.panel(!request.manual), request.editor, ir, mode, this.currentLabelStyle, this.currentRecursiveStrategy, this.metadataSourceFiles, null);
       this.lastPreview = {
         editor: request.editor,
         ir
@@ -271,7 +287,7 @@ class PreviewController {
   }
 
   private panel(preserveFocus: boolean): PreviewPanel {
-    return PreviewPanel.createOrShow(this.extensionUri, this.callbacks, preserveFocus);
+    return PreviewPanel.createOrShow(this.context.extensionUri, this.callbacks, preserveFocus);
   }
 
   private labelStyle(): DotLabelStyle {
@@ -284,6 +300,28 @@ class PreviewController {
 
   private currentMode(): DotViewMode {
     return this.currentModeOverride ?? PreviewPanel.current()?.snapshot()?.mode ?? "combined";
+  }
+
+  private async selectMetadataSources(): Promise<void> {
+    const selected = await pickMetadataSourceFiles();
+    if (!selected) {
+      return;
+    }
+    this.metadataSourceFiles = Array.from(new Set(selected));
+    await this.context.workspaceState.update(PreviewController.metadataSourceStateKey, this.metadataSourceFiles);
+    clearMetadataSourceCache();
+    if (this.lastPreview) {
+      await this.requestPreview(this.lastPreview.editor, true, true);
+    }
+  }
+
+  private async clearMetadataSources(): Promise<void> {
+    this.metadataSourceFiles = [];
+    await this.context.workspaceState.update(PreviewController.metadataSourceStateKey, this.metadataSourceFiles);
+    clearMetadataSourceCache();
+    if (this.lastPreview) {
+      await this.requestPreview(this.lastPreview.editor, true, true);
+    }
   }
 }
 
@@ -336,6 +374,7 @@ async function renderDot(
   mode: DotViewMode,
   labelStyle: DotLabelStyle,
   recursiveStrategy: RecursiveStrategy,
+  metadataSourceFiles: string[],
   notice: string | null
 ): Promise<void> {
   const typstRenderings = await renderTypstSnippets(
@@ -353,6 +392,7 @@ async function renderDot(
     dot,
     svg,
     typstRenderings,
+    metadataSourceFiles,
     notice
   });
 }
@@ -375,6 +415,7 @@ async function renderNotice(panel: PreviewPanel, editor: vscode.TextEditor, mess
     dot,
     svg,
     typstRenderings: {},
+    metadataSourceFiles: [],
     notice: message
   });
 }

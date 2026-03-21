@@ -244,6 +244,19 @@ suite("eggplant pattern extension", () => {
     assert.match(preview.dot, /"mul" \[label="a \* add".*width=.*height=/);
   });
 
+  test("panel can clear external metadata source selections", async () => {
+    const editor = await openEditor(RUST_FIXTURE);
+    placeCursor(editor, "let p = Add::query");
+
+    await vscode.commands.executeCommand("eggplant-pattern.preview");
+    let preview = await waitForPreviewState();
+    assert.deepEqual(preview.metadataSourceFiles, []);
+
+    await dispatchPreviewPanelTestMessage({ type: "clearMetadataSources" });
+    preview = await waitForPreviewState();
+    assert.deepEqual(preview.metadataSourceFiles, []);
+  });
+
   test("recursive strategy dropdown switches between tree-safe and dag-expand", async () => {
     const editor = await openEditor(RUST_FIXTURE);
     placeCursor(editor, "ctx.insert_m_integral(pat.f, pat.x)");

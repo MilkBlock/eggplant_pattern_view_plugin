@@ -11,6 +11,7 @@ export interface PreviewPanelState {
   dot: string;
   svg: string;
   typstRenderings: Record<string, RenderedTypstSnippet>;
+  metadataSourceFiles: string[];
   notice: string | null;
 }
 
@@ -18,6 +19,8 @@ interface PreviewPanelCallbacks {
   onModeChange(mode: DotViewMode): Promise<void>;
   onLabelStyleChange(labelStyle: DotLabelStyle): Promise<void>;
   onRecursiveStrategyChange(strategy: RecursiveStrategy): Promise<void>;
+  onSelectMetadataSources(): Promise<void>;
+  onClearMetadataSources(): Promise<void>;
   onRefresh(): Promise<void>;
 }
 
@@ -25,6 +28,8 @@ type IncomingMessage =
   | { type: "changeMode"; mode: DotViewMode }
   | { type: "changeLabelStyle"; labelStyle: DotLabelStyle }
   | { type: "changeRecursiveStrategy"; recursiveStrategy: RecursiveStrategy }
+  | { type: "selectMetadataSources" }
+  | { type: "clearMetadataSources" }
   | { type: "refresh" };
 
 let currentPanel: PreviewPanel | undefined;
@@ -119,6 +124,12 @@ export class PreviewPanel implements vscode.Disposable {
         return;
       case "changeRecursiveStrategy":
         await this.callbacks.onRecursiveStrategyChange(message.recursiveStrategy);
+        return;
+      case "selectMetadataSources":
+        await this.callbacks.onSelectMetadataSources();
+        return;
+      case "clearMetadataSources":
+        await this.callbacks.onClearMetadataSources();
         return;
       case "refresh":
         await this.callbacks.onRefresh();
@@ -224,6 +235,8 @@ export class PreviewPanel implements vscode.Disposable {
           <option value="tree-safe">tree-safe</option>
           <option value="dag-expand">dag-expand</option>
         </select>
+        <button id="metadataSources" type="button">Meta Sources</button>
+        <button id="clearMetadataSources" type="button">Clear Sources</button>
         <button id="refresh" type="button">Refresh</button>
       </div>
       <div class="meta" id="meta">No preview yet.</div>
@@ -235,6 +248,8 @@ export class PreviewPanel implements vscode.Disposable {
       const labelStyle = document.getElementById("labelStyle");
       const recursiveStrategy = document.getElementById("recursiveStrategy");
       const refresh = document.getElementById("refresh");
+      const metadataSources = document.getElementById("metadataSources");
+      const clearMetadataSources = document.getElementById("clearMetadataSources");
       const meta = document.getElementById("meta");
       const graph = document.getElementById("graph");
 
@@ -309,6 +324,14 @@ export class PreviewPanel implements vscode.Disposable {
         vscode.postMessage({ type: "refresh" });
       });
 
+      metadataSources.addEventListener("click", () => {
+        vscode.postMessage({ type: "selectMetadataSources" });
+      });
+
+      clearMetadataSources.addEventListener("click", () => {
+        vscode.postMessage({ type: "clearMetadataSources" });
+      });
+
       window.addEventListener("message", (event) => {
         const message = event.data;
         if (message.type !== "render") {
@@ -320,7 +343,10 @@ export class PreviewPanel implements vscode.Disposable {
         labelStyle.value = payload.labelStyle;
         recursiveStrategy.value = payload.recursiveStrategy;
         syncRecursiveStrategyState();
-        meta.textContent = payload.notice || payload.fileName + " | " + payload.mode + " | " + payload.labelStyle + (payload.labelStyle === "recursive" ? " | " + payload.recursiveStrategy : "");
+        const sourceSummary = payload.metadataSourceFiles.length > 0
+          ? " | meta sources: " + payload.metadataSourceFiles.length
+          : "";
+        meta.textContent = payload.notice || payload.fileName + " | " + payload.mode + " | " + payload.labelStyle + (payload.labelStyle === "recursive" ? " | " + payload.recursiveStrategy : "") + sourceSummary;
         graph.innerHTML = payload.svg;
         const rootSvg = graph.querySelector("svg");
         if (rootSvg) {
@@ -344,6 +370,8 @@ export async function dispatchPreviewPanelTestMessage(
     | { type: "changeMode"; mode: DotViewMode }
     | { type: "changeLabelStyle"; labelStyle: DotLabelStyle }
     | { type: "changeRecursiveStrategy"; recursiveStrategy: RecursiveStrategy }
+    | { type: "selectMetadataSources" }
+    | { type: "clearMetadataSources" }
     | { type: "refresh" }
 ): Promise<void> {
   await currentPanel?.dispatchTestMessage(message);
