@@ -57,7 +57,8 @@ function compactConstraintLabel(sourceText: string, resolvedText: string): strin
       return `${primitiveMatch[1]} ${operator} ${primitiveMatch[2]}`;
     }
   }
-  return sourceText.length < compactResolved.length ? sourceText : compactResolved;
+  const fallback = sourceText.length < compactResolved.length ? sourceText : compactResolved;
+  return `${fallback} [raw]`;
 }
 
 function semanticInsertLabel(sourceText: string): string {

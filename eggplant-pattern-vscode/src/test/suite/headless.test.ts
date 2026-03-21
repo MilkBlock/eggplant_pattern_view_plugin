@@ -458,6 +458,47 @@ fn demo() {
     }
   });
 
+  test("compact labels keep unknown constraint text with a raw marker", () => {
+    const ir: PatternIr = {
+      scope: {
+        kind: "pattern_function",
+        text_range: { start: 0, end: 10 },
+        pattern_range: { start: 0, end: 10 },
+        action_range: null
+      },
+      nodes: [
+        {
+          id: "lhs",
+          kind: "query_leaf",
+          dsl_type: "Value",
+          label: "lhs: Value",
+          range: { start: 0, end: 1 },
+          inputs: []
+        }
+      ],
+      edges: [],
+      roots: ["lhs"],
+      constraints: [
+        {
+          id: "constraint_0",
+          source_text: "lhs.custom_constraint(rhs)",
+          resolved_text: "lhs.handle().custom_constraint(&rhs.handle())",
+          referenced_vars: ["lhs"],
+          range: { start: 4, end: 5 }
+        }
+      ],
+      action_effects: [],
+      seed_facts: [],
+      display_templates: [],
+      typst_templates: [],
+      precedence_templates: [],
+      diagnostics: []
+    };
+
+    const dot = patternIrToDotWithMode(ir, "pattern", "compact");
+    assert.match(dot, /label="lhs\.custom_constraint\(rhs\) \[raw\]"/);
+  });
+
   test("compact labels prefer display templates when available", () => {
     const ir: PatternIr = {
       scope: {
