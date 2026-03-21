@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { DotLabelStyle, DotViewMode, RecursiveStrategy } from "./dot";
+import { RenderedTypstSnippet } from "./typst";
 
 export interface PreviewPanelState {
   title: string;
@@ -9,6 +10,7 @@ export interface PreviewPanelState {
   fileName: string;
   dot: string;
   svg: string;
+  typstRenderings: Record<string, RenderedTypstSnippet>;
   notice: string | null;
 }
 
@@ -240,6 +242,56 @@ export class PreviewPanel implements vscode.Disposable {
         recursiveStrategy.disabled = labelStyle.value !== "recursive";
       };
 
+      const parseSvgDimension = (svgMarkup, attr) => {
+        const match = svgMarkup.match(new RegExp(attr + '="([0-9.]+)(?:pt)?"'));
+        return match ? Number(match[1]) : 0;
+      };
+
+      const encodeSvgDataUri = (svgMarkup) => {
+        return "data:image/svg+xml;base64," + btoa(unescape(encodeURIComponent(svgMarkup)));
+      };
+
+      const applyTypstRenderings = (root, typstRenderings) => {
+        const nodeGroups = Array.from(root.querySelectorAll("g.node"));
+        for (const [targetId, rendered] of Object.entries(typstRenderings || {})) {
+          const nodeGroup = nodeGroups.find((group) => group.querySelector("title")?.textContent === targetId);
+          if (!nodeGroup) {
+            continue;
+          }
+
+          const shape = Array.from(nodeGroup.children).find((child) => {
+            return child.tagName !== "title" && child.tagName !== "text" && child.tagName !== "image";
+          });
+          if (!shape) {
+            continue;
+          }
+
+          for (const textNode of Array.from(nodeGroup.querySelectorAll("text"))) {
+            textNode.remove();
+          }
+
+          const bbox = shape.getBBox();
+          const formulaWidth = rendered.width || parseSvgDimension(rendered.svg, "width");
+          const formulaHeight = rendered.height || parseSvgDimension(rendered.svg, "height");
+          if (!formulaWidth || !formulaHeight) {
+            continue;
+          }
+
+          const maxWidth = bbox.width * 0.82;
+          const maxHeight = bbox.height * 0.62;
+          const scale = Math.min(maxWidth / formulaWidth, maxHeight / formulaHeight);
+          const width = formulaWidth * scale;
+          const height = formulaHeight * scale;
+          const image = document.createElementNS("http://www.w3.org/2000/svg", "image");
+          image.setAttribute("href", encodeSvgDataUri(rendered.svg));
+          image.setAttribute("x", String(bbox.x + (bbox.width - width) / 2));
+          image.setAttribute("y", String(bbox.y + (bbox.height - height) / 2));
+          image.setAttribute("width", String(width));
+          image.setAttribute("height", String(height));
+          nodeGroup.appendChild(image);
+        }
+      };
+
       mode.addEventListener("change", () => {
         vscode.postMessage({ type: "changeMode", mode: mode.value });
       });
@@ -270,6 +322,10 @@ export class PreviewPanel implements vscode.Disposable {
         syncRecursiveStrategyState();
         meta.textContent = payload.notice || payload.fileName + " | " + payload.mode + " | " + payload.labelStyle + (payload.labelStyle === "recursive" ? " | " + payload.recursiveStrategy : "");
         graph.innerHTML = payload.svg;
+        const rootSvg = graph.querySelector("svg");
+        if (rootSvg) {
+          applyTypstRenderings(rootSvg, payload.typstRenderings);
+        }
       });
 
       syncRecursiveStrategyState();

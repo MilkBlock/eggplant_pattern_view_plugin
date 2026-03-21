@@ -210,6 +210,7 @@ suite("eggplant pattern extension", () => {
 
     const preview = await waitForPreviewState((state) => state.mode === "action");
     assert.match(preview.dot, /integral\(f, x\)/);
+    assert.ok(preview.typstRenderings["effect:effect_0"]);
   });
 
   test("recursive strategy dropdown switches between tree-safe and dag-expand", async () => {

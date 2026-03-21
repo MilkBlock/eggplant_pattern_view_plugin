@@ -1,9 +1,10 @@
 import * as vscode from "vscode";
-import { DotLabelStyle, DotViewMode, patternIrToDotWithMode, RecursiveStrategy } from "./dot";
+import { collectTypstReplacementSources, DotLabelStyle, DotViewMode, patternIrToDotWithMode, RecursiveStrategy } from "./dot";
 import { configureExtractorResolution, ExtractorError, runExtractor } from "./extractor";
 import { PatternIr } from "./ir";
 import { PreviewPanel } from "./previewPanel";
 import { dotToSvg } from "./svg";
+import { renderTypstSnippets } from "./typst";
 
 export function activate(context: vscode.ExtensionContext): void {
   configureExtractorResolution(context.extensionPath);
@@ -334,6 +335,9 @@ async function renderDot(
 ): Promise<void> {
   const dot = patternIrToDotWithMode(ir, mode, labelStyle, recursiveStrategy);
   const svg = await dotToSvg(dot);
+  const typstRenderings = await renderTypstSnippets(
+    collectTypstReplacementSources(ir, mode, labelStyle, recursiveStrategy)
+  );
   const strategySuffix = labelStyle === "recursive" ? `, ${recursiveStrategy}` : "";
   await panel.render({
     title: `Eggplant Pattern (${modeLabel(mode)}, ${labelStyle}${strategySuffix}): ${editor.document.fileName.split("/").pop() ?? "Preview"}`,
@@ -343,6 +347,7 @@ async function renderDot(
     fileName: editor.document.fileName.split("/").pop() ?? "Preview",
     dot,
     svg,
+    typstRenderings,
     notice
   });
 }
@@ -364,6 +369,7 @@ async function renderNotice(panel: PreviewPanel, editor: vscode.TextEditor, mess
     fileName: editor.document.fileName.split("/").pop() ?? "Preview",
     dot,
     svg,
+    typstRenderings: {},
     notice: message
   });
 }

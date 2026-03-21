@@ -4,6 +4,11 @@ export type DotViewMode = "pattern" | "action" | "combined";
 export type DotLabelStyle = "compact" | "full" | "recursive";
 export type RecursiveStrategy = "tree-safe" | "dag-expand";
 
+export interface TypstReplacementSource {
+  targetId: string;
+  source: string;
+}
+
 function quote(value: string): string {
   return JSON.stringify(value);
 }
@@ -445,4 +450,60 @@ export function patternIrToDotWithMode(
 
   lines.push("}");
   return lines.join("\n");
+}
+
+export function collectTypstReplacementSources(
+  ir: PatternIr,
+  mode: DotViewMode,
+  labelStyle: DotLabelStyle = "full",
+  recursiveStrategy: RecursiveStrategy = "tree-safe"
+): TypstReplacementSource[] {
+  if (labelStyle === "full") {
+    return [];
+  }
+
+  const sources: TypstReplacementSource[] = [];
+  const rootSet = new Set(ir.roots);
+  const nodeSet = new Set(ir.nodes.map((node) => node.id));
+  const nodeById = new Map(ir.nodes.map((node) => [node.id, node]));
+  const incomingCounts = new Map<string, number>();
+  for (const edge of ir.edges) {
+    incomingCounts.set(edge.to, (incomingCounts.get(edge.to) ?? 0) + 1);
+  }
+
+  const showPattern = mode === "pattern" || mode === "combined";
+  const showAction = mode === "action" || mode === "combined";
+
+  if (showPattern) {
+    for (const node of ir.nodes) {
+      if (!findTypstTemplate(ir, node.dsl_type)) {
+        continue;
+      }
+      sources.push({
+        targetId: node.id,
+        source: nodeLabel(ir, node.label, node.dsl_type, node.inputs, labelStyle, recursiveStrategy, node.id, nodeById, incomingCounts)
+      });
+    }
+  }
+
+  if (showAction && ir.action_effects.length > 0) {
+    const effectByBinding = new Map(
+      ir.action_effects
+        .filter((effect) => effect.bound_var !== null)
+        .map((effect) => [effect.bound_var as string, effect.id])
+    );
+
+    for (const effect of ir.action_effects) {
+      const parsed = parseSemanticInsert(effect.source_text);
+      if (!parsed || !findTypstTemplate(ir, parsed.variantName)) {
+        continue;
+      }
+      sources.push({
+        targetId: `effect:${effect.id}`,
+        source: actionEffectLabel(ir, effect.source_text, labelStyle, recursiveStrategy, effectByBinding, nodeById, incomingCounts, effect.id)
+      });
+    }
+  }
+
+  return sources.filter((entry) => entry.source.trim().length > 0 && (nodeSet.has(entry.targetId) || rootSet.has(entry.targetId) || entry.targetId.startsWith("effect:")));
 }
