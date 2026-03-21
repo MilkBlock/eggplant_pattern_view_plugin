@@ -47,8 +47,8 @@ suite("eggplant pattern extension", () => {
     await vscode.workspace.getConfiguration().update("eggplantPattern.defaultDotView", "auto", vscode.ConfigurationTarget.Global);
     await vscode.workspace.getConfiguration().update("eggplantPattern.defaultLabelStyle", "compact", vscode.ConfigurationTarget.Global);
     await vscode.workspace.getConfiguration().update("eggplantPattern.defaultLabelStyle", "compact", vscode.ConfigurationTarget.Workspace);
-    await vscode.workspace.getConfiguration().update("eggplantPattern.defaultRecursiveStrategy", "tree-safe", vscode.ConfigurationTarget.Global);
-    await vscode.workspace.getConfiguration().update("eggplantPattern.defaultRecursiveStrategy", "tree-safe", vscode.ConfigurationTarget.Workspace);
+    await vscode.workspace.getConfiguration().update("eggplantPattern.defaultRecursiveStrategy", "dag-expand", vscode.ConfigurationTarget.Global);
+    await vscode.workspace.getConfiguration().update("eggplantPattern.defaultRecursiveStrategy", "dag-expand", vscode.ConfigurationTarget.Workspace);
   });
 
   test("manual preview renders add_rule closure scope", async () => {
@@ -216,8 +216,8 @@ suite("eggplant pattern extension", () => {
     await dispatchPreviewPanelTestMessage({ type: "changeLabelStyle", labelStyle: "recursive" });
 
     const preview = await waitForPreviewState((state) => state.labelStyle === "recursive");
-    assert.match(preview.title, /recursive, tree-safe/);
-    assert.equal(preview.recursiveStrategy, "tree-safe");
+    assert.match(preview.title, /recursive, dag-expand/);
+    assert.equal(preview.recursiveStrategy, "dag-expand");
   });
 
   test("preview prefers typst templates when available", async () => {

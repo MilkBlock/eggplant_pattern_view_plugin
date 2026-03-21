@@ -308,7 +308,7 @@ function configuredDefaultLabelStyle(): DotLabelStyle {
 function configuredDefaultRecursiveStrategy(): RecursiveStrategy {
   return vscode.workspace.getConfiguration().get<RecursiveStrategy>(
     "eggplantPattern.defaultRecursiveStrategy",
-    "tree-safe"
+    "dag-expand"
   );
 }
 
