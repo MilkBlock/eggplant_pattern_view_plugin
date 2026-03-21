@@ -305,6 +305,15 @@ function typstPatternSource(
   );
 }
 
+function recursivePatternLabelForAction(
+  ir: PatternIr,
+  nodeById: Map<string, PatternNode>,
+  incomingCounts: Map<string, number>,
+  nodeId: string
+): RecursivePatternResult | null {
+  return recursivePatternLabel(ir, nodeById, incomingCounts, nodeId, "dag-expand", new Set());
+}
+
 interface RecursiveActionResult {
   text: string;
   precedence: number;
@@ -356,7 +365,7 @@ function recursiveActionLabel(
     }
     const patVar = trimmed.replace(/^(?:pat|matched)\./, "");
     if (nodeById.has(patVar)) {
-      const child = recursivePatternLabel(ir, nodeById, incomingCounts, patVar, strategy, new Set());
+      const child = recursivePatternLabelForAction(ir, nodeById, incomingCounts, patVar);
       if (child) {
         return {
           name: template.fields[index],
