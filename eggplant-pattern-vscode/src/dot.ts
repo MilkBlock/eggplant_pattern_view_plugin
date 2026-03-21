@@ -9,6 +9,11 @@ export interface TypstReplacementSource {
   source: string;
 }
 
+export interface TypstSizingInfo {
+  width: number;
+  height: number;
+}
+
 interface RenderedTemplateField {
   precedence: number;
   text: string;
@@ -17,6 +22,21 @@ interface RenderedTemplateField {
 
 function quote(value: string): string {
   return JSON.stringify(value);
+}
+
+function inchesFromPoints(points: number, paddingPoints: number, minimumInches: number): string {
+  return Math.max((points + paddingPoints) / 72, minimumInches).toFixed(3);
+}
+
+function applyTypstSizing(attrs: string[], targetId: string, typstSizing: Record<string, TypstSizingInfo>): void {
+  const sizing = typstSizing[targetId];
+  if (!sizing || !sizing.width || !sizing.height) {
+    return;
+  }
+
+  attrs.push(`width=${inchesFromPoints(sizing.width, 22, 0.75)}`);
+  attrs.push(`height=${inchesFromPoints(sizing.height, 18, 0.45)}`);
+  attrs.push('margin="0.16,0.12"');
 }
 
 function toVariantTypeName(insertTarget: string): string {
@@ -473,7 +493,8 @@ export function patternIrToDotWithMode(
   ir: PatternIr,
   mode: DotViewMode,
   labelStyle: DotLabelStyle = "full",
-  recursiveStrategy: RecursiveStrategy = "tree-safe"
+  recursiveStrategy: RecursiveStrategy = "tree-safe",
+  typstSizing: Record<string, TypstSizingInfo> = {}
 ): string {
   const lines: string[] = [
     "digraph EggplantPattern {",
@@ -502,6 +523,7 @@ export function patternIrToDotWithMode(
         `label=${quote(nodeLabel(ir, node.label, node.dsl_type, node.inputs, labelStyle, recursiveStrategy, node.id, nodeById, incomingCounts))}`,
         `shape=${node.kind === "query_leaf" ? "ellipse" : "box"}`
       ];
+      applyTypstSizing(attrs, node.id, typstSizing);
       if (rootSet.has(node.id)) {
         attrs.push("penwidth=2");
         attrs.push(`color=${quote("#c26d00")}`);
@@ -555,7 +577,14 @@ export function patternIrToDotWithMode(
     );
     for (const effect of ir.action_effects) {
       const id = `effect:${effect.id}`;
-      lines.push(`    ${quote(id)} [label=${quote(actionEffectLabel(ir, effect.source_text, labelStyle, recursiveStrategy, effectByBinding, nodeById, incomingCounts, effect.id))}, shape=note, fillcolor="#fff0e8", color="#a55d35"];`);
+      const attrs = [
+        `label=${quote(actionEffectLabel(ir, effect.source_text, labelStyle, recursiveStrategy, effectByBinding, nodeById, incomingCounts, effect.id))}`,
+        'shape=note',
+        'fillcolor="#fff0e8"',
+        'color="#a55d35"'
+      ];
+      applyTypstSizing(attrs, id, typstSizing);
+      lines.push(`    ${quote(id)} [${attrs.join(", ")}];`);
       const targets = effect.referenced_pat_vars.filter((name) =>
         showPattern ? (nodeSet.has(name) || rootSet.has(name)) : actionAnchorVars.includes(name)
       );

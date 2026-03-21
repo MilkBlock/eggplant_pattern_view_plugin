@@ -338,11 +338,11 @@ async function renderDot(
   recursiveStrategy: RecursiveStrategy,
   notice: string | null
 ): Promise<void> {
-  const dot = patternIrToDotWithMode(ir, mode, labelStyle, recursiveStrategy);
-  const svg = await dotToSvg(dot);
   const typstRenderings = await renderTypstSnippets(
     collectTypstReplacementSources(ir, mode, labelStyle, recursiveStrategy)
   );
+  const dot = patternIrToDotWithMode(ir, mode, labelStyle, recursiveStrategy, typstRenderings);
+  const svg = await dotToSvg(dot);
   const strategySuffix = labelStyle === "recursive" ? `, ${recursiveStrategy}` : "";
   await panel.render({
     title: `Eggplant Pattern (${modeLabel(mode)}, ${labelStyle}${strategySuffix}): ${editor.document.fileName.split("/").pop() ?? "Preview"}`,

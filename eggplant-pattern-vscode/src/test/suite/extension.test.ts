@@ -241,6 +241,7 @@ suite("eggplant pattern extension", () => {
     const preview = await waitForPreviewState((state) => state.mode === "pattern" && state.labelStyle === "compact");
     assert.ok(preview.typstRenderings["add"]);
     assert.ok(preview.typstRenderings["mul"]);
+    assert.match(preview.dot, /"mul" \[label="a \* add".*width=.*height=/);
   });
 
   test("recursive strategy dropdown switches between tree-safe and dag-expand", async () => {

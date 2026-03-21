@@ -277,8 +277,8 @@ export class PreviewPanel implements vscode.Disposable {
             continue;
           }
 
-          const maxWidth = bbox.width * 0.8;
-          const maxHeight = bbox.height * 0.68;
+          const maxWidth = bbox.width * 0.92;
+          const maxHeight = bbox.height * 0.86;
           const scale = Math.min(maxWidth / formulaWidth, maxHeight / formulaHeight);
           const width = formulaWidth * scale;
           const height = formulaHeight * scale;
