@@ -102,7 +102,7 @@
             "full",
             "recursive"
           ],
-          "default": "compact",
+          "default": "recursive",
           "description": "Default label style for the built-in graph preview. 'compact' reduces API noise, 'full' preserves raw debugging detail, and 'recursive' expands display templates through the subgraph when possible."
         },
         "eggplantPattern.defaultRecursiveStrategy": {

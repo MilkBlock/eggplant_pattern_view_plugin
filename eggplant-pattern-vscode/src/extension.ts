@@ -301,7 +301,7 @@ function configuredDefaultDotView(): DotViewMode | "auto" {
 function configuredDefaultLabelStyle(): DotLabelStyle {
   return vscode.workspace.getConfiguration().get<DotLabelStyle>(
     "eggplantPattern.defaultLabelStyle",
-    "compact"
+    "recursive"
   );
 }
 

@@ -45,8 +45,8 @@ suite("eggplant pattern extension", () => {
     warningMessages.length = 0;
     await vscode.workspace.getConfiguration().update("eggplantPattern.autoPreview", false, vscode.ConfigurationTarget.Global);
     await vscode.workspace.getConfiguration().update("eggplantPattern.defaultDotView", "auto", vscode.ConfigurationTarget.Global);
-    await vscode.workspace.getConfiguration().update("eggplantPattern.defaultLabelStyle", "compact", vscode.ConfigurationTarget.Global);
-    await vscode.workspace.getConfiguration().update("eggplantPattern.defaultLabelStyle", "compact", vscode.ConfigurationTarget.Workspace);
+    await vscode.workspace.getConfiguration().update("eggplantPattern.defaultLabelStyle", "recursive", vscode.ConfigurationTarget.Global);
+    await vscode.workspace.getConfiguration().update("eggplantPattern.defaultLabelStyle", "recursive", vscode.ConfigurationTarget.Workspace);
     await vscode.workspace.getConfiguration().update("eggplantPattern.defaultRecursiveStrategy", "dag-expand", vscode.ConfigurationTarget.Global);
     await vscode.workspace.getConfiguration().update("eggplantPattern.defaultRecursiveStrategy", "dag-expand", vscode.ConfigurationTarget.Workspace);
   });
@@ -59,7 +59,7 @@ suite("eggplant pattern extension", () => {
 
     const preview = await waitForPreviewState();
     assert.match(preview.title, /pattern\.dot/);
-    assert.equal(preview.labelStyle, "compact");
+    assert.equal(preview.labelStyle, "recursive");
     assert.match(preview.dot, /digraph EggplantPattern/);
     assert.match(preview.dot, /"p" -> "l"/);
     assert.match(preview.svg, /<svg/);
@@ -199,7 +199,7 @@ suite("eggplant pattern extension", () => {
 
     await vscode.commands.executeCommand("eggplant-pattern.preview");
     let preview = await waitForPreviewState();
-    assert.equal(preview.labelStyle, "compact");
+    assert.equal(preview.labelStyle, "recursive");
     assert.match(preview.dot, /union\(p, op_value\)/);
 
     await dispatchPreviewPanelTestMessage({ type: "changeLabelStyle", labelStyle: "full" });
