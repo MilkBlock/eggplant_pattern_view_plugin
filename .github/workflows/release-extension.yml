@@ -106,6 +106,8 @@ jobs:
       - name: Override publisher for CI packaging
         if: ${{ vars.VSCE_PUBLISHER != '' }}
         run: npm pkg set publisher="${{ vars.VSCE_PUBLISHER }}"
+      - name: Create VSIX output directory
+        run: mkdir -p dist
       - name: Package VSIX
         run: npx @vscode/vsce package --out dist/eggplant-pattern-vscode.vsix
       - name: Publish to Marketplace
