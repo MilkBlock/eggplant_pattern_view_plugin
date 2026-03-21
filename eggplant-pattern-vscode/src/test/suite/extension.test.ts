@@ -10,6 +10,7 @@ const EXTENSION_ID = "MilkBlock.eggplant-pattern-vscode";
 const FIXTURE_DIR = path.resolve(__dirname, "../../../test-fixtures/workspace");
 const RUST_FIXTURE = path.join(FIXTURE_DIR, "pattern_samples.rs");
 const TEXT_FIXTURE = path.join(FIXTURE_DIR, "notes.txt");
+const MATH_MICROBENCHMARK_FIXTURE = "/Users/mineralsteins/Repos/egg_related/eggplant_backup/benches/runners/eggplant_rewrite/math_microbenchmark.rs";
 const EXTRACTOR_PATH = path.resolve(__dirname, "../../../../", "eggplant-pattern-extractor", "target", "debug", process.platform === "win32" ? "eggplant-pattern-extractor.exe" : "eggplant-pattern-extractor");
 const BUNDLED_EXTRACTOR_PATH = path.resolve(__dirname, "../../../bin", `${process.platform}-${process.arch}`, process.platform === "win32" ? "eggplant-pattern-extractor.exe" : "eggplant-pattern-extractor");
 
@@ -228,6 +229,18 @@ suite("eggplant pattern extension", () => {
     const preview = await waitForPreviewState((state) => state.mode === "action");
     assert.match(preview.dot, /f \/ x/);
     assert.ok(preview.typstRenderings["effect:effect_0"]);
+  });
+
+  test("compact preview replaces math_microbenchmark root nodes with typst svg", async () => {
+    const editor = await openEditor(MATH_MICROBENCHMARK_FIXTURE);
+    placeCursor(editor, "let mul = MMul::query(&a, &add);");
+
+    await vscode.commands.executeCommand("eggplant-pattern.preview");
+    await dispatchPreviewPanelTestMessage({ type: "changeLabelStyle", labelStyle: "compact" });
+
+    const preview = await waitForPreviewState((state) => state.mode === "pattern" && state.labelStyle === "compact");
+    assert.ok(preview.typstRenderings["add"]);
+    assert.ok(preview.typstRenderings["mul"]);
   });
 
   test("recursive strategy dropdown switches between tree-safe and dag-expand", async () => {

@@ -256,6 +256,41 @@ function recursivePatternLabel(
   };
 }
 
+function typstPatternSource(
+  ir: PatternIr,
+  node: PatternNode,
+  labelStyle: DotLabelStyle,
+  strategy: RecursiveStrategy,
+  nodeById: Map<string, PatternNode>,
+  incomingCounts: Map<string, number>
+): string {
+  if (labelStyle !== "full" && node.inputs.length > 0) {
+    const recursive = recursivePatternLabel(
+      ir,
+      nodeById,
+      incomingCounts,
+      node.id,
+      strategy,
+      new Set()
+    );
+    if (recursive) {
+      return recursive.text;
+    }
+  }
+
+  return nodeLabel(
+    ir,
+    node.label,
+    node.dsl_type,
+    node.inputs,
+    labelStyle,
+    strategy,
+    node.id,
+    nodeById,
+    incomingCounts
+  );
+}
+
 interface RecursiveActionResult {
   text: string;
   precedence: number;
@@ -568,7 +603,7 @@ export function collectTypstReplacementSources(
       }
       sources.push({
         targetId: node.id,
-        source: nodeLabel(ir, node.label, node.dsl_type, node.inputs, labelStyle, recursiveStrategy, node.id, nodeById, incomingCounts)
+        source: typstPatternSource(ir, node, labelStyle, recursiveStrategy, nodeById, incomingCounts)
       });
     }
   }
