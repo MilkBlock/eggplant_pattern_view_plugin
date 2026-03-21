@@ -79,6 +79,8 @@ jobs:
       - build-linux
       - build-windows
     runs-on: ubuntu-24.04
+    env:
+      VSCE_PAT: ${{ secrets.VSCE_PAT }}
     defaults:
       run:
         working-directory: eggplant-pattern-vscode
@@ -105,9 +107,7 @@ jobs:
       - name: Package VSIX
         run: npx @vscode/vsce package --out dist/eggplant-pattern-vscode.vsix
       - name: Publish to Marketplace
-        if: ${{ github.event_name == 'release' && secrets.VSCE_PAT != '' && vars.VSCE_PUBLISHER != '' }}
-        env:
-          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        if: ${{ github.event_name == 'release' && env.VSCE_PAT != '' && vars.VSCE_PUBLISHER != '' }}
         run: npx @vscode/vsce publish --packagePath dist/eggplant-pattern-vscode.vsix
       - name: Upload VSIX
         uses: actions/upload-artifact@v4
