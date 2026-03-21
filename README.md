@@ -26,6 +26,7 @@ Compile the extension:
 ```bash
 cd eggplant-pattern-vscode
 npm install
+npm run bundle:extractor
 npm run compile
 npm test
 ```
@@ -57,13 +58,51 @@ npm run test:extension-host:graphviz
 3. In the extension host, open a Rust file containing a supported eggplant pattern.
 4. Run `Eggplant Pattern: Preview Current Scope`, or leave `eggplantPattern.autoPreview` enabled for automatic refresh.
 
-By default, the extension looks for the extractor binary at:
+By default, the extension looks for a bundled platform binary at:
+
+```text
+<extension>/bin/<platform-arch>/eggplant-pattern-extractor
+```
+
+During repo-local development, it falls back to:
 
 ```text
 <repo>/eggplant-pattern-extractor/target/debug/eggplant-pattern-extractor
 ```
 
 Override that path with the `eggplantPattern.extractorPath` setting if needed.
+
+## Release / Publish
+
+The repo now includes a multi-platform packaging path for the VSCode extension:
+
+- GitHub Actions workflow: `.github/workflows/release-extension.yml`
+- Native extractor targets:
+  - `darwin-arm64`
+  - `darwin-x64`
+  - `linux-arm64`
+  - `linux-x64`
+  - `win32-arm64`
+  - `win32-x64`
+- Packaging strategy:
+  - build each Rust extractor as a release artifact
+  - stage them into `eggplant-pattern-vscode/bin/<platform-arch>/`
+  - package one VSIX containing all supported binaries
+
+Local commands:
+
+```bash
+cd eggplant-pattern-vscode
+npm run package:extension
+npm run package:vsix
+```
+
+Marketplace publishing is wired for CI, but still requires repository configuration:
+
+- repo variable `VSCE_PUBLISHER`
+- repo secret `VSCE_PAT`
+- a real Marketplace publisher identity instead of the development placeholder `publisher: \"local\"`
+- the repo now includes a proprietary `LICENSE`; replace it only if you later want a different distribution model
 
 For a repo-local validation target, use `samples/pattern_samples.rs`, which includes:
 

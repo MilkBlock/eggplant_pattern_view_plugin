@@ -1,7 +1,9 @@
 import * as assert from "assert";
+import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
 import { setup, suite, suiteSetup, suiteTeardown, test } from "mocha";
+import { resolveExtractorPath } from "../../extractor";
 
 const EXTENSION_ID = "local.eggplant-pattern-vscode";
 const GRAPHVIZ_EXTENSION_ID = "tintinweb.graphviz-interactive-preview";
@@ -14,6 +16,7 @@ const FIXTURE_DIR = path.resolve(__dirname, "../../../test-fixtures/workspace");
 const RUST_FIXTURE = path.join(FIXTURE_DIR, "pattern_samples.rs");
 const TEXT_FIXTURE = path.join(FIXTURE_DIR, "notes.txt");
 const EXTRACTOR_PATH = path.resolve(__dirname, "../../../../", "eggplant-pattern-extractor", "target", "debug", process.platform === "win32" ? "eggplant-pattern-extractor.exe" : "eggplant-pattern-extractor");
+const BUNDLED_EXTRACTOR_PATH = path.resolve(__dirname, "../../../bin", `${process.platform}-${process.arch}`, process.platform === "win32" ? "eggplant-pattern-extractor.exe" : "eggplant-pattern-extractor");
 
 interface PreviewCall {
   title: string;
@@ -225,6 +228,12 @@ suite("eggplant pattern extension", () => {
 
     assert.equal(previewCalls.length, 0);
     assert.equal(warningMessages.length, 1);
+  });
+
+  test("extractor resolution prefers bundled binary by default", async () => {
+    assert.ok(fs.existsSync(BUNDLED_EXTRACTOR_PATH), `Expected bundled extractor at ${BUNDLED_EXTRACTOR_PATH}`);
+    await vscode.workspace.getConfiguration().update("eggplantPattern.extractorPath", "", vscode.ConfigurationTarget.Global);
+    assert.equal(resolveExtractorPath(), BUNDLED_EXTRACTOR_PATH);
   });
 });
 

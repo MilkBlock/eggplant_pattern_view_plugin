@@ -4,7 +4,16 @@ import * as vscode from "vscode";
 import { spawn } from "child_process";
 import { PatternIr } from "./ir";
 
+let configuredExtensionPath: string | undefined;
+
+export function configureExtractorResolution(extensionPath: string): void {
+  configuredExtensionPath = extensionPath;
+}
+
 function extensionRoot(): string {
+  if (configuredExtensionPath) {
+    return configuredExtensionPath;
+  }
   return path.resolve(__dirname, "..");
 }
 
@@ -13,6 +22,10 @@ function repoRoot(): string {
 }
 
 function defaultExtractorPath(): string {
+  return devExtractorPath();
+}
+
+function devExtractorPath(): string {
   const binaryName = process.platform === "win32"
     ? "eggplant-pattern-extractor.exe"
     : "eggplant-pattern-extractor";
@@ -23,6 +36,17 @@ function defaultExtractorPath(): string {
     "debug",
     binaryName
   );
+}
+
+function platformTriple(): string {
+  return `${process.platform}-${process.arch}`;
+}
+
+function bundledExtractorPath(): string {
+  const binaryName = process.platform === "win32"
+    ? "eggplant-pattern-extractor.exe"
+    : "eggplant-pattern-extractor";
+  return path.join(extensionRoot(), "bin", platformTriple(), binaryName);
 }
 
 export class ExtractorError extends Error {
@@ -38,6 +62,10 @@ export function resolveExtractorPath(): string {
   const configured = vscode.workspace.getConfiguration().get<string>("eggplantPattern.extractorPath", "");
   if (configured.trim() !== "") {
     return configured.trim();
+  }
+  const bundled = bundledExtractorPath();
+  if (fs.existsSync(bundled)) {
+    return bundled;
   }
   return defaultExtractorPath();
 }
@@ -89,7 +117,7 @@ async function ensureExtractorAvailable(extractorPath: string): Promise<void> {
   } catch {
     throw new ExtractorError(
       "missing_binary",
-      `Extractor binary not found at ${extractorPath}. Build it with \`cargo build\` in eggplant-pattern-extractor or set eggplantPattern.extractorPath.`
+      `Extractor binary not found at ${extractorPath}. Bundle the platform extractor into the extension, build it with \`cargo build\` for local development, or set eggplantPattern.extractorPath.`
     );
   }
 }
@@ -97,7 +125,7 @@ async function ensureExtractorAvailable(extractorPath: string): Promise<void> {
 function formatSpawnError(extractorPath: string, error: Error): string {
   const anyError = error as NodeJS.ErrnoException;
   if (anyError.code === "ENOENT") {
-    return `Extractor binary not found at ${extractorPath}. Build it with \`cargo build\` in eggplant-pattern-extractor or set eggplantPattern.extractorPath.`;
+    return `Extractor binary not found at ${extractorPath}. Bundle the platform extractor into the extension, build it with \`cargo build\` for local development, or set eggplantPattern.extractorPath.`;
   }
   return anyError.message;
 }

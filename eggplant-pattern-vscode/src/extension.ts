@@ -1,11 +1,12 @@
 import * as vscode from "vscode";
 import { DotViewMode, patternIrToDotWithMode } from "./dot";
-import { ExtractorError, runExtractor } from "./extractor";
+import { configureExtractorResolution, ExtractorError, runExtractor } from "./extractor";
 import { PatternIr } from "./ir";
 
 const GRAPHVIZ_PREVIEW_COMMAND = "graphviz-interactive-preview.preview.beside";
 
 export function activate(context: vscode.ExtensionContext): void {
+  configureExtractorResolution(context.extensionPath);
   const controller = new PreviewController();
 
   context.subscriptions.push(
