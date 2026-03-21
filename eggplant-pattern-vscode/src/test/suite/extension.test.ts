@@ -209,7 +209,7 @@ suite("eggplant pattern extension", () => {
     await vscode.commands.executeCommand("eggplant-pattern.preview");
 
     const preview = await waitForPreviewState((state) => state.mode === "action");
-    assert.match(preview.dot, /integral\(f, x\)/);
+    assert.match(preview.dot, /f \/ x/);
     assert.ok(preview.typstRenderings["effect:effect_0"]);
   });
 

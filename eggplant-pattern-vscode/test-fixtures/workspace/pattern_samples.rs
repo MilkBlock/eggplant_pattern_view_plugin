@@ -22,7 +22,7 @@ enum DisplayMath {
         f: DisplayMath,
     },
     #[eggplant::display("integ {f} {x}")]
-    #[eggplant::typst("integral({f}, {x})")]
+    #[eggplant::typst("f / x")]
     MIntegral {
         f: DisplayMath,
         x: DisplayMath,

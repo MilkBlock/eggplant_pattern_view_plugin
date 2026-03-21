@@ -33,7 +33,7 @@ async function renderTypstSnippetUncached(source: string): Promise<RenderedTypst
     const document = [
       "#set page(width: auto, height: auto, margin: 0pt)",
       "#set par(justify: false)",
-      `#box(inset: (x: 1.2pt, y: 1.6pt))[${source}]`
+      `#box(inset: (x: 1.2pt, y: 1.6pt))[$ ${normalizeTypstMathSource(source)} $]`
     ].join("\n");
     const stdout = await runTypst(document);
     return {
@@ -78,4 +78,12 @@ function runTypst(document: string): Promise<string> {
 
     child.stdin.end(document);
   });
+}
+
+function normalizeTypstMathSource(source: string): string {
+  const trimmed = source.trim();
+  if (trimmed.startsWith("$") && trimmed.endsWith("$") && trimmed.length >= 2) {
+    return trimmed.slice(1, -1).trim();
+  }
+  return trimmed;
 }
