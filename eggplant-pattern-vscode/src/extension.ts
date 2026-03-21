@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { DotViewMode, patternIrToDotWithMode } from "./dot";
+import { DotLabelStyle, DotViewMode, patternIrToDotWithMode } from "./dot";
 import { configureExtractorResolution, ExtractorError, runExtractor } from "./extractor";
 import { PatternIr } from "./ir";
 import { PreviewPanel } from "./previewPanel";
@@ -89,6 +89,7 @@ class PreviewController {
   private lastPreview: LastPreview | undefined;
   private readonly callbacks: {
     onModeChange: (mode: DotViewMode) => Promise<void>;
+    onLabelStyleChange: (labelStyle: DotLabelStyle) => Promise<void>;
     onRefresh: () => Promise<void>;
   };
 
@@ -96,6 +97,9 @@ class PreviewController {
     this.callbacks = {
       onModeChange: async (mode) => {
         await this.showCurrentMode(mode);
+      },
+      onLabelStyleChange: async (labelStyle) => {
+        await this.showCurrentLabelStyle(labelStyle);
       },
       onRefresh: async () => {
         const editor = this.lastPreview?.editor ?? vscode.window.activeTextEditor;
@@ -139,7 +143,7 @@ class PreviewController {
 
   async showCurrentMode(mode: DotViewMode): Promise<void> {
     if (this.lastPreview) {
-      await renderDot(this.panel(), this.lastPreview.editor, this.lastPreview.ir, mode, null);
+      await renderDot(this.panel(), this.lastPreview.editor, this.lastPreview.ir, mode, this.labelStyle(), null);
       return;
     }
 
@@ -161,6 +165,20 @@ class PreviewController {
     };
     if (!this.running) {
       await this.drainQueue();
+    }
+  }
+
+  async showCurrentLabelStyle(labelStyle: DotLabelStyle): Promise<void> {
+    await vscode.workspace.getConfiguration().update(
+      "eggplantPattern.defaultLabelStyle",
+      labelStyle,
+      vscode.ConfigurationTarget.Workspace
+    );
+
+    if (this.lastPreview) {
+      const offset = this.lastPreview.editor.document.offsetAt(this.lastPreview.editor.selection.active);
+      const mode = resolveDotViewMode(this.lastPreview.ir, offset);
+      await renderDot(this.panel(), this.lastPreview.editor, this.lastPreview.ir, mode, labelStyle, null);
     }
   }
 
@@ -186,7 +204,7 @@ class PreviewController {
         return;
       }
       const mode = request.forcedMode ?? resolveDotViewMode(ir, offset);
-      await renderDot(this.panel(), request.editor, ir, mode, null);
+      await renderDot(this.panel(), request.editor, ir, mode, this.labelStyle(), null);
       this.lastPreview = {
         editor: request.editor,
         ir
@@ -212,6 +230,10 @@ class PreviewController {
   private panel(): PreviewPanel {
     return PreviewPanel.createOrShow(this.extensionUri, this.callbacks);
   }
+
+  private labelStyle(): DotLabelStyle {
+    return configuredDefaultLabelStyle();
+  }
 }
 
 function containsOffset(range: { start: number; end: number } | null, offset: number): boolean {
@@ -222,6 +244,13 @@ function configuredDefaultDotView(): DotViewMode | "auto" {
   return vscode.workspace.getConfiguration().get<DotViewMode | "auto">(
     "eggplantPattern.defaultDotView",
     "auto"
+  );
+}
+
+function configuredDefaultLabelStyle(): DotLabelStyle {
+  return vscode.workspace.getConfiguration().get<DotLabelStyle>(
+    "eggplantPattern.defaultLabelStyle",
+    "compact"
   );
 }
 
@@ -247,13 +276,15 @@ async function renderDot(
   editor: vscode.TextEditor,
   ir: PatternIr,
   mode: DotViewMode,
+  labelStyle: DotLabelStyle,
   notice: string | null
 ): Promise<void> {
-  const dot = patternIrToDotWithMode(ir, mode);
+  const dot = patternIrToDotWithMode(ir, mode, labelStyle);
   const svg = await dotToSvg(dot);
   await panel.render({
-    title: `Eggplant Pattern (${modeLabel(mode)}): ${editor.document.fileName.split("/").pop() ?? "Preview"}`,
+    title: `Eggplant Pattern (${modeLabel(mode)}, ${labelStyle}): ${editor.document.fileName.split("/").pop() ?? "Preview"}`,
     mode,
+    labelStyle,
     fileName: editor.document.fileName.split("/").pop() ?? "Preview",
     dot,
     svg,
@@ -272,8 +303,9 @@ async function renderNotice(panel: PreviewPanel, editor: vscode.TextEditor, mess
   ].join("\n");
   const svg = await dotToSvg(dot);
   await panel.render({
-    title: `Eggplant Pattern (${modeLabel("combined")}): ${editor.document.fileName.split("/").pop() ?? "Preview"}`,
+    title: `Eggplant Pattern (${modeLabel("combined")}, ${configuredDefaultLabelStyle()}): ${editor.document.fileName.split("/").pop() ?? "Preview"}`,
     mode: "combined",
+    labelStyle: configuredDefaultLabelStyle(),
     fileName: editor.document.fileName.split("/").pop() ?? "Preview",
     dot,
     svg,

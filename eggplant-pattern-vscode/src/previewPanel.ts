@@ -1,9 +1,10 @@
 import * as vscode from "vscode";
-import { DotViewMode } from "./dot";
+import { DotLabelStyle, DotViewMode } from "./dot";
 
 export interface PreviewPanelState {
   title: string;
   mode: DotViewMode;
+  labelStyle: DotLabelStyle;
   fileName: string;
   dot: string;
   svg: string;
@@ -12,11 +13,13 @@ export interface PreviewPanelState {
 
 interface PreviewPanelCallbacks {
   onModeChange(mode: DotViewMode): Promise<void>;
+  onLabelStyleChange(labelStyle: DotLabelStyle): Promise<void>;
   onRefresh(): Promise<void>;
 }
 
 type IncomingMessage =
   | { type: "changeMode"; mode: DotViewMode }
+  | { type: "changeLabelStyle"; labelStyle: DotLabelStyle }
   | { type: "refresh" };
 
 let currentPanel: PreviewPanel | undefined;
@@ -97,6 +100,9 @@ export class PreviewPanel implements vscode.Disposable {
     switch (message.type) {
       case "changeMode":
         await this.callbacks.onModeChange(message.mode);
+        return;
+      case "changeLabelStyle":
+        await this.callbacks.onLabelStyleChange(message.labelStyle);
         return;
       case "refresh":
         await this.callbacks.onRefresh();
@@ -191,6 +197,11 @@ export class PreviewPanel implements vscode.Disposable {
           <option value="action">action.dot</option>
           <option value="combined">action + pattern.dot</option>
         </select>
+        <label for="labelStyle">Detail</label>
+        <select id="labelStyle">
+          <option value="compact">compact</option>
+          <option value="full">full</option>
+        </select>
         <button id="refresh" type="button">Refresh</button>
       </div>
       <div class="meta" id="meta">No preview yet.</div>
@@ -199,12 +210,17 @@ export class PreviewPanel implements vscode.Disposable {
     <script nonce="${nonce}">
       const vscode = acquireVsCodeApi();
       const mode = document.getElementById("mode");
+      const labelStyle = document.getElementById("labelStyle");
       const refresh = document.getElementById("refresh");
       const meta = document.getElementById("meta");
       const graph = document.getElementById("graph");
 
       mode.addEventListener("change", () => {
         vscode.postMessage({ type: "changeMode", mode: mode.value });
+      });
+
+      labelStyle.addEventListener("change", () => {
+        vscode.postMessage({ type: "changeLabelStyle", labelStyle: labelStyle.value });
       });
 
       refresh.addEventListener("click", () => {
@@ -219,7 +235,8 @@ export class PreviewPanel implements vscode.Disposable {
 
         const payload = message.payload;
         mode.value = payload.mode;
-        meta.textContent = payload.notice || payload.fileName + " | " + payload.mode;
+        labelStyle.value = payload.labelStyle;
+        meta.textContent = payload.notice || payload.fileName + " | " + payload.mode + " | " + payload.labelStyle;
         graph.innerHTML = payload.svg;
       });
     </script>
@@ -233,7 +250,7 @@ export function getPreviewPanelTestState(): PreviewPanelState | undefined {
 }
 
 export async function dispatchPreviewPanelTestMessage(
-  message: { type: "changeMode"; mode: DotViewMode } | { type: "refresh" }
+  message: { type: "changeMode"; mode: DotViewMode } | { type: "changeLabelStyle"; labelStyle: DotLabelStyle } | { type: "refresh" }
 ): Promise<void> {
   await currentPanel?.dispatchTestMessage(message);
 }

@@ -308,4 +308,68 @@ fn demo() {
     assert.match(actionDot, /MMul\(pat\.a, pat\.a\)/);
     assert.match(actionDot, /"effect:effect_0" -> "a"/);
   });
+
+  test("compact labels strip API noise while full labels preserve debug text", () => {
+    const ir: PatternIr = {
+      scope: {
+        kind: "add_rule_call",
+        text_range: { start: 0, end: 20 },
+        pattern_range: { start: 0, end: 8 },
+        action_range: { start: 9, end: 20 }
+      },
+      nodes: [
+        {
+          id: "lhs",
+          kind: "query_leaf",
+          dsl_type: "DisplayMath",
+          label: "lhs: DisplayMath",
+          range: { start: 0, end: 1 },
+          inputs: []
+        }
+      ],
+      edges: [],
+      roots: ["lhs"],
+      constraints: [
+        {
+          id: "constraint_0",
+          source_text: "lhs_eq_rhs",
+          resolved_text: "lhs.handle().eq(&rhs.handle())",
+          referenced_vars: ["lhs"],
+          range: { start: 2, end: 3 }
+        }
+      ],
+      action_effects: [
+        {
+          id: "effect_0",
+          bound_var: null,
+          source_text: "ctx.union(pat.lhs, rhs.clone())",
+          referenced_pat_vars: ["lhs"],
+          referenced_action_vars: [],
+          range: { start: 4, end: 5 }
+        }
+      ],
+      seed_facts: [
+        {
+          id: "seed_0",
+          source_text: "expr.commit()",
+          committed_root: "expr",
+          referenced_vars: ["expr"],
+          range: { start: 6, end: 7 }
+        }
+      ],
+      diagnostics: []
+    };
+
+    const compactDot = patternIrToDotWithMode(ir, "combined", "compact");
+    const fullDot = patternIrToDotWithMode(ir, "combined", "full");
+
+    assert.match(compactDot, /label="DisplayMath"/);
+    assert.match(compactDot, /label="lhs == rhs"/);
+    assert.match(compactDot, /label="union\(lhs, rhs\)"/);
+    assert.match(compactDot, /label="expr\.commit\(\)"/);
+
+    assert.match(fullDot, /label="lhs: DisplayMath"/);
+    assert.match(fullDot, /lhs\.handle\(\)\.eq/);
+    assert.match(fullDot, /ctx\.union\(pat\.lhs, rhs\.clone\(\)\)/);
+  });
 });

@@ -34,12 +34,14 @@ suite("eggplant pattern extension", () => {
     await vscode.workspace.getConfiguration().update("eggplantPattern.extractorPath", undefined, vscode.ConfigurationTarget.Global);
     await vscode.workspace.getConfiguration().update("eggplantPattern.debounceMs", undefined, vscode.ConfigurationTarget.Global);
     await vscode.workspace.getConfiguration().update("eggplantPattern.defaultDotView", undefined, vscode.ConfigurationTarget.Global);
+    await vscode.workspace.getConfiguration().update("eggplantPattern.defaultLabelStyle", undefined, vscode.ConfigurationTarget.Global);
   });
 
   setup(async () => {
     warningMessages.length = 0;
     await vscode.workspace.getConfiguration().update("eggplantPattern.autoPreview", false, vscode.ConfigurationTarget.Global);
     await vscode.workspace.getConfiguration().update("eggplantPattern.defaultDotView", "auto", vscode.ConfigurationTarget.Global);
+    await vscode.workspace.getConfiguration().update("eggplantPattern.defaultLabelStyle", "compact", vscode.ConfigurationTarget.Global);
   });
 
   test("manual preview renders add_rule closure scope", async () => {
@@ -50,6 +52,7 @@ suite("eggplant pattern extension", () => {
 
     const preview = await waitForPreviewState();
     assert.match(preview.title, /pattern\.dot/);
+    assert.equal(preview.labelStyle, "compact");
     assert.match(preview.dot, /digraph EggplantPattern/);
     assert.match(preview.dot, /"p" -> "l"/);
     assert.match(preview.svg, /<svg/);
@@ -151,6 +154,21 @@ suite("eggplant pattern extension", () => {
     const preview = await waitForPreviewState((state) => state.mode === "action");
     assert.match(preview.title, /action\.dot/);
     assert.equal(/"p" -> "l"/.test(preview.dot), false);
+  });
+
+  test("detail dropdown switches between compact and full labels", async () => {
+    const editor = await openEditor(RUST_FIXTURE);
+    placeCursor(editor, "ctx.union(pat.p, op_value)");
+
+    await vscode.commands.executeCommand("eggplant-pattern.preview");
+    let preview = await waitForPreviewState();
+    assert.equal(preview.labelStyle, "compact");
+    assert.match(preview.dot, /union\(p, op_value\)/);
+
+    await dispatchPreviewPanelTestMessage({ type: "changeLabelStyle", labelStyle: "full" });
+    preview = await waitForPreviewState((state) => state.labelStyle === "full");
+    assert.match(preview.title, /full/);
+    assert.match(preview.dot, /ctx\.union\(pat\.p, op_value\)/);
   });
 
   test("extractor resolution prefers bundled binary by default", async () => {

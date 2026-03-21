@@ -94,6 +94,15 @@
           ],
           "default": "auto",
           "description": "Default DOT view mode. 'auto' chooses pattern/action/combined based on the cursor location."
+        },
+        "eggplantPattern.defaultLabelStyle": {
+          "type": "string",
+          "enum": [
+            "compact",
+            "full"
+          ],
+          "default": "compact",
+          "description": "Default label style for the built-in graph preview. 'compact' reduces API noise, 'full' preserves raw debugging detail."
         }
       }
     }

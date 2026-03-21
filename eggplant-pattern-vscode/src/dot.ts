@@ -1,6 +1,7 @@
 import { PatternIr } from "./ir";
 
 export type DotViewMode = "pattern" | "action" | "combined";
+export type DotLabelStyle = "compact" | "full";
 
 function quote(value: string): string {
   return JSON.stringify(value);
@@ -14,7 +15,27 @@ function toVariantTypeName(insertTarget: string): string {
     .join("");
 }
 
-function actionEffectLabel(sourceText: string): string {
+function compactExpression(value: string): string {
+  return value
+    .replace(/\b(?:pat|matched|ctx|tx)\./g, "")
+    .replace(/\.clone\(\)/g, "")
+    .replace(/\.handle\(\)/g, "")
+    .replace(/&([A-Za-z_][A-Za-z0-9_]*)/g, "$1")
+    .replace(/"([^"]+)"\.to_owned\(\)/g, "\"$1\"")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function compactConstraintLabel(sourceText: string, resolvedText: string): string {
+  const compactResolved = compactExpression(resolvedText);
+  const eqMatch = compactResolved.match(/^([A-Za-z_][A-Za-z0-9_]*)\.eq\(([A-Za-z_][A-Za-z0-9_]*)\)$/);
+  if (eqMatch) {
+    return `${eqMatch[1]} == ${eqMatch[2]}`;
+  }
+  return sourceText.length < compactResolved.length ? sourceText : compactResolved;
+}
+
+function semanticInsertLabel(sourceText: string): string {
   const trimmed = sourceText.trim();
   const insertMatch = trimmed.match(/^[A-Za-z_][A-Za-z0-9_]*\.insert_([A-Za-z0-9_]+)\((.*)\)$/);
   if (!insertMatch) {
@@ -25,11 +46,40 @@ function actionEffectLabel(sourceText: string): string {
   return `${toVariantTypeName(insertTarget)}(${args})`;
 }
 
+function actionEffectLabel(sourceText: string, labelStyle: DotLabelStyle): string {
+  const semantic = semanticInsertLabel(sourceText);
+  if (labelStyle === "full") {
+    return semantic;
+  }
+  return compactExpression(semantic);
+}
+
+function nodeLabel(label: string, dslType: string, labelStyle: DotLabelStyle): string {
+  if (labelStyle === "full") {
+    return label;
+  }
+  return dslType;
+}
+
+function constraintLabel(sourceText: string, resolvedText: string, labelStyle: DotLabelStyle): string {
+  if (labelStyle === "full") {
+    return resolvedText;
+  }
+  return compactConstraintLabel(sourceText, resolvedText);
+}
+
+function seedFactLabel(sourceText: string, labelStyle: DotLabelStyle): string {
+  if (labelStyle === "full") {
+    return sourceText;
+  }
+  return compactExpression(sourceText);
+}
+
 export function patternIrToDot(ir: PatternIr): string {
   return patternIrToDotWithMode(ir, "combined");
 }
 
-export function patternIrToDotWithMode(ir: PatternIr, mode: DotViewMode): string {
+export function patternIrToDotWithMode(ir: PatternIr, mode: DotViewMode, labelStyle: DotLabelStyle = "full"): string {
   const lines: string[] = [
     "digraph EggplantPattern {",
     "  rankdir=TB;",
@@ -49,7 +99,7 @@ export function patternIrToDotWithMode(ir: PatternIr, mode: DotViewMode): string
   if (showPattern) {
     for (const node of ir.nodes) {
       const attrs: string[] = [
-        `label=${quote(node.label)}`,
+        `label=${quote(nodeLabel(node.label, node.dsl_type, labelStyle))}`,
         `shape=${node.kind === "query_leaf" ? "ellipse" : "box"}`
       ];
       if (rootSet.has(node.id)) {
@@ -75,7 +125,7 @@ export function patternIrToDotWithMode(ir: PatternIr, mode: DotViewMode): string
   if (showPattern) {
     for (const constraint of ir.constraints) {
       const id = `constraint:${constraint.id}`;
-      lines.push(`  ${quote(id)} [label=${quote(constraint.resolved_text)}, shape=note, fillcolor=\"#eef3fb\", color=\"#4e6a85\"];`);
+      lines.push(`  ${quote(id)} [label=${quote(constraintLabel(constraint.source_text, constraint.resolved_text, labelStyle))}, shape=note, fillcolor=\"#eef3fb\", color=\"#4e6a85\"];`);
     }
 
     for (const constraint of ir.constraints) {
@@ -100,7 +150,7 @@ export function patternIrToDotWithMode(ir: PatternIr, mode: DotViewMode): string
     );
     for (const effect of ir.action_effects) {
       const id = `effect:${effect.id}`;
-      lines.push(`    ${quote(id)} [label=${quote(actionEffectLabel(effect.source_text))}, shape=note, fillcolor=\"#fff0e8\", color=\"#a55d35\"];`);
+      lines.push(`    ${quote(id)} [label=${quote(actionEffectLabel(effect.source_text, labelStyle))}, shape=note, fillcolor=\"#fff0e8\", color=\"#a55d35\"];`);
       const targets = effect.referenced_pat_vars.filter((name) =>
         showPattern ? (nodeSet.has(name) || rootSet.has(name)) : actionAnchorVars.includes(name)
       );
@@ -124,7 +174,7 @@ export function patternIrToDotWithMode(ir: PatternIr, mode: DotViewMode): string
     lines.push("    style=rounded;");
     for (const fact of ir.seed_facts) {
       const id = `seed:${fact.id}`;
-      lines.push(`    ${quote(id)} [label=${quote(fact.source_text)}, shape=note, fillcolor=\"#ebf7ef\", color=\"#4a7d63\"];`);
+      lines.push(`    ${quote(id)} [label=${quote(seedFactLabel(fact.source_text, labelStyle))}, shape=note, fillcolor=\"#ebf7ef\", color=\"#4a7d63\"];`);
     }
     lines.push("  }");
   }
