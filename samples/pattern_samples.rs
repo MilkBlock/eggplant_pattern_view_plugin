@@ -18,6 +18,40 @@ fn add_rule_demo() {
     );
 }
 
+#[eggplant::dsl]
+enum DisplayMath {
+    #[eggplant::display("{x} + {f}")]
+    MDiff {
+        x: DisplayMath,
+        f: DisplayMath,
+    },
+    #[eggplant::display("integ {f} {x}")]
+    MIntegral {
+        f: DisplayMath,
+        x: DisplayMath,
+    },
+    MLeaf {
+        n: i64,
+    },
+}
+
+fn add_rule_display_demo() {
+    MyTx::add_rule(
+        "display_demo",
+        ruleset,
+        || {
+            let x = DisplayMath::query_leaf();
+            let f = DisplayMath::query_leaf();
+            let diff = MDiff::query(&x, &f);
+            DisplayPat::new(x, f, diff)
+        },
+        |ctx, pat| {
+            let integral = ctx.insert_m_integral(pat.f, pat.x);
+            ctx.union(pat.diff, integral);
+        },
+    );
+}
+
 fn step_pat<PR: PatRecSgl>() -> StepPat<PR> {
     let lhs = Const::query();
     let rhs = Const::query();
