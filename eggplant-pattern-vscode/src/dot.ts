@@ -1,7 +1,8 @@
-import { DisplayTemplate, PatternIr } from "./ir";
+import { DisplayTemplate, PatternIr, PatternNode } from "./ir";
 
 export type DotViewMode = "pattern" | "action" | "combined";
-export type DotLabelStyle = "compact" | "full";
+export type DotLabelStyle = "compact" | "full" | "recursive";
+export type RecursiveStrategy = "tree-safe" | "dag-expand";
 
 function quote(value: string): string {
   return JSON.stringify(value);
@@ -62,6 +63,29 @@ function applyDisplayTemplate(template: DisplayTemplate, args: string[]): string
   return rendered;
 }
 
+function parseArgsList(rawArgs: string): string[] {
+  const args: string[] = [];
+  let current = "";
+  let depth = 0;
+  for (const char of rawArgs) {
+    if (char === "," && depth === 0) {
+      args.push(current.trim());
+      current = "";
+      continue;
+    }
+    if (char === "(") {
+      depth += 1;
+    } else if (char === ")" && depth > 0) {
+      depth -= 1;
+    }
+    current += char;
+  }
+  if (current.trim().length > 0) {
+    args.push(current.trim());
+  }
+  return args;
+}
+
 function parseSemanticInsert(sourceText: string): { variantName: string; args: string[]; semantic: string } | null {
   const trimmed = sourceText.trim();
   const insertMatch = trimmed.match(/^[A-Za-z_][A-Za-z0-9_]*\.insert_([A-Za-z0-9_]+)\((.*)\)$/);
@@ -73,16 +97,169 @@ function parseSemanticInsert(sourceText: string): { variantName: string; args: s
   const variantName = toVariantTypeName(insertTarget);
   return {
     variantName,
-    args: args.split(",").map((arg) => compactExpression(arg)),
+    args: parseArgsList(args).map((arg) => compactExpression(arg)),
     semantic: `${variantName}(${args})`,
   };
 }
 
-function actionEffectLabel(ir: PatternIr, sourceText: string, labelStyle: DotLabelStyle): string {
+function needsParens(value: string): boolean {
+  return /[\s+\-*/]/.test(value) && !/^\([^()]+\)$/.test(value);
+}
+
+function wrapRecursiveArg(value: string, isComposite: boolean): string {
+  if (!isComposite) {
+    return value;
+  }
+  return needsParens(value) ? `(${value})` : value;
+}
+
+interface RecursivePatternResult {
+  text: string;
+  composite: boolean;
+}
+
+function recursivePatternLabel(
+  ir: PatternIr,
+  nodeById: Map<string, PatternNode>,
+  incomingCounts: Map<string, number>,
+  nodeId: string,
+  strategy: RecursiveStrategy,
+  seen: Set<string>
+): RecursivePatternResult | null {
+  const node = nodeById.get(nodeId);
+  if (!node) {
+    return {
+      text: compactExpression(nodeId),
+      composite: false,
+    };
+  }
+  if (seen.has(nodeId)) {
+    return null;
+  }
+  if (strategy === "tree-safe" && (incomingCounts.get(nodeId) ?? 0) > 1) {
+    return null;
+  }
+
+  const template = findDisplayTemplate(ir, node.dsl_type);
+  if (!template) {
+    return node.inputs.length === 0
+      ? { text: compactExpression(node.id), composite: false }
+      : null;
+  }
+
+  const nextSeen = new Set(seen);
+  nextSeen.add(nodeId);
+  const renderedArgs: string[] = [];
+  for (const input of node.inputs) {
+    const child = recursivePatternLabel(ir, nodeById, incomingCounts, input, strategy, nextSeen);
+    if (!child) {
+      return null;
+    }
+    renderedArgs.push(wrapRecursiveArg(child.text, child.composite));
+  }
+
+  const rendered = applyDisplayTemplate(template, renderedArgs);
+  if (!rendered) {
+    return null;
+  }
+  return {
+    text: rendered,
+    composite: node.inputs.length > 0,
+  };
+}
+
+interface RecursiveActionResult {
+  text: string;
+  composite: boolean;
+}
+
+function recursiveActionLabel(
+  ir: PatternIr,
+  strategy: RecursiveStrategy,
+  effectByBinding: Map<string, string>,
+  nodeById: Map<string, PatternNode>,
+  incomingCounts: Map<string, number>,
+  effectId: string,
+  seen: Set<string>
+): RecursiveActionResult | null {
+  if (seen.has(effectId)) {
+    return null;
+  }
+  const effect = ir.action_effects.find((entry) => entry.id === effectId);
+  if (!effect) {
+    return null;
+  }
+
+  const parsed = parseSemanticInsert(effect.source_text);
+  if (!parsed) {
+    return null;
+  }
+
+  const template = findDisplayTemplate(ir, parsed.variantName);
+  if (!template) {
+    return null;
+  }
+
+  const nextSeen = new Set(seen);
+  nextSeen.add(effectId);
+  const renderedArgs = parsed.args.map((arg) => {
+    const trimmed = compactExpression(arg);
+    if (effectByBinding.has(trimmed)) {
+      const childEffectId = effectByBinding.get(trimmed);
+      if (childEffectId) {
+        const child = recursiveActionLabel(ir, strategy, effectByBinding, nodeById, incomingCounts, childEffectId, nextSeen);
+        if (child) {
+          return wrapRecursiveArg(child.text, child.composite);
+        }
+      }
+    }
+    const patVar = trimmed.replace(/^(?:pat|matched)\./, "");
+    if (nodeById.has(patVar)) {
+      const child = recursivePatternLabel(ir, nodeById, incomingCounts, patVar, strategy, new Set());
+      if (child) {
+        return wrapRecursiveArg(child.text, child.composite);
+      }
+      if (strategy === "tree-safe") {
+        return null;
+      }
+    }
+    return trimmed;
+  });
+
+  if (renderedArgs.some((arg) => arg === null)) {
+    return null;
+  }
+
+  const rendered = applyDisplayTemplate(template, renderedArgs as string[]);
+  if (!rendered) {
+    return null;
+  }
+  return {
+    text: rendered,
+    composite: true,
+  };
+}
+
+function actionEffectLabel(
+  ir: PatternIr,
+  sourceText: string,
+  labelStyle: DotLabelStyle,
+  strategy: RecursiveStrategy,
+  effectByBinding: Map<string, string>,
+  nodeById: Map<string, PatternNode>,
+  incomingCounts: Map<string, number>,
+  effectId: string
+): string {
   const parsed = parseSemanticInsert(sourceText);
   const semantic = parsed?.semantic ?? semanticInsertLabel(sourceText);
   if (labelStyle === "full") {
     return semantic;
+  }
+  if (labelStyle === "recursive") {
+    const rendered = recursiveActionLabel(ir, strategy, effectByBinding, nodeById, incomingCounts, effectId, new Set());
+    if (rendered) {
+      return rendered.text;
+    }
   }
   if (parsed) {
     const template = findDisplayTemplate(ir, parsed.variantName);
@@ -94,9 +271,25 @@ function actionEffectLabel(ir: PatternIr, sourceText: string, labelStyle: DotLab
   return compactExpression(semantic);
 }
 
-function nodeLabel(ir: PatternIr, label: string, dslType: string, inputs: string[], labelStyle: DotLabelStyle): string {
+function nodeLabel(
+  ir: PatternIr,
+  label: string,
+  dslType: string,
+  inputs: string[],
+  labelStyle: DotLabelStyle,
+  strategy: RecursiveStrategy,
+  nodeId: string,
+  nodeById: Map<string, PatternNode>,
+  incomingCounts: Map<string, number>
+): string {
   if (labelStyle === "full") {
     return label;
+  }
+  if (labelStyle === "recursive") {
+    const rendered = recursivePatternLabel(ir, nodeById, incomingCounts, nodeId, strategy, new Set());
+    if (rendered) {
+      return rendered.text;
+    }
   }
   const template = findDisplayTemplate(ir, dslType);
   const rendered = template ? applyDisplayTemplate(template, inputs.map((input) => compactExpression(input))) : null;
@@ -124,7 +317,12 @@ export function patternIrToDot(ir: PatternIr): string {
   return patternIrToDotWithMode(ir, "combined");
 }
 
-export function patternIrToDotWithMode(ir: PatternIr, mode: DotViewMode, labelStyle: DotLabelStyle = "full"): string {
+export function patternIrToDotWithMode(
+  ir: PatternIr,
+  mode: DotViewMode,
+  labelStyle: DotLabelStyle = "full",
+  recursiveStrategy: RecursiveStrategy = "tree-safe"
+): string {
   const lines: string[] = [
     "digraph EggplantPattern {",
     "  rankdir=TB;",
@@ -135,6 +333,11 @@ export function patternIrToDotWithMode(ir: PatternIr, mode: DotViewMode, labelSt
 
   const rootSet = new Set(ir.roots);
   const nodeSet = new Set(ir.nodes.map((node) => node.id));
+  const nodeById = new Map(ir.nodes.map((node) => [node.id, node]));
+  const incomingCounts = new Map<string, number>();
+  for (const edge of ir.edges) {
+    incomingCounts.set(edge.to, (incomingCounts.get(edge.to) ?? 0) + 1);
+  }
   const showPattern = mode === "pattern" || mode === "combined";
   const showAction = mode === "action" || mode === "combined";
   const actionAnchorVars = !showPattern
@@ -144,7 +347,7 @@ export function patternIrToDotWithMode(ir: PatternIr, mode: DotViewMode, labelSt
   if (showPattern) {
     for (const node of ir.nodes) {
       const attrs: string[] = [
-        `label=${quote(nodeLabel(ir, node.label, node.dsl_type, node.inputs, labelStyle))}`,
+        `label=${quote(nodeLabel(ir, node.label, node.dsl_type, node.inputs, labelStyle, recursiveStrategy, node.id, nodeById, incomingCounts))}`,
         `shape=${node.kind === "query_leaf" ? "ellipse" : "box"}`
       ];
       if (rootSet.has(node.id)) {
@@ -170,7 +373,7 @@ export function patternIrToDotWithMode(ir: PatternIr, mode: DotViewMode, labelSt
   if (showPattern) {
     for (const constraint of ir.constraints) {
       const id = `constraint:${constraint.id}`;
-      lines.push(`  ${quote(id)} [label=${quote(constraintLabel(constraint.source_text, constraint.resolved_text, labelStyle))}, shape=note, fillcolor=\"#eef3fb\", color=\"#4e6a85\"];`);
+      lines.push(`  ${quote(id)} [label=${quote(constraintLabel(constraint.source_text, constraint.resolved_text, labelStyle))}, shape=note, fillcolor="#eef3fb", color="#4e6a85"];`);
     }
 
     for (const constraint of ir.constraints) {
@@ -178,7 +381,7 @@ export function patternIrToDotWithMode(ir: PatternIr, mode: DotViewMode, labelSt
       const targets = constraint.referenced_vars.filter((name) => nodeSet.has(name) || rootSet.has(name));
       const attachmentTargets = targets.length > 0 ? targets : ir.roots;
       for (const target of attachmentTargets) {
-        lines.push(`  ${quote(id)} -> ${quote(target)} [style=dashed, arrowhead=none, color=\"#7b8ea3\"];`);
+        lines.push(`  ${quote(id)} -> ${quote(target)} [style=dashed, arrowhead=none, color="#7b8ea3"];`);
       }
     }
   }
@@ -193,19 +396,24 @@ export function patternIrToDotWithMode(ir: PatternIr, mode: DotViewMode, labelSt
         .filter((effect) => effect.bound_var !== null)
         .map((effect) => [effect.bound_var as string, `effect:${effect.id}`])
     );
+    const effectByBinding = new Map(
+      ir.action_effects
+        .filter((effect) => effect.bound_var !== null)
+        .map((effect) => [effect.bound_var as string, effect.id])
+    );
     for (const effect of ir.action_effects) {
       const id = `effect:${effect.id}`;
-      lines.push(`    ${quote(id)} [label=${quote(actionEffectLabel(ir, effect.source_text, labelStyle))}, shape=note, fillcolor=\"#fff0e8\", color=\"#a55d35\"];`);
+      lines.push(`    ${quote(id)} [label=${quote(actionEffectLabel(ir, effect.source_text, labelStyle, recursiveStrategy, effectByBinding, nodeById, incomingCounts, effect.id))}, shape=note, fillcolor="#fff0e8", color="#a55d35"];`);
       const targets = effect.referenced_pat_vars.filter((name) =>
         showPattern ? (nodeSet.has(name) || rootSet.has(name)) : actionAnchorVars.includes(name)
       );
       for (const target of targets) {
-        lines.push(`    ${quote(id)} -> ${quote(target)} [style=dashed, color=\"#c47a4a\"];`);
+        lines.push(`    ${quote(id)} -> ${quote(target)} [style=dashed, color="#c47a4a"];`);
       }
       for (const actionVar of effect.referenced_action_vars) {
         const target = actionBindingMap.get(actionVar);
         if (target) {
-          lines.push(`    ${quote(id)} -> ${quote(target)} [style=dashed, color=\"#c47a4a\"];`);
+          lines.push(`    ${quote(id)} -> ${quote(target)} [style=dashed, color="#c47a4a"];`);
         }
       }
     }
@@ -219,7 +427,7 @@ export function patternIrToDotWithMode(ir: PatternIr, mode: DotViewMode, labelSt
     lines.push("    style=rounded;");
     for (const fact of ir.seed_facts) {
       const id = `seed:${fact.id}`;
-      lines.push(`    ${quote(id)} [label=${quote(seedFactLabel(fact.source_text, labelStyle))}, shape=note, fillcolor=\"#ebf7ef\", color=\"#4a7d63\"];`);
+      lines.push(`    ${quote(id)} [label=${quote(seedFactLabel(fact.source_text, labelStyle))}, shape=note, fillcolor="#ebf7ef", color="#4a7d63"];`);
     }
     lines.push("  }");
   }

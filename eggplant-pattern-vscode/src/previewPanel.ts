@@ -1,10 +1,11 @@
 import * as vscode from "vscode";
-import { DotLabelStyle, DotViewMode } from "./dot";
+import { DotLabelStyle, DotViewMode, RecursiveStrategy } from "./dot";
 
 export interface PreviewPanelState {
   title: string;
   mode: DotViewMode;
   labelStyle: DotLabelStyle;
+  recursiveStrategy: RecursiveStrategy;
   fileName: string;
   dot: string;
   svg: string;
@@ -14,12 +15,14 @@ export interface PreviewPanelState {
 interface PreviewPanelCallbacks {
   onModeChange(mode: DotViewMode): Promise<void>;
   onLabelStyleChange(labelStyle: DotLabelStyle): Promise<void>;
+  onRecursiveStrategyChange(strategy: RecursiveStrategy): Promise<void>;
   onRefresh(): Promise<void>;
 }
 
 type IncomingMessage =
   | { type: "changeMode"; mode: DotViewMode }
   | { type: "changeLabelStyle"; labelStyle: DotLabelStyle }
+  | { type: "changeRecursiveStrategy"; recursiveStrategy: RecursiveStrategy }
   | { type: "refresh" };
 
 let currentPanel: PreviewPanel | undefined;
@@ -111,6 +114,9 @@ export class PreviewPanel implements vscode.Disposable {
         return;
       case "changeLabelStyle":
         await this.callbacks.onLabelStyleChange(message.labelStyle);
+        return;
+      case "changeRecursiveStrategy":
+        await this.callbacks.onRecursiveStrategyChange(message.recursiveStrategy);
         return;
       case "refresh":
         await this.callbacks.onRefresh();
@@ -209,6 +215,12 @@ export class PreviewPanel implements vscode.Disposable {
         <select id="labelStyle">
           <option value="compact">compact</option>
           <option value="full">full</option>
+          <option value="recursive">recursive</option>
+        </select>
+        <label for="recursiveStrategy">Recursive strategy</label>
+        <select id="recursiveStrategy">
+          <option value="tree-safe">tree-safe</option>
+          <option value="dag-expand">dag-expand</option>
         </select>
         <button id="refresh" type="button">Refresh</button>
       </div>
@@ -219,9 +231,14 @@ export class PreviewPanel implements vscode.Disposable {
       const vscode = acquireVsCodeApi();
       const mode = document.getElementById("mode");
       const labelStyle = document.getElementById("labelStyle");
+      const recursiveStrategy = document.getElementById("recursiveStrategy");
       const refresh = document.getElementById("refresh");
       const meta = document.getElementById("meta");
       const graph = document.getElementById("graph");
+
+      const syncRecursiveStrategyState = () => {
+        recursiveStrategy.disabled = labelStyle.value !== "recursive";
+      };
 
       mode.addEventListener("change", () => {
         vscode.postMessage({ type: "changeMode", mode: mode.value });
@@ -229,6 +246,11 @@ export class PreviewPanel implements vscode.Disposable {
 
       labelStyle.addEventListener("change", () => {
         vscode.postMessage({ type: "changeLabelStyle", labelStyle: labelStyle.value });
+        syncRecursiveStrategyState();
+      });
+
+      recursiveStrategy.addEventListener("change", () => {
+        vscode.postMessage({ type: "changeRecursiveStrategy", recursiveStrategy: recursiveStrategy.value });
       });
 
       refresh.addEventListener("click", () => {
@@ -244,9 +266,13 @@ export class PreviewPanel implements vscode.Disposable {
         const payload = message.payload;
         mode.value = payload.mode;
         labelStyle.value = payload.labelStyle;
-        meta.textContent = payload.notice || payload.fileName + " | " + payload.mode + " | " + payload.labelStyle;
+        recursiveStrategy.value = payload.recursiveStrategy;
+        syncRecursiveStrategyState();
+        meta.textContent = payload.notice || payload.fileName + " | " + payload.mode + " | " + payload.labelStyle + (payload.labelStyle === "recursive" ? " | " + payload.recursiveStrategy : "");
         graph.innerHTML = payload.svg;
       });
+
+      syncRecursiveStrategyState();
     </script>
   </body>
 </html>`;
@@ -258,7 +284,11 @@ export function getPreviewPanelTestState(): PreviewPanelState | undefined {
 }
 
 export async function dispatchPreviewPanelTestMessage(
-  message: { type: "changeMode"; mode: DotViewMode } | { type: "changeLabelStyle"; labelStyle: DotLabelStyle } | { type: "refresh" }
+  message:
+    | { type: "changeMode"; mode: DotViewMode }
+    | { type: "changeLabelStyle"; labelStyle: DotLabelStyle }
+    | { type: "changeRecursiveStrategy"; recursiveStrategy: RecursiveStrategy }
+    | { type: "refresh" }
 ): Promise<void> {
   await currentPanel?.dispatchTestMessage(message);
 }

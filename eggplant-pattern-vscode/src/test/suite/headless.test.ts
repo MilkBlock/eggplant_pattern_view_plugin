@@ -419,4 +419,84 @@ fn demo() {
     const compactDot = patternIrToDotWithMode(ir, "action", "compact");
     assert.match(compactDot, /integ lhs rhs/);
   });
+
+  test("recursive labels collapse display-only trees with precedence-safe parentheses", () => {
+    const ir: PatternIr = {
+      scope: {
+        kind: "pattern_function",
+        text_range: { start: 0, end: 10 },
+        pattern_range: { start: 0, end: 10 },
+        action_range: null
+      },
+      nodes: [
+        { id: "x", kind: "query_leaf", dsl_type: "X", label: "x: X", range: { start: 0, end: 1 }, inputs: [] },
+        { id: "y", kind: "query_leaf", dsl_type: "Y", label: "y: Y", range: { start: 2, end: 3 }, inputs: [] },
+        { id: "z", kind: "query_leaf", dsl_type: "Z", label: "z: Z", range: { start: 4, end: 5 }, inputs: [] },
+        { id: "sum", kind: "query", dsl_type: "Add", label: "sum: Add", range: { start: 6, end: 7 }, inputs: ["y", "z"] },
+        { id: "root", kind: "query", dsl_type: "Mul", label: "root: Mul", range: { start: 8, end: 9 }, inputs: ["x", "sum"] }
+      ],
+      edges: [
+        { from: "sum", to: "y", kind: "operand", index: 0 },
+        { from: "sum", to: "z", kind: "operand", index: 1 },
+        { from: "root", to: "x", kind: "operand", index: 0 },
+        { from: "root", to: "sum", kind: "operand", index: 1 }
+      ],
+      roots: ["root"],
+      constraints: [],
+      action_effects: [],
+      seed_facts: [],
+      display_templates: [
+        { variant_name: "X", template: "x", fields: [] },
+        { variant_name: "Y", template: "y", fields: [] },
+        { variant_name: "Z", template: "z", fields: [] },
+        { variant_name: "Add", template: "{lhs} + {rhs}", fields: ["lhs", "rhs"] },
+        { variant_name: "Mul", template: "{lhs} * {rhs}", fields: ["lhs", "rhs"] }
+      ],
+      diagnostics: []
+    };
+
+    const recursiveDot = patternIrToDotWithMode(ir, "pattern", "recursive", "tree-safe");
+    assert.match(recursiveDot, /label="y \+ z"/);
+    assert.match(recursiveDot, /label="x \* \(y \+ z\)"/);
+  });
+
+  test("recursive strategy distinguishes tree-safe fallback from dag expansion", () => {
+    const ir: PatternIr = {
+      scope: {
+        kind: "pattern_function",
+        text_range: { start: 0, end: 10 },
+        pattern_range: { start: 0, end: 10 },
+        action_range: null
+      },
+      nodes: [
+        { id: "a", kind: "query_leaf", dsl_type: "A", label: "a: A", range: { start: 0, end: 1 }, inputs: [] },
+        { id: "b", kind: "query_leaf", dsl_type: "B", label: "b: B", range: { start: 2, end: 3 }, inputs: [] },
+        { id: "shared", kind: "query", dsl_type: "Add", label: "shared: Add", range: { start: 4, end: 5 }, inputs: ["a", "b"] },
+        { id: "root", kind: "query", dsl_type: "Mul", label: "root: Mul", range: { start: 6, end: 7 }, inputs: ["shared", "shared"] }
+      ],
+      edges: [
+        { from: "shared", to: "a", kind: "operand", index: 0 },
+        { from: "shared", to: "b", kind: "operand", index: 1 },
+        { from: "root", to: "shared", kind: "operand", index: 0 },
+        { from: "root", to: "shared", kind: "operand", index: 1 }
+      ],
+      roots: ["root"],
+      constraints: [],
+      action_effects: [],
+      seed_facts: [],
+      display_templates: [
+        { variant_name: "A", template: "a", fields: [] },
+        { variant_name: "B", template: "b", fields: [] },
+        { variant_name: "Add", template: "{lhs} + {rhs}", fields: ["lhs", "rhs"] },
+        { variant_name: "Mul", template: "{lhs} * {rhs}", fields: ["lhs", "rhs"] }
+      ],
+      diagnostics: []
+    };
+
+    const treeSafeDot = patternIrToDotWithMode(ir, "pattern", "recursive", "tree-safe");
+    const dagExpandDot = patternIrToDotWithMode(ir, "pattern", "recursive", "dag-expand");
+
+    assert.match(treeSafeDot, /label="shared \* shared"/);
+    assert.match(dagExpandDot, /label="\(a \+ b\) \* \(a \+ b\)"/);
+  });
 });

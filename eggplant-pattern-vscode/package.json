@@ -99,10 +99,20 @@
           "type": "string",
           "enum": [
             "compact",
-            "full"
+            "full",
+            "recursive"
           ],
           "default": "compact",
-          "description": "Default label style for the built-in graph preview. 'compact' reduces API noise, 'full' preserves raw debugging detail."
+          "description": "Default label style for the built-in graph preview. 'compact' reduces API noise, 'full' preserves raw debugging detail, and 'recursive' expands display templates through the subgraph when possible."
+        },
+        "eggplantPattern.defaultRecursiveStrategy": {
+          "type": "string",
+          "enum": [
+            "tree-safe",
+            "dag-expand"
+          ],
+          "default": "tree-safe",
+          "description": "Recursive rendering strategy. 'tree-safe' only expands tree-shaped display subgraphs, while 'dag-expand' repeats shared subgraphs when rendering recursive labels."
         }
       }
     }

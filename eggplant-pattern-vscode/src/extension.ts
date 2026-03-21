@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { DotLabelStyle, DotViewMode, patternIrToDotWithMode } from "./dot";
+import { DotLabelStyle, DotViewMode, patternIrToDotWithMode, RecursiveStrategy } from "./dot";
 import { configureExtractorResolution, ExtractorError, runExtractor } from "./extractor";
 import { PatternIr } from "./ir";
 import { PreviewPanel } from "./previewPanel";
@@ -90,6 +90,7 @@ class PreviewController {
   private readonly callbacks: {
     onModeChange: (mode: DotViewMode) => Promise<void>;
     onLabelStyleChange: (labelStyle: DotLabelStyle) => Promise<void>;
+    onRecursiveStrategyChange: (strategy: RecursiveStrategy) => Promise<void>;
     onRefresh: () => Promise<void>;
   };
 
@@ -100,6 +101,9 @@ class PreviewController {
       },
       onLabelStyleChange: async (labelStyle) => {
         await this.showCurrentLabelStyle(labelStyle);
+      },
+      onRecursiveStrategyChange: async (strategy) => {
+        await this.showCurrentRecursiveStrategy(strategy);
       },
       onRefresh: async () => {
         const editor = this.lastPreview?.editor ?? vscode.window.activeTextEditor;
@@ -144,7 +148,7 @@ class PreviewController {
 
   async showCurrentMode(mode: DotViewMode): Promise<void> {
     if (this.lastPreview) {
-      await renderDot(this.panel(true), this.lastPreview.editor, this.lastPreview.ir, mode, this.labelStyle(), null);
+      await renderDot(this.panel(true), this.lastPreview.editor, this.lastPreview.ir, mode, this.labelStyle(), this.recursiveStrategy(), null);
       return;
     }
 
@@ -177,9 +181,35 @@ class PreviewController {
     );
 
     if (this.lastPreview) {
-      const offset = this.lastPreview.editor.document.offsetAt(this.lastPreview.editor.selection.active);
-      const mode = resolveDotViewMode(this.lastPreview.ir, offset);
-      await renderDot(this.panel(true), this.lastPreview.editor, this.lastPreview.ir, mode, labelStyle, null);
+      await renderDot(
+        this.panel(true),
+        this.lastPreview.editor,
+        this.lastPreview.ir,
+        this.currentMode(),
+        labelStyle,
+        this.recursiveStrategy(),
+        null
+      );
+    }
+  }
+
+  async showCurrentRecursiveStrategy(strategy: RecursiveStrategy): Promise<void> {
+    await vscode.workspace.getConfiguration().update(
+      "eggplantPattern.defaultRecursiveStrategy",
+      strategy,
+      vscode.ConfigurationTarget.Workspace
+    );
+
+    if (this.lastPreview) {
+      await renderDot(
+        this.panel(true),
+        this.lastPreview.editor,
+        this.lastPreview.ir,
+        this.currentMode(),
+        this.labelStyle(),
+        strategy,
+        null
+      );
     }
   }
 
@@ -205,7 +235,7 @@ class PreviewController {
         return;
       }
       const mode = request.forcedMode ?? resolveDotViewMode(ir, offset);
-      await renderDot(this.panel(!request.manual), request.editor, ir, mode, this.labelStyle(), null);
+      await renderDot(this.panel(!request.manual), request.editor, ir, mode, this.labelStyle(), this.recursiveStrategy(), null);
       this.lastPreview = {
         editor: request.editor,
         ir
@@ -235,6 +265,14 @@ class PreviewController {
   private labelStyle(): DotLabelStyle {
     return configuredDefaultLabelStyle();
   }
+
+  private recursiveStrategy(): RecursiveStrategy {
+    return configuredDefaultRecursiveStrategy();
+  }
+
+  private currentMode(): DotViewMode {
+    return PreviewPanel.current()?.snapshot()?.mode ?? "combined";
+  }
 }
 
 function containsOffset(range: { start: number; end: number } | null, offset: number): boolean {
@@ -252,6 +290,13 @@ function configuredDefaultLabelStyle(): DotLabelStyle {
   return vscode.workspace.getConfiguration().get<DotLabelStyle>(
     "eggplantPattern.defaultLabelStyle",
     "compact"
+  );
+}
+
+function configuredDefaultRecursiveStrategy(): RecursiveStrategy {
+  return vscode.workspace.getConfiguration().get<RecursiveStrategy>(
+    "eggplantPattern.defaultRecursiveStrategy",
+    "tree-safe"
   );
 }
 
@@ -278,14 +323,17 @@ async function renderDot(
   ir: PatternIr,
   mode: DotViewMode,
   labelStyle: DotLabelStyle,
+  recursiveStrategy: RecursiveStrategy,
   notice: string | null
 ): Promise<void> {
-  const dot = patternIrToDotWithMode(ir, mode, labelStyle);
+  const dot = patternIrToDotWithMode(ir, mode, labelStyle, recursiveStrategy);
   const svg = await dotToSvg(dot);
+  const strategySuffix = labelStyle === "recursive" ? `, ${recursiveStrategy}` : "";
   await panel.render({
-    title: `Eggplant Pattern (${modeLabel(mode)}, ${labelStyle}): ${editor.document.fileName.split("/").pop() ?? "Preview"}`,
+    title: `Eggplant Pattern (${modeLabel(mode)}, ${labelStyle}${strategySuffix}): ${editor.document.fileName.split("/").pop() ?? "Preview"}`,
     mode,
     labelStyle,
+    recursiveStrategy,
     fileName: editor.document.fileName.split("/").pop() ?? "Preview",
     dot,
     svg,
@@ -306,6 +354,7 @@ async function renderNotice(panel: PreviewPanel, editor: vscode.TextEditor, mess
     title: `Eggplant Pattern (${modeLabel("combined")}, ${configuredDefaultLabelStyle()}): ${editor.document.fileName.split("/").pop() ?? "Preview"}`,
     mode: "combined",
     labelStyle: configuredDefaultLabelStyle(),
+    recursiveStrategy: configuredDefaultRecursiveStrategy(),
     fileName: editor.document.fileName.split("/").pop() ?? "Preview",
     dot,
     svg,

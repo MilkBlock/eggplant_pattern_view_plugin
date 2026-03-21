@@ -36,6 +36,8 @@ suite("eggplant pattern extension", () => {
     await vscode.workspace.getConfiguration().update("eggplantPattern.defaultDotView", undefined, vscode.ConfigurationTarget.Global);
     await vscode.workspace.getConfiguration().update("eggplantPattern.defaultLabelStyle", undefined, vscode.ConfigurationTarget.Global);
     await vscode.workspace.getConfiguration().update("eggplantPattern.defaultLabelStyle", undefined, vscode.ConfigurationTarget.Workspace);
+    await vscode.workspace.getConfiguration().update("eggplantPattern.defaultRecursiveStrategy", undefined, vscode.ConfigurationTarget.Global);
+    await vscode.workspace.getConfiguration().update("eggplantPattern.defaultRecursiveStrategy", undefined, vscode.ConfigurationTarget.Workspace);
   });
 
   setup(async () => {
@@ -44,6 +46,8 @@ suite("eggplant pattern extension", () => {
     await vscode.workspace.getConfiguration().update("eggplantPattern.defaultDotView", "auto", vscode.ConfigurationTarget.Global);
     await vscode.workspace.getConfiguration().update("eggplantPattern.defaultLabelStyle", "compact", vscode.ConfigurationTarget.Global);
     await vscode.workspace.getConfiguration().update("eggplantPattern.defaultLabelStyle", "compact", vscode.ConfigurationTarget.Workspace);
+    await vscode.workspace.getConfiguration().update("eggplantPattern.defaultRecursiveStrategy", "tree-safe", vscode.ConfigurationTarget.Global);
+    await vscode.workspace.getConfiguration().update("eggplantPattern.defaultRecursiveStrategy", "tree-safe", vscode.ConfigurationTarget.Workspace);
   });
 
   test("manual preview renders add_rule closure scope", async () => {
@@ -184,6 +188,30 @@ suite("eggplant pattern extension", () => {
     preview = await waitForPreviewState((state) => state.labelStyle === "full");
     assert.match(preview.title, /full/);
     assert.match(preview.dot, /ctx\.union\(pat\.p, op_value\)/);
+  });
+
+  test("detail dropdown switches to recursive labels", async () => {
+    const editor = await openEditor(RUST_FIXTURE);
+    placeCursor(editor, "ctx.insert_m_integral(pat.f, pat.x)");
+
+    await vscode.commands.executeCommand("eggplant-pattern.preview");
+    await dispatchPreviewPanelTestMessage({ type: "changeLabelStyle", labelStyle: "recursive" });
+
+    const preview = await waitForPreviewState((state) => state.labelStyle === "recursive");
+    assert.match(preview.title, /recursive, tree-safe/);
+    assert.equal(preview.recursiveStrategy, "tree-safe");
+  });
+
+  test("recursive strategy dropdown switches between tree-safe and dag-expand", async () => {
+    const editor = await openEditor(RUST_FIXTURE);
+    placeCursor(editor, "ctx.insert_m_integral(pat.f, pat.x)");
+
+    await vscode.commands.executeCommand("eggplant-pattern.preview");
+    await dispatchPreviewPanelTestMessage({ type: "changeLabelStyle", labelStyle: "recursive" });
+    await dispatchPreviewPanelTestMessage({ type: "changeRecursiveStrategy", recursiveStrategy: "dag-expand" });
+
+    const preview = await waitForPreviewState((state) => state.labelStyle === "recursive" && state.recursiveStrategy === "dag-expand");
+    assert.match(preview.title, /recursive, dag-expand/);
   });
 
   test("extractor resolution prefers bundled binary by default", async () => {
