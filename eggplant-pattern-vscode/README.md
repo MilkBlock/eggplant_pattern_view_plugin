@@ -9,7 +9,8 @@ This first shell:
 - listens to Rust cursor/document changes
 - calls the local Rust extractor with the current cursor offset
 - converts `PatternIR` to DOT
-- forwards DOT to `tintinweb.graphviz-interactive-preview`
+- renders DOT to SVG with Graphviz in the extension host
+- shows the graph in a built-in VSCode webview panel with an in-panel dropdown
 
 ## Development
 
@@ -36,5 +37,4 @@ npm run test:extension-host
 ```
 
 - `npm test` runs the headless-safe suite.
-- `npm run test:extension-host` runs extension-host validation without requiring a locally preinstalled Graphviz extension; the harness provisions the packaged dependency for the test profile.
-- `npm run test:extension-host:graphviz` enables the optional Graphviz smoke test.
+- `npm run test:extension-host` runs extension-host validation for the built-in preview panel, including mode switching through the panel message path.
