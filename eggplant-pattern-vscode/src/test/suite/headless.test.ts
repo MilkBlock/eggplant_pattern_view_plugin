@@ -575,6 +575,44 @@ fn demo() {
     assert.match(recursiveDot, /label="a - \(b - c\)"/);
   });
 
+  test("recursive precedence does not parenthesize atomic siblings", () => {
+    const ir: PatternIr = {
+      scope: {
+        kind: "pattern_function",
+        text_range: { start: 0, end: 10 },
+        pattern_range: { start: 0, end: 10 },
+        action_range: null
+      },
+      nodes: [
+        { id: "a", kind: "query_leaf", dsl_type: "A", label: "a: A", range: { start: 0, end: 1 }, inputs: [] },
+        { id: "b", kind: "query_leaf", dsl_type: "B", label: "b: B", range: { start: 2, end: 3 }, inputs: [] },
+        { id: "root", kind: "query", dsl_type: "Add", label: "root: Add", range: { start: 4, end: 5 }, inputs: ["a", "b"] }
+      ],
+      edges: [
+        { from: "root", to: "a", kind: "operand", index: 0 },
+        { from: "root", to: "b", kind: "operand", index: 1 }
+      ],
+      roots: ["root"],
+      constraints: [],
+      action_effects: [],
+      seed_facts: [],
+      display_templates: [
+        { variant_name: "A", template: "a", fields: [] },
+        { variant_name: "B", template: "b", fields: [] },
+        { variant_name: "Add", template: "{lhs} + {rhs}", fields: ["lhs", "rhs"] }
+      ],
+      typst_templates: [],
+      precedence_templates: [
+        { variant_name: "Add", precedence: 10 }
+      ],
+      diagnostics: []
+    };
+
+    const recursiveDot = patternIrToDotWithMode(ir, "pattern", "recursive", "tree-safe");
+    assert.match(recursiveDot, /label="a \+ b"/);
+    assert.doesNotMatch(recursiveDot, /label="\((a|b)\) \+ \((a|b)\)"/);
+  });
+
   test("recursive strategy distinguishes tree-safe fallback from dag expansion", () => {
     const ir: PatternIr = {
       scope: {

@@ -12,6 +12,7 @@ export interface TypstReplacementSource {
 interface RenderedTemplateField {
   precedence: number;
   text: string;
+  isAtomic: boolean;
 }
 
 function quote(value: string): string {
@@ -110,7 +111,11 @@ function renderTemplateWithPrecedence(
 
       const needsParens =
         field.value.precedence < parentPrecedence ||
-        (field.value.precedence === parentPrecedence && parentPrecedence !== Number.MAX_SAFE_INTEGER);
+        (
+          field.value.precedence === parentPrecedence &&
+          parentPrecedence !== Number.MAX_SAFE_INTEGER &&
+          !field.value.isAtomic
+        );
       rendered += needsParens ? `(${field.value.text})` : field.value.text;
       idx = end + 1;
       continue;
@@ -142,7 +147,7 @@ function applyDisplayTemplate(
     parentPrecedence,
     template.fields.map((name, index) => ({
       name,
-      value: { text: args[index], precedence: Number.MAX_SAFE_INTEGER }
+      value: { text: args[index], precedence: Number.MAX_SAFE_INTEGER, isAtomic: true }
     }))
   );
 }
@@ -189,6 +194,7 @@ function parseSemanticInsert(sourceText: string): { variantName: string; args: s
 interface RecursivePatternResult {
   text: string;
   precedence: number;
+  isAtomic: boolean;
 }
 
 function recursivePatternLabel(
@@ -204,6 +210,7 @@ function recursivePatternLabel(
     return {
       text: compactExpression(nodeId),
       precedence: Number.MAX_SAFE_INTEGER,
+      isAtomic: true,
     };
   }
   if (seen.has(nodeId)) {
@@ -216,7 +223,7 @@ function recursivePatternLabel(
   const template = findPreferredTemplate(ir, node.dsl_type);
   if (!template) {
     return node.inputs.length === 0
-      ? { text: compactExpression(node.id), precedence: Number.MAX_SAFE_INTEGER }
+      ? { text: compactExpression(node.id), precedence: Number.MAX_SAFE_INTEGER, isAtomic: true }
       : null;
   }
 
@@ -232,7 +239,8 @@ function recursivePatternLabel(
       name: template.fields[renderedArgs.length],
       value: {
         text: child.text,
-        precedence: child.precedence
+        precedence: child.precedence,
+        isAtomic: child.isAtomic
       }
     });
   }
@@ -244,12 +252,14 @@ function recursivePatternLabel(
   return {
     text: rendered,
     precedence: variantPrecedence(ir, node.dsl_type),
+    isAtomic: node.inputs.length === 0,
   };
 }
 
 interface RecursiveActionResult {
   text: string;
   precedence: number;
+  isAtomic: boolean;
 }
 
 function recursiveActionLabel(
@@ -290,7 +300,7 @@ function recursiveActionLabel(
         if (child) {
           return {
             name: template.fields[index],
-            value: { text: child.text, precedence: child.precedence }
+            value: { text: child.text, precedence: child.precedence, isAtomic: child.isAtomic }
           };
         }
       }
@@ -301,7 +311,7 @@ function recursiveActionLabel(
       if (child) {
         return {
           name: template.fields[index],
-          value: { text: child.text, precedence: child.precedence }
+          value: { text: child.text, precedence: child.precedence, isAtomic: child.isAtomic }
         };
       }
       if (strategy === "tree-safe") {
@@ -310,7 +320,7 @@ function recursiveActionLabel(
     }
     return {
       name: template.fields[index],
-      value: { text: trimmed, precedence: Number.MAX_SAFE_INTEGER }
+      value: { text: trimmed, precedence: Number.MAX_SAFE_INTEGER, isAtomic: true }
     };
   });
 
@@ -329,6 +339,7 @@ function recursiveActionLabel(
   return {
     text: rendered,
     precedence: variantPrecedence(ir, parsed.variantName),
+    isAtomic: false,
   };
 }
 
