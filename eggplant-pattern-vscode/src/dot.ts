@@ -108,7 +108,10 @@ function renderTemplateWithPrecedence(
         return null;
       }
 
-      rendered += field.value.precedence < parentPrecedence ? `(${field.value.text})` : field.value.text;
+      const needsParens =
+        field.value.precedence < parentPrecedence ||
+        (field.value.precedence === parentPrecedence && parentPrecedence !== Number.MAX_SAFE_INTEGER);
+      rendered += needsParens ? `(${field.value.text})` : field.value.text;
       idx = end + 1;
       continue;
     }
@@ -126,13 +129,17 @@ function renderTemplateWithPrecedence(
   return rendered;
 }
 
-function applyDisplayTemplate(template: DisplayTemplate | TypstTemplate, args: string[]): string | null {
+function applyDisplayTemplate(
+  template: DisplayTemplate | TypstTemplate,
+  args: string[],
+  parentPrecedence = Number.MAX_SAFE_INTEGER
+): string | null {
   if (template.fields.length !== args.length) {
     return null;
   }
   return renderTemplateWithPrecedence(
     template,
-    Number.MAX_SAFE_INTEGER,
+    parentPrecedence,
     template.fields.map((name, index) => ({
       name,
       value: { text: args[index], precedence: Number.MAX_SAFE_INTEGER }
@@ -348,7 +355,7 @@ function actionEffectLabel(
   }
   if (parsed) {
     const template = findPreferredTemplate(ir, parsed.variantName);
-    const rendered = template ? applyDisplayTemplate(template, parsed.args) : null;
+    const rendered = template ? applyDisplayTemplate(template, parsed.args, variantPrecedence(ir, parsed.variantName)) : null;
     if (rendered) {
       return rendered;
     }
@@ -377,7 +384,7 @@ function nodeLabel(
     }
   }
   const template = findPreferredTemplate(ir, dslType);
-  const rendered = template ? applyDisplayTemplate(template, inputs.map((input) => compactExpression(input))) : null;
+  const rendered = template ? applyDisplayTemplate(template, inputs.map((input) => compactExpression(input)), variantPrecedence(ir, dslType)) : null;
   if (rendered) {
     return rendered;
   }

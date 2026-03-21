@@ -533,6 +533,48 @@ fn demo() {
     assert.doesNotMatch(recursiveDot, /label="x \+ \(y \* z\)"/);
   });
 
+  test("recursive precedence keeps same-precedence child parenthesized conservatively", () => {
+    const ir: PatternIr = {
+      scope: {
+        kind: "pattern_function",
+        text_range: { start: 0, end: 10 },
+        pattern_range: { start: 0, end: 10 },
+        action_range: null
+      },
+      nodes: [
+        { id: "a", kind: "query_leaf", dsl_type: "A", label: "a: A", range: { start: 0, end: 1 }, inputs: [] },
+        { id: "b", kind: "query_leaf", dsl_type: "B", label: "b: B", range: { start: 2, end: 3 }, inputs: [] },
+        { id: "c", kind: "query_leaf", dsl_type: "C", label: "c: C", range: { start: 4, end: 5 }, inputs: [] },
+        { id: "inner", kind: "query", dsl_type: "Sub", label: "inner: Sub", range: { start: 6, end: 7 }, inputs: ["b", "c"] },
+        { id: "root", kind: "query", dsl_type: "Sub", label: "root: Sub", range: { start: 8, end: 9 }, inputs: ["a", "inner"] }
+      ],
+      edges: [
+        { from: "inner", to: "b", kind: "operand", index: 0 },
+        { from: "inner", to: "c", kind: "operand", index: 1 },
+        { from: "root", to: "a", kind: "operand", index: 0 },
+        { from: "root", to: "inner", kind: "operand", index: 1 }
+      ],
+      roots: ["root"],
+      constraints: [],
+      action_effects: [],
+      seed_facts: [],
+      display_templates: [
+        { variant_name: "A", template: "a", fields: [] },
+        { variant_name: "B", template: "b", fields: [] },
+        { variant_name: "C", template: "c", fields: [] },
+        { variant_name: "Sub", template: "{lhs} - {rhs}", fields: ["lhs", "rhs"] }
+      ],
+      typst_templates: [],
+      precedence_templates: [
+        { variant_name: "Sub", precedence: 10 }
+      ],
+      diagnostics: []
+    };
+
+    const recursiveDot = patternIrToDotWithMode(ir, "pattern", "recursive", "tree-safe");
+    assert.match(recursiveDot, /label="a - \(b - c\)"/);
+  });
+
   test("recursive strategy distinguishes tree-safe fallback from dag expansion", () => {
     const ir: PatternIr = {
       scope: {
