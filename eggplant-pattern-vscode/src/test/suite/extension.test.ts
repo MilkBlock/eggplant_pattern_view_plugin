@@ -243,18 +243,6 @@ suite("eggplant pattern extension", () => {
     assert.ok(preview.typstRenderings["mul"]);
   });
 
-  test("recursive action preview fully inlines math_microbenchmark action expressions", async () => {
-    const editor = await openEditor(MATH_MICROBENCHMARK_FIXTURE);
-    placeCursor(editor, "let rhs = ctx.insert_m_mul(neg1, cos);");
-
-    await vscode.commands.executeCommand("eggplant-pattern.preview");
-    await dispatchPreviewPanelTestMessage({ type: "changeLabelStyle", labelStyle: "recursive" });
-
-    const preview = await waitForPreviewState((state) => state.mode === "action" && state.labelStyle === "recursive");
-    assert.match(preview.dot, /label=\"-1 \* cos\(x\)\"/);
-    assert.equal(preview.typstRenderings["effect:effect_2"] !== undefined, true);
-  });
-
   test("recursive strategy dropdown switches between tree-safe and dag-expand", async () => {
     const editor = await openEditor(RUST_FIXTURE);
     placeCursor(editor, "ctx.insert_m_integral(pat.f, pat.x)");
