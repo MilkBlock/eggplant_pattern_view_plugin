@@ -58,6 +58,15 @@ function compactExpression(value: string): string {
     .trim();
 }
 
+function displayAtomicExpression(value: string): string {
+  const compacted = compactExpression(value);
+  const stringLiteralMatch = compacted.match(/^"((?:\\.|[^"])*)"$/);
+  if (!stringLiteralMatch) {
+    return compacted;
+  }
+  return stringLiteralMatch[1].replace(/\\"/g, "\"").replace(/\\\\/g, "\\");
+}
+
 function compactConstraintLabel(sourceText: string, resolvedText: string): string {
   const compactResolved = compactExpression(resolvedText);
   const primitiveOperators: Array<[string, string]> = [
@@ -83,7 +92,7 @@ function compactConstraintLabel(sourceText: string, resolvedText: string): strin
 
 function semanticInsertLabel(sourceText: string): string {
   const trimmed = sourceText.trim();
-  const insertMatch = trimmed.match(/^[A-Za-z_][A-Za-z0-9_]*\.insert_([A-Za-z0-9_]+)\((.*)\)$/);
+  const insertMatch = trimmed.match(/^(?:[A-Za-z_][A-Za-z0-9_]*\.)?insert_([A-Za-z0-9_]+)\((.*)\)$/);
   if (!insertMatch) {
     return trimmed;
   }
@@ -190,7 +199,31 @@ function parseArgsList(rawArgs: string): string[] {
   const args: string[] = [];
   let current = "";
   let depth = 0;
+  let quote: '"' | "'" | null = null;
+  let escaped = false;
   for (const char of rawArgs) {
+    if (escaped) {
+      current += char;
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      current += char;
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      current += char;
+      if (char === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (char === "\"" || char === "'") {
+      current += char;
+      quote = char;
+      continue;
+    }
     if (char === "," && depth === 0) {
       args.push(current.trim());
       current = "";
@@ -211,7 +244,7 @@ function parseArgsList(rawArgs: string): string[] {
 
 function parseSemanticInsert(sourceText: string): { variantName: string; args: string[]; semantic: string } | null {
   const trimmed = sourceText.trim();
-  const insertMatch = trimmed.match(/^[A-Za-z_][A-Za-z0-9_]*\.insert_([A-Za-z0-9_]+)\((.*)\)$/);
+  const insertMatch = trimmed.match(/^(?:[A-Za-z_][A-Za-z0-9_]*\.)?insert_([A-Za-z0-9_]+)\((.*)\)$/);
   if (!insertMatch) {
     return null;
   }
@@ -331,6 +364,81 @@ interface RecursiveActionResult {
   isAtomic: boolean;
 }
 
+function recursiveActionArgLabel(
+  ir: PatternIr,
+  strategy: RecursiveStrategy,
+  effectByBinding: Map<string, string>,
+  nodeById: Map<string, PatternNode>,
+  incomingCounts: Map<string, number>,
+  arg: string,
+  seen: Set<string>
+): RecursiveActionResult | null {
+  const trimmed = compactExpression(arg);
+  if (effectByBinding.has(trimmed)) {
+    const childEffectId = effectByBinding.get(trimmed);
+    if (childEffectId) {
+      const child = recursiveActionLabel(ir, strategy, effectByBinding, nodeById, incomingCounts, childEffectId, seen);
+      if (child) {
+        return child;
+      }
+    }
+  }
+
+  const inlineInsert = parseSemanticInsert(trimmed);
+  if (inlineInsert) {
+    const template = findPreferredTemplate(ir, inlineInsert.variantName);
+    if (!template) {
+      return null;
+    }
+
+    const renderedArgs = inlineInsert.args.map((childArg, index) => {
+      const child = recursiveActionArgLabel(ir, strategy, effectByBinding, nodeById, incomingCounts, childArg, seen);
+      if (!child) {
+        return null;
+      }
+      return {
+        name: template.fields[index],
+        value: { text: child.text, precedence: child.precedence, isAtomic: child.isAtomic }
+      };
+    });
+
+    if (renderedArgs.some((child) => child === null)) {
+      return null;
+    }
+
+    const rendered = renderTemplateWithPrecedence(
+      template,
+      variantPrecedence(ir, inlineInsert.variantName),
+      renderedArgs as Array<{ name: string; value: RenderedTemplateField }>
+    );
+    if (!rendered) {
+      return null;
+    }
+    return {
+      text: rendered,
+      precedence: variantPrecedence(ir, inlineInsert.variantName),
+      isAtomic: inlineInsert.args.length === 0,
+    };
+  }
+
+  const patVar = trimmed.replace(/^(?:pat|matched)\./, "");
+  if (nodeById.has(patVar)) {
+    const child = recursivePatternLabel(ir, nodeById, incomingCounts, patVar, strategy, new Set());
+    if (child) {
+      return child;
+    }
+    if (strategy === "tree-safe") {
+      return null;
+    }
+  }
+
+  return {
+    text: displayAtomicExpression(trimmed),
+    precedence: Number.MAX_SAFE_INTEGER,
+    isAtomic: true,
+  };
+}
+
 function recursiveActionLabel(
   ir: PatternIr,
   strategy: RecursiveStrategy,
@@ -361,35 +469,16 @@ function recursiveActionLabel(
   const nextSeen = new Set(seen);
   nextSeen.add(effectId);
   const renderedArgs = parsed.args.map((arg, index) => {
-    const trimmed = compactExpression(arg);
-    if (effectByBinding.has(trimmed)) {
-      const childEffectId = effectByBinding.get(trimmed);
-      if (childEffectId) {
-        const child = recursiveActionLabel(ir, strategy, effectByBinding, nodeById, incomingCounts, childEffectId, nextSeen);
-        if (child) {
-          return {
-            name: template.fields[index],
-            value: { text: child.text, precedence: child.precedence, isAtomic: child.isAtomic }
-          };
-        }
-      }
-    }
-    const patVar = trimmed.replace(/^(?:pat|matched)\./, "");
-    if (nodeById.has(patVar)) {
-      const child = recursivePatternLabel(ir, nodeById, incomingCounts, patVar, strategy, new Set());
-      if (child) {
-        return {
-          name: template.fields[index],
-          value: { text: child.text, precedence: child.precedence, isAtomic: child.isAtomic }
-        };
-      }
-      if (strategy === "tree-safe") {
-        return null;
-      }
+    const child = recursiveActionArgLabel(ir, strategy, effectByBinding, nodeById, incomingCounts, arg, nextSeen);
+    if (child) {
+      return {
+        name: template.fields[index],
+        value: { text: child.text, precedence: child.precedence, isAtomic: child.isAtomic }
+      };
     }
     return {
       name: template.fields[index],
-      value: { text: trimmed, precedence: Number.MAX_SAFE_INTEGER, isAtomic: true }
+      value: { text: displayAtomicExpression(arg), precedence: Number.MAX_SAFE_INTEGER, isAtomic: true }
     };
   });
 
@@ -435,7 +524,13 @@ function actionEffectLabel(
   }
   if (parsed) {
     const template = findPreferredTemplate(ir, parsed.variantName);
-    const rendered = template ? applyDisplayTemplate(template, parsed.args, variantPrecedence(ir, parsed.variantName)) : null;
+    const rendered = template
+      ? applyDisplayTemplate(
+          template,
+          parsed.args.map((arg) => displayAtomicExpression(arg)),
+          variantPrecedence(ir, parsed.variantName)
+        )
+      : null;
     if (rendered) {
       return rendered;
     }

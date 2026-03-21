@@ -144,6 +144,27 @@ suite("eggplant pattern headless tests", () => {
     assert.equal(metadataCacheMatches({ mtimeMs: 10, size: 20 }, { mtimeMs: 11, size: 20 }), false);
   });
 
+  test("recursive action labels inline nested math_microbenchmark inserts", () => {
+    const source = fs.readFileSync(MATH_METADATA_FIXTURE, "utf8");
+    const offset = source.indexOf("let pow_x_2 = ctx.insert_m_pow(x.clone(), ctx.insert_m_const(2));");
+    assert.notEqual(offset, -1);
+
+    const result = spawnSync(EXTRACTOR_PATH, ["--offset", String(offset)], {
+      cwd: WORKSPACE_ROOT,
+      input: source,
+      encoding: "utf8"
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const ir = JSON.parse(result.stdout) as PatternIr;
+
+    const recursiveDot = patternIrToDotWithMode(ir, "action", "recursive", "dag-expand");
+    assert.match(recursiveDot, /label="x\^2"/);
+    assert.match(recursiveDot, /label="x\^3 - 7 \* x\^2"/);
+    assert.doesNotMatch(recursiveDot, /insert_m_const\(2\)/);
+    assert.doesNotMatch(recursiveDot, /"x"\^2/);
+  });
+
   test("extractor keeps inline assertions and unique ids", () => {
     const source = `
 fn demo() {
