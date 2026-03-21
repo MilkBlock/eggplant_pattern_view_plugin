@@ -129,6 +129,7 @@ class PreviewController {
   }
 
   async requestPreview(editor: vscode.TextEditor, manual: boolean): Promise<void> {
+    this.panel(!manual);
     this.pending = {
       editor,
       manual,
@@ -143,7 +144,7 @@ class PreviewController {
 
   async showCurrentMode(mode: DotViewMode): Promise<void> {
     if (this.lastPreview) {
-      await renderDot(this.panel(), this.lastPreview.editor, this.lastPreview.ir, mode, this.labelStyle(), null);
+      await renderDot(this.panel(true), this.lastPreview.editor, this.lastPreview.ir, mode, this.labelStyle(), null);
       return;
     }
 
@@ -178,7 +179,7 @@ class PreviewController {
     if (this.lastPreview) {
       const offset = this.lastPreview.editor.document.offsetAt(this.lastPreview.editor.selection.active);
       const mode = resolveDotViewMode(this.lastPreview.ir, offset);
-      await renderDot(this.panel(), this.lastPreview.editor, this.lastPreview.ir, mode, labelStyle, null);
+      await renderDot(this.panel(true), this.lastPreview.editor, this.lastPreview.ir, mode, labelStyle, null);
     }
   }
 
@@ -204,7 +205,7 @@ class PreviewController {
         return;
       }
       const mode = request.forcedMode ?? resolveDotViewMode(ir, offset);
-      await renderDot(this.panel(), request.editor, ir, mode, this.labelStyle(), null);
+      await renderDot(this.panel(!request.manual), request.editor, ir, mode, this.labelStyle(), null);
       this.lastPreview = {
         editor: request.editor,
         ir
@@ -217,7 +218,7 @@ class PreviewController {
 
       const message = formatPreviewError(error);
       const suppressRepeatedAutoWarning = !request.manual && message === this.lastAutoWarning;
-      const renderedNotice = await tryRenderNotice(this.panel(), request.editor, message);
+      const renderedNotice = await tryRenderNotice(this.panel(!request.manual), request.editor, message);
       if (!suppressRepeatedAutoWarning && (request.manual || !renderedNotice)) {
         if (!request.manual) {
           this.lastAutoWarning = message;
@@ -227,8 +228,8 @@ class PreviewController {
     }
   }
 
-  private panel(): PreviewPanel {
-    return PreviewPanel.createOrShow(this.extensionUri, this.callbacks);
+  private panel(preserveFocus: boolean): PreviewPanel {
+    return PreviewPanel.createOrShow(this.extensionUri, this.callbacks, preserveFocus);
   }
 
   private labelStyle(): DotLabelStyle {
@@ -290,7 +291,6 @@ async function renderDot(
     svg,
     notice
   });
-  panel.reveal();
 }
 
 async function renderNotice(panel: PreviewPanel, editor: vscode.TextEditor, message: string): Promise<void> {
@@ -311,7 +311,6 @@ async function renderNotice(panel: PreviewPanel, editor: vscode.TextEditor, mess
     svg,
     notice: message
   });
-  panel.reveal();
 }
 
 async function tryRenderNotice(panel: PreviewPanel, editor: vscode.TextEditor, message: string): Promise<boolean> {

@@ -31,12 +31,16 @@ export class PreviewPanel implements vscode.Disposable {
 
   private constructor(
     private readonly extensionUri: vscode.Uri,
-    private readonly callbacks: PreviewPanelCallbacks
+    private readonly callbacks: PreviewPanelCallbacks,
+    preserveFocus: boolean
   ) {
     this.panel = vscode.window.createWebviewPanel(
       "eggplantPattern.previewPanel",
       "Eggplant Pattern Preview",
-      vscode.ViewColumn.Beside,
+      {
+        viewColumn: vscode.ViewColumn.Beside,
+        preserveFocus
+      },
       {
         enableScripts: true,
         retainContextWhenHidden: true
@@ -55,13 +59,17 @@ export class PreviewPanel implements vscode.Disposable {
     );
   }
 
-  static createOrShow(extensionUri: vscode.Uri, callbacks: PreviewPanelCallbacks): PreviewPanel {
+  static createOrShow(
+    extensionUri: vscode.Uri,
+    callbacks: PreviewPanelCallbacks,
+    preserveFocus: boolean
+  ): PreviewPanel {
     if (currentPanel) {
-      currentPanel.reveal();
+      currentPanel.reveal(preserveFocus);
       return currentPanel;
     }
 
-    currentPanel = new PreviewPanel(extensionUri, callbacks);
+    currentPanel = new PreviewPanel(extensionUri, callbacks, preserveFocus);
     return currentPanel;
   }
 
@@ -69,8 +77,8 @@ export class PreviewPanel implements vscode.Disposable {
     return currentPanel;
   }
 
-  reveal(): void {
-    this.panel.reveal(vscode.ViewColumn.Beside);
+  reveal(preserveFocus = false): void {
+    this.panel.reveal(vscode.ViewColumn.Beside, preserveFocus);
   }
 
   async render(state: PreviewPanelState): Promise<void> {

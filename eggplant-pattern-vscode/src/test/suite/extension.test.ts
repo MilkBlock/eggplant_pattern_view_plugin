@@ -146,6 +146,19 @@ suite("eggplant pattern extension", () => {
     assert.match(preview.dot, /"p" -> "r"/);
   });
 
+  test("auto preview keeps editor focus while updating the panel", async () => {
+    const editor = await openEditor(RUST_FIXTURE);
+    await vscode.workspace.getConfiguration().update("eggplantPattern.autoPreview", true, vscode.ConfigurationTarget.Global);
+
+    placeCursor(editor, "let p = Add::query");
+    await waitForPreviewState();
+    assert.strictEqual(vscode.window.activeTextEditor?.document.uri.toString(), editor.document.uri.toString());
+
+    placeCursor(editor, "ctx.union(pat.p, op_value)");
+    await waitForPreviewState((state) => state.mode === "action");
+    assert.strictEqual(vscode.window.activeTextEditor?.document.uri.toString(), editor.document.uri.toString());
+  });
+
   test("dropdown message switches the panel mode", async () => {
     const editor = await openEditor(RUST_FIXTURE);
     placeCursor(editor, "MyTx::add_rule");
