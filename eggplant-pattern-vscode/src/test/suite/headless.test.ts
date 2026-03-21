@@ -5,6 +5,7 @@ import { spawnSync } from "child_process";
 import { suite, test } from "mocha";
 import { patternIrToDot, patternIrToDotWithMode } from "../../dot";
 import { PatternIr } from "../../ir";
+import { normalizeTypstMathSource } from "../../typst";
 
 const WORKSPACE_ROOT = path.resolve(__dirname, "../../../../");
 const FIXTURE_PATH = path.resolve(WORKSPACE_ROOT, "samples", "pattern_samples.rs");
@@ -17,6 +18,12 @@ const EXTRACTOR_PATH = path.resolve(
 );
 
 suite("eggplant pattern headless tests", () => {
+  test("typst math normalization strips both single and double dollar wrappers", () => {
+    assert.equal(normalizeTypstMathSource("x + y"), "x + y");
+    assert.equal(normalizeTypstMathSource("$x + y$"), "x + y");
+    assert.equal(normalizeTypstMathSource("$$x + y$$"), "x + y");
+  });
+
   test("extractor emits JSON for add_rule closure scope", () => {
     const source = fs.readFileSync(FIXTURE_PATH, "utf8");
     const offset = source.indexOf("let p = Add::query");

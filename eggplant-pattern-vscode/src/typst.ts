@@ -80,8 +80,11 @@ function runTypst(document: string): Promise<string> {
   });
 }
 
-function normalizeTypstMathSource(source: string): string {
+export function normalizeTypstMathSource(source: string): string {
   const trimmed = source.trim();
+  if (trimmed.startsWith("$$") && trimmed.endsWith("$$") && trimmed.length >= 4) {
+    return trimmed.slice(2, -2).trim();
+  }
   if (trimmed.startsWith("$") && trimmed.endsWith("$") && trimmed.length >= 2) {
     return trimmed.slice(1, -1).trim();
   }
