@@ -57,6 +57,12 @@ export interface DisplayTemplate {
   fields: string[];
 }
 
+export interface TypstTemplate {
+  variant_name: string;
+  template: string;
+  fields: string[];
+}
+
 export interface Diagnostic {
   severity: "error" | "warning";
   message: string;
@@ -72,5 +78,6 @@ export interface PatternIr {
   action_effects: ActionEffect[];
   seed_facts: SeedFact[];
   display_templates: DisplayTemplate[];
+  typst_templates: TypstTemplate[];
   diagnostics: Diagnostic[];
 }

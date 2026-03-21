@@ -21,11 +21,13 @@ fn add_rule_demo() {
 #[eggplant::dsl]
 enum DisplayMath {
     #[eggplant::display("{x} + {f}")]
+    #[eggplant::typst("diff({x}, {f})")]
     MDiff {
         x: DisplayMath,
         f: DisplayMath,
     },
     #[eggplant::display("integ {f} {x}")]
+    #[eggplant::typst("integral({f}, {x})")]
     MIntegral {
         f: DisplayMath,
         x: DisplayMath,

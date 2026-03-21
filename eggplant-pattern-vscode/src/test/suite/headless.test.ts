@@ -183,6 +183,7 @@ fn demo() {
         }
       ],
       display_templates: [],
+      typst_templates: [],
       diagnostics: []
     };
 
@@ -242,6 +243,7 @@ fn demo() {
       ],
       seed_facts: [],
       display_templates: [],
+      typst_templates: [],
       diagnostics: []
     };
 
@@ -298,6 +300,7 @@ fn demo() {
       ],
       seed_facts: [],
       display_templates: [],
+      typst_templates: [],
       diagnostics: []
     };
 
@@ -367,6 +370,7 @@ fn demo() {
           fields: ["f", "x"]
         }
       ],
+      typst_templates: [],
       diagnostics: []
     };
 
@@ -413,11 +417,18 @@ fn demo() {
           fields: ["f", "x"]
         }
       ],
+      typst_templates: [
+        {
+          variant_name: "MIntegral",
+          template: "integral({f}, {x})",
+          fields: ["f", "x"]
+        }
+      ],
       diagnostics: []
     };
 
     const compactDot = patternIrToDotWithMode(ir, "action", "compact");
-    assert.match(compactDot, /integ lhs rhs/);
+    assert.match(compactDot, /integral\(lhs, rhs\)/);
   });
 
   test("recursive labels collapse display-only trees with precedence-safe parentheses", () => {
@@ -452,6 +463,7 @@ fn demo() {
         { variant_name: "Add", template: "{lhs} + {rhs}", fields: ["lhs", "rhs"] },
         { variant_name: "Mul", template: "{lhs} * {rhs}", fields: ["lhs", "rhs"] }
       ],
+      typst_templates: [],
       diagnostics: []
     };
 
@@ -490,6 +502,7 @@ fn demo() {
         { variant_name: "Add", template: "{lhs} + {rhs}", fields: ["lhs", "rhs"] },
         { variant_name: "Mul", template: "{lhs} * {rhs}", fields: ["lhs", "rhs"] }
       ],
+      typst_templates: [],
       diagnostics: []
     };
 

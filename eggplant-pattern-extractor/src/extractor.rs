@@ -8,7 +8,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use crate::ir::{
     ActionEffect, Diagnostic, DisplayTemplate, PatternConstraint, PatternEdge, PatternIr,
-    PatternNode, ScopeInfo, ScopeKind, SeedFact, TextSpan,
+    PatternNode, ScopeInfo, ScopeKind, SeedFact, TextSpan, TypstTemplate,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -55,11 +55,13 @@ pub fn extract_pattern(source: &str, options: ExtractOptions) -> Result<PatternI
 
     let scope = find_scope(syntax, offset).ok_or_else(|| anyhow!("no supported pattern scope found at cursor"))?;
     let display_templates = extract_display_templates(source);
+    let typst_templates = extract_typst_templates(source);
     let mut ir = match scope {
         Scope::RuleCall(call) => extract_from_rule_call(call),
         Scope::Function(function) => extract_from_function(function),
     }?;
     ir.display_templates = display_templates;
+    ir.typst_templates = typst_templates;
     ir.diagnostics.append(&mut diagnostics);
     Ok(ir)
 }
@@ -305,17 +307,49 @@ fn extract_from_block(
         action_effects,
         seed_facts,
         display_templates: Vec::new(),
+        typst_templates: Vec::new(),
         diagnostics,
     })
 }
 
 fn extract_display_templates(source: &str) -> Vec<DisplayTemplate> {
+    extract_templates(source, "display")
+        .into_iter()
+        .map(|template| DisplayTemplate {
+            variant_name: template.variant_name,
+            template: template.template,
+            fields: template.fields,
+        })
+        .collect()
+}
+
+fn extract_typst_templates(source: &str) -> Vec<TypstTemplate> {
+    extract_templates(source, "typst")
+        .into_iter()
+        .map(|template| TypstTemplate {
+            variant_name: template.variant_name,
+            template: template.template,
+            fields: template.fields,
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone)]
+struct RawTemplate {
+    variant_name: String,
+    template: String,
+    fields: Vec<String>,
+}
+
+fn extract_templates(source: &str, attr_name: &str) -> Vec<RawTemplate> {
     let attr_re = Regex::new(
-        r#"(?s)#\s*\[\s*eggplant::display\("(?P<template>(?:\\.|[^"])*)"\)\s*\]\s*(?P<variant>[A-Za-z_][A-Za-z0-9_]*)\s*(?:\{(?P<fields>[^}]*)\})?"#,
+        &format!(
+            r#"(?s)#\s*\[\s*(?:eggplant::)?{attr_name}\("(?P<template>(?:\\.|[^"])*)"\)\s*\]\s*(?:#\s*\[[^\]]+\]\s*)*(?P<variant>[A-Za-z_][A-Za-z0-9_]*)\s*(?:\{{(?P<fields>[^}}]*)\}})?"#
+        ),
     )
-    .expect("valid display regex");
+    .expect("valid template regex");
     let field_re =
-        Regex::new(r#"(?m)([A-Za-z_][A-Za-z0-9_]*)\s*:"#).expect("valid display field regex");
+        Regex::new(r#"(?m)([A-Za-z_][A-Za-z0-9_]*)\s*:"#).expect("valid template field regex");
 
     attr_re
         .captures_iter(source)
@@ -337,11 +371,7 @@ fn extract_display_templates(source: &str) -> Vec<DisplayTemplate> {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            DisplayTemplate {
-                variant_name,
-                template,
-                fields,
-            }
+            RawTemplate { variant_name, template, fields }
         })
         .collect()
 }
@@ -867,8 +897,10 @@ fn demo() {
 #[eggplant::dsl]
 enum DisplayMath {
     #[eggplant::display("{x} + {f}")]
+    #[eggplant::typst("diff({x}, {f})")]
     MDiff { x: DisplayMath, f: DisplayMath },
     #[eggplant::display("integ {f} {x}")]
+    #[typst("integral({f}, {x})")]
     MIntegral { f: DisplayMath, x: DisplayMath },
 }
 
@@ -892,6 +924,13 @@ fn demo() {
         assert_eq!(ir.display_templates[1].variant_name, "MIntegral");
         assert_eq!(ir.display_templates[1].template, "integ {f} {x}");
         assert_eq!(ir.display_templates[1].fields, vec!["f", "x"]);
+        assert_eq!(ir.typst_templates.len(), 2);
+        assert_eq!(ir.typst_templates[0].variant_name, "MDiff");
+        assert_eq!(ir.typst_templates[0].template, "diff({x}, {f})");
+        assert_eq!(ir.typst_templates[0].fields, vec!["x", "f"]);
+        assert_eq!(ir.typst_templates[1].variant_name, "MIntegral");
+        assert_eq!(ir.typst_templates[1].template, "integral({f}, {x})");
+        assert_eq!(ir.typst_templates[1].fields, vec!["f", "x"]);
     }
 
     #[test]

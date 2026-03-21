@@ -202,6 +202,16 @@ suite("eggplant pattern extension", () => {
     assert.equal(preview.recursiveStrategy, "tree-safe");
   });
 
+  test("preview prefers typst templates when available", async () => {
+    const editor = await openEditor(RUST_FIXTURE);
+    placeCursor(editor, "ctx.insert_m_integral(pat.f, pat.x)");
+
+    await vscode.commands.executeCommand("eggplant-pattern.preview");
+
+    const preview = await waitForPreviewState((state) => state.mode === "action");
+    assert.match(preview.dot, /integral\(f, x\)/);
+  });
+
   test("recursive strategy dropdown switches between tree-safe and dag-expand", async () => {
     const editor = await openEditor(RUST_FIXTURE);
     placeCursor(editor, "ctx.insert_m_integral(pat.f, pat.x)");

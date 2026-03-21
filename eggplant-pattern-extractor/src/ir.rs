@@ -88,6 +88,13 @@ pub struct DisplayTemplate {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct TypstTemplate {
+    pub variant_name: String,
+    pub template: String,
+    pub fields: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Severity {
     Error,
@@ -111,5 +118,6 @@ pub struct PatternIr {
     pub action_effects: Vec<ActionEffect>,
     pub seed_facts: Vec<SeedFact>,
     pub display_templates: Vec<DisplayTemplate>,
+    pub typst_templates: Vec<TypstTemplate>,
     pub diagnostics: Vec<Diagnostic>,
 }

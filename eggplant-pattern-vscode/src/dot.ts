@@ -1,4 +1,4 @@
-import { DisplayTemplate, PatternIr, PatternNode } from "./ir";
+import { DisplayTemplate, PatternIr, PatternNode, TypstTemplate } from "./ir";
 
 export type DotViewMode = "pattern" | "action" | "combined";
 export type DotLabelStyle = "compact" | "full" | "recursive";
@@ -49,6 +49,17 @@ function semanticInsertLabel(sourceText: string): string {
 
 function findDisplayTemplate(ir: PatternIr, variantName: string): DisplayTemplate | undefined {
   return ir.display_templates.find((template) => template.variant_name === variantName);
+}
+
+function findTypstTemplate(ir: PatternIr, variantName: string): TypstTemplate | undefined {
+  return ir.typst_templates.find((template) => template.variant_name === variantName);
+}
+
+function findPreferredTemplate(
+  ir: PatternIr,
+  variantName: string
+): DisplayTemplate | TypstTemplate | undefined {
+  return findTypstTemplate(ir, variantName) ?? findDisplayTemplate(ir, variantName);
 }
 
 function applyDisplayTemplate(template: DisplayTemplate, args: string[]): string | null {
@@ -140,7 +151,7 @@ function recursivePatternLabel(
     return null;
   }
 
-  const template = findDisplayTemplate(ir, node.dsl_type);
+  const template = findPreferredTemplate(ir, node.dsl_type);
   if (!template) {
     return node.inputs.length === 0
       ? { text: compactExpression(node.id), composite: false }
@@ -195,7 +206,7 @@ function recursiveActionLabel(
     return null;
   }
 
-  const template = findDisplayTemplate(ir, parsed.variantName);
+  const template = findPreferredTemplate(ir, parsed.variantName);
   if (!template) {
     return null;
   }
@@ -262,7 +273,7 @@ function actionEffectLabel(
     }
   }
   if (parsed) {
-    const template = findDisplayTemplate(ir, parsed.variantName);
+    const template = findPreferredTemplate(ir, parsed.variantName);
     const rendered = template ? applyDisplayTemplate(template, parsed.args) : null;
     if (rendered) {
       return rendered;
@@ -291,7 +302,7 @@ function nodeLabel(
       return rendered.text;
     }
   }
-  const template = findDisplayTemplate(ir, dslType);
+  const template = findPreferredTemplate(ir, dslType);
   const rendered = template ? applyDisplayTemplate(template, inputs.map((input) => compactExpression(input))) : null;
   if (rendered) {
     return rendered;
