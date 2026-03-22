@@ -2,7 +2,7 @@
   "name": "eggplant-pattern-vscode",
   "displayName": "Eggplant Pattern Preview",
   "description": "Live preview of cursor-scoped eggplant Rust patterns in VSCode.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "MilkBlock",
   "license": "SEE LICENSE IN LICENSE",
   "engines": {
