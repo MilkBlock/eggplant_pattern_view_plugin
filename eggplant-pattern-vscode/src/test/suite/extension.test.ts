@@ -55,6 +55,7 @@ suite("eggplant pattern extension", () => {
   setup(async () => {
     warningMessages.length = 0;
     await clearPreviewPanelTestState();
+    await dispatchPreviewPanelTestMessage({ type: "changeSourceMode", sourceMode: "ast" });
     await vscode.workspace.getConfiguration().update("eggplantPattern.autoPreview", false, vscode.ConfigurationTarget.Global);
     await vscode.workspace.getConfiguration().update("eggplantPattern.defaultDotView", "auto", vscode.ConfigurationTarget.Global);
     await vscode.workspace.getConfiguration().update("eggplantPattern.defaultLabelStyle", "recursive", vscode.ConfigurationTarget.Global);
@@ -77,6 +78,7 @@ suite("eggplant pattern extension", () => {
 
     const preview = await waitForPreviewState(undefined, { minRenderNonce: baselineRenderNonce + 1 });
     assert.match(preview.title, /pattern\.dot/);
+    assert.equal(preview.sourceMode, "ast");
     assert.equal(preview.labelStyle, "recursive");
     assert.match(preview.dot, /digraph EggplantPattern/);
     assert.match(preview.dot, /"p" -> "l"/);
@@ -248,6 +250,44 @@ suite("eggplant pattern extension", () => {
     assert.equal(preview.recursiveStrategy, "dag-expand");
   });
 
+  test("source dropdown switches between AST and Trace while reusing detail controls", async () => {
+    const editor = await openEditor(RUST_FIXTURE);
+    placeCursor(editor, "ctx.union(pat.p, op_value)");
+
+    const sourceText = editor.document.getText();
+    const start = sourceText.indexOf("ctx.union(pat.p, op_value)");
+    const end = start + "ctx.union(pat.p, op_value)".length;
+    const trace = {
+      version: 1,
+      events: [
+        {
+          Union: {
+            event_id: "evt_0",
+            effect_id: `effect@${start}:${end}`,
+            lhs_debug: "pat.p",
+            rhs_debug: "op_value"
+          }
+        }
+      ]
+    };
+    await fs.promises.writeFile(TRACE_FIXTURE, JSON.stringify(trace, null, 2), "utf8");
+    await updateSettingAndWait("eggplantPattern.actionSampleTracePath", TRACE_FIXTURE);
+
+    await vscode.commands.executeCommand("eggplant-pattern.preview");
+    await waitForPreviewState((state) => state.sourceMode === "ast");
+
+    await dispatchPreviewPanelTestMessage({ type: "changeLabelStyle", labelStyle: "recursive" });
+    await dispatchPreviewPanelTestMessage({ type: "changeSourceMode", sourceMode: "trace" });
+
+    const preview = await waitForPreviewState(
+      (state) => state.sourceMode === "trace" && state.labelStyle === "recursive"
+    );
+    assert.equal(preview.sourceMode, "trace");
+    assert.equal(preview.labelStyle, "recursive");
+    assert.equal(preview.recursiveStrategy, "dag-expand");
+    assert.match(preview.recoverySummary ?? "", /source=trace/);
+  });
+
   test("preview prefers typst templates when available", async () => {
     const editor = await openEditor(RUST_FIXTURE);
     placeCursor(editor, "ctx.insert_m_integral(pat.f, pat.x)");
@@ -337,7 +377,7 @@ suite("eggplant pattern extension", () => {
     assert.equal(selectedText(editor), "ctx.union(pat.p, op_value)");
   });
 
-  test("preview metadata surfaces sampled action recovery summary and diagnostics", async () => {
+  test("trace source surfaces sampled action recovery summary and diagnostics", async () => {
     const editor = await openEditor(RUST_FIXTURE);
     placeCursor(editor, "ctx.union(pat.p, op_value)");
 
@@ -375,14 +415,36 @@ suite("eggplant pattern extension", () => {
     await updateSettingAndWait("eggplantPattern.actionSampleTracePath", TRACE_FIXTURE);
 
     await vscode.commands.executeCommand("eggplant-pattern.preview");
+    await dispatchPreviewPanelTestMessage({ type: "changeSourceMode", sourceMode: "trace" });
     const preview = await waitForPreviewState(
       (state) =>
         (state.renderNonce ?? 0) > baselineRenderNonce &&
-        state.recoverySummary === "recovery=sample | events=2 | matched=2 | dynamic-unknown=1"
+        state.sourceMode === "trace" &&
+        state.recoverySummary === "source=trace | events=2 | matched=2 | dynamic-unknown=1"
     );
-    assert.equal(preview.recoverySummary, "recovery=sample | events=2 | matched=2 | dynamic-unknown=1");
+    assert.equal(preview.recoverySummary, "source=trace | events=2 | matched=2 | dynamic-unknown=1");
     assert.equal(preview.recoveryDiagnostics.length, 1);
     assert.match(preview.recoveryDiagnostics[0], /dynamic-unknown at evt_1: branch not sampled/);
+  });
+
+  test("trace source stays selected and warns when trace input is unavailable", async () => {
+    const editor = await openEditor(RUST_FIXTURE);
+    placeCursor(editor, "ctx.union(pat.p, op_value)");
+
+    await updateSettingAndWait("eggplantPattern.actionSampleTracePath", "");
+    await vscode.commands.executeCommand("eggplant-pattern.preview");
+    await dispatchPreviewPanelTestMessage({ type: "changeSourceMode", sourceMode: "trace" });
+
+    const preview = await waitForPreviewState(
+      (state) =>
+        state.sourceMode === "trace" &&
+        state.recoverySummary === "trace-unavailable" &&
+        typeof state.sourceWarning === "string" &&
+        state.sourceWarning.includes("trace-unavailable")
+    );
+    assert.equal(preview.sourceMode, "trace");
+    assert.equal(preview.showSwitchToAst, true);
+    assert.match(preview.sourceWarning ?? "", /trace-unavailable/);
   });
 
   test("extractor resolution prefers bundled binary by default", async () => {

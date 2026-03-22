@@ -23,6 +23,12 @@ export interface ActionRecoveryPreviewMetadata {
   diagnostics: ActionSampleDiagnostic[];
 }
 
+export interface TraceSourcePreview {
+  actionEffects: ActionEffect[];
+  summary: string;
+  diagnostics: ActionSampleDiagnostic[];
+}
+
 export interface ActionSampleTrace {
   version: 1;
   action_range: TextSpan;
@@ -193,6 +199,78 @@ export function summarizeRuntimeActionSampleTrace(
   }
 
   return {
+    summary: summaryParts.join(" | "),
+    diagnostics
+  };
+}
+
+export function buildTraceSourcePreview(
+  payload: unknown,
+  actionEffects: ActionEffect[]
+): TraceSourcePreview | null {
+  const trace = parseRuntimeActionSampleTrace(payload);
+  if (!trace) {
+    return null;
+  }
+
+  const effectsByStableId = indexActionEffectsByStableId(actionEffects);
+  let matchedCount = 0;
+  let unresolvedCount = 0;
+  let dynamicUnknownCount = 0;
+  const diagnostics: ActionSampleDiagnostic[] = [];
+  const traceActionEffects: ActionEffect[] = [];
+
+  for (const event of trace.events) {
+    const effect = event.effect_id === null ? null : effectsByStableId.get(event.effect_id) ?? null;
+    if (effect) {
+      matchedCount += 1;
+      traceActionEffects.push({
+        ...effect,
+        id: `trace:${event.id}`,
+        source_text:
+          event.kind === "dynamic-unknown"
+            ? `dynamic-unknown: ${event.reason}`
+            : effect.source_text
+      });
+    } else {
+      unresolvedCount += 1;
+    }
+
+    if (event.kind === "dynamic-unknown") {
+      dynamicUnknownCount += 1;
+      diagnostics.push({
+        severity: "warning",
+        message: effect
+          ? `dynamic-unknown at ${event.id}: ${event.reason} (${event.effect_id})`
+          : `dynamic-unknown at ${event.id}: ${event.reason}`,
+        source_range: effect?.range ?? null
+      });
+      continue;
+    }
+
+    if (!effect && event.effect_id !== null) {
+      diagnostics.push({
+        severity: "info",
+        message: `trace event ${event.id} (${event.kind}) did not match any extracted action effect (${event.effect_id})`,
+        source_range: null
+      });
+    }
+  }
+
+  const summaryParts = [
+    "source=trace",
+    `events=${trace.events.length}`,
+    `matched=${matchedCount}`
+  ];
+  if (dynamicUnknownCount > 0) {
+    summaryParts.push(`dynamic-unknown=${dynamicUnknownCount}`);
+  }
+  if (unresolvedCount > 0) {
+    summaryParts.push(`unresolved=${unresolvedCount}`);
+  }
+
+  return {
+    actionEffects: traceActionEffects,
     summary: summaryParts.join(" | "),
     diagnostics
   };

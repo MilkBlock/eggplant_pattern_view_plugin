@@ -2,10 +2,13 @@ import * as vscode from "vscode";
 import { DotLabelStyle, DotViewMode, RecursiveStrategy } from "./dot";
 import { RenderedTypstSnippet } from "./typst";
 
+export type PreviewSourceMode = "ast" | "trace";
+
 export interface PreviewPanelState {
   renderNonce?: number;
   title: string;
   mode: DotViewMode;
+  sourceMode: PreviewSourceMode;
   labelStyle: DotLabelStyle;
   recursiveStrategy: RecursiveStrategy;
   fileName: string;
@@ -16,11 +19,14 @@ export interface PreviewPanelState {
   metadataSourceFiles: string[];
   recoverySummary: string | null;
   recoveryDiagnostics: string[];
+  sourceWarning: string | null;
+  showSwitchToAst: boolean;
   notice: string | null;
 }
 
 interface PreviewPanelCallbacks {
   onModeChange(mode: DotViewMode): Promise<void>;
+  onSourceModeChange(sourceMode: PreviewSourceMode): Promise<void>;
   onLabelStyleChange(labelStyle: DotLabelStyle): Promise<void>;
   onRecursiveStrategyChange(strategy: RecursiveStrategy): Promise<void>;
   onSourceClick(targetId: string): Promise<void>;
@@ -31,6 +37,7 @@ interface PreviewPanelCallbacks {
 
 type IncomingMessage =
   | { type: "changeMode"; mode: DotViewMode }
+  | { type: "changeSourceMode"; sourceMode: PreviewSourceMode }
   | { type: "changeLabelStyle"; labelStyle: DotLabelStyle }
   | { type: "changeRecursiveStrategy"; recursiveStrategy: RecursiveStrategy }
   | { type: "clickSource"; targetId: string }
@@ -137,6 +144,9 @@ export class PreviewPanel implements vscode.Disposable {
       case "changeLabelStyle":
         await this.callbacks.onLabelStyleChange(message.labelStyle);
         return;
+      case "changeSourceMode":
+        await this.callbacks.onSourceModeChange(message.sourceMode);
+        return;
       case "changeRecursiveStrategy":
         await this.callbacks.onRecursiveStrategyChange(message.recursiveStrategy);
         return;
@@ -190,7 +200,7 @@ export class PreviewPanel implements vscode.Disposable {
       }
       .shell {
         display: grid;
-        grid-template-rows: auto auto 1fr;
+        grid-template-rows: auto auto 1fr auto;
         height: 100vh;
       }
       .toolbar {
@@ -231,6 +241,26 @@ export class PreviewPanel implements vscode.Disposable {
         max-width: none;
         height: auto;
       }
+      .footer {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 12px;
+        border-top: 1px solid var(--border);
+        background: var(--panel);
+      }
+      .footer label {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .warning {
+        flex: 1;
+        min-width: 0;
+        color: #d08a00;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
     </style>
   </head>
   <body>
@@ -259,15 +289,27 @@ export class PreviewPanel implements vscode.Disposable {
       </div>
       <div class="meta" id="meta">No preview yet.</div>
       <div class="graph" id="graph"></div>
+      <div class="footer">
+        <label for="sourceMode">Source</label>
+        <select id="sourceMode">
+          <option value="ast">AST</option>
+          <option value="trace">Trace</option>
+        </select>
+        <div class="warning" id="sourceWarning"></div>
+        <button id="switchToAst" type="button" hidden>Switch to AST</button>
+      </div>
     </div>
     <script nonce="${nonce}">
       const vscode = acquireVsCodeApi();
       const mode = document.getElementById("mode");
       const labelStyle = document.getElementById("labelStyle");
+      const sourceMode = document.getElementById("sourceMode");
       const recursiveStrategy = document.getElementById("recursiveStrategy");
       const refresh = document.getElementById("refresh");
       const metadataSources = document.getElementById("metadataSources");
       const clearMetadataSources = document.getElementById("clearMetadataSources");
+      const sourceWarning = document.getElementById("sourceWarning");
+      const switchToAst = document.getElementById("switchToAst");
       const meta = document.getElementById("meta");
       const graph = document.getElementById("graph");
       const sourceTargetIds = new Set();
@@ -349,6 +391,10 @@ export class PreviewPanel implements vscode.Disposable {
         syncRecursiveStrategyState();
       });
 
+      sourceMode.addEventListener("change", () => {
+        vscode.postMessage({ type: "changeSourceMode", sourceMode: sourceMode.value });
+      });
+
       recursiveStrategy.addEventListener("change", () => {
         vscode.postMessage({ type: "changeRecursiveStrategy", recursiveStrategy: recursiveStrategy.value });
       });
@@ -365,6 +411,10 @@ export class PreviewPanel implements vscode.Disposable {
         vscode.postMessage({ type: "clearMetadataSources" });
       });
 
+      switchToAst.addEventListener("click", () => {
+        vscode.postMessage({ type: "changeSourceMode", sourceMode: "ast" });
+      });
+
       window.addEventListener("message", (event) => {
         const message = event.data;
         if (message.type !== "render") {
@@ -374,6 +424,7 @@ export class PreviewPanel implements vscode.Disposable {
         const payload = message.payload;
         mode.value = payload.mode;
         labelStyle.value = payload.labelStyle;
+        sourceMode.value = payload.sourceMode;
         recursiveStrategy.value = payload.recursiveStrategy;
         syncRecursiveStrategyState();
         sourceTargetIds.clear();
@@ -387,7 +438,9 @@ export class PreviewPanel implements vscode.Disposable {
         const recoveryDiagnostics = (payload.recoveryDiagnostics || []).length > 0
           ? " | diag: " + payload.recoveryDiagnostics.join(" ; ")
           : "";
-        meta.textContent = payload.notice || payload.fileName + " | " + payload.mode + " | " + payload.labelStyle + (payload.labelStyle === "recursive" ? " | " + payload.recursiveStrategy : "") + sourceSummary + recoverySummary + recoveryDiagnostics;
+        meta.textContent = payload.notice || payload.fileName + " | " + payload.mode + " | source=" + payload.sourceMode + " | " + payload.labelStyle + (payload.labelStyle === "recursive" ? " | " + payload.recursiveStrategy : "") + sourceSummary + recoverySummary + recoveryDiagnostics;
+        sourceWarning.textContent = payload.sourceWarning || "";
+        switchToAst.hidden = !payload.showSwitchToAst;
         graph.innerHTML = payload.svg;
         const rootSvg = graph.querySelector("svg");
         if (rootSvg) {
@@ -417,6 +470,7 @@ export async function clearPreviewPanelTestState(): Promise<void> {
 export async function dispatchPreviewPanelTestMessage(
   message:
     | { type: "changeMode"; mode: DotViewMode }
+    | { type: "changeSourceMode"; sourceMode: PreviewSourceMode }
     | { type: "changeLabelStyle"; labelStyle: DotLabelStyle }
     | { type: "changeRecursiveStrategy"; recursiveStrategy: RecursiveStrategy }
     | { type: "clickSource"; targetId: string }

@@ -1,12 +1,12 @@
 import * as vscode from "vscode";
 import * as fs from "fs";
 import * as path from "path";
-import { resolveDynamicActionRecoveryPolicy, summarizeRuntimeActionSampleTrace } from "./actionRecovery";
+import { buildTraceSourcePreview, resolveDynamicActionRecoveryPolicy, summarizeRuntimeActionSampleTrace } from "./actionRecovery";
 import { collectTypstReplacementSources, DotLabelStyle, DotViewMode, patternIrToDotWithMode, RecursiveStrategy } from "./dot";
 import { configureExtractorResolution, ExtractorError, runExtractor } from "./extractor";
 import { PatternIr } from "./ir";
 import { clearMetadataSourceCache, loadMetadataSources, mergeExternalMetadata, pickMetadataSourceFiles } from "./metadataSources";
-import { PreviewPanel } from "./previewPanel";
+import { PreviewPanel, PreviewSourceMode } from "./previewPanel";
 import { dotToSvg } from "./svg";
 import { renderTypstSnippets } from "./typst";
 
@@ -100,6 +100,7 @@ class PreviewController {
   private lastAutoWarning: string | undefined;
   private lastPreview: LastPreview | undefined;
   private currentModeOverride: DotViewMode | undefined;
+  private currentSourceMode: PreviewSourceMode = "ast";
   private currentLabelStyle: DotLabelStyle;
   private currentRecursiveStrategy: RecursiveStrategy;
   private metadataSourceFiles: string[];
@@ -107,6 +108,7 @@ class PreviewController {
   private metadataRefreshTimer: NodeJS.Timeout | undefined;
   private readonly callbacks: {
     onModeChange: (mode: DotViewMode) => Promise<void>;
+    onSourceModeChange: (sourceMode: PreviewSourceMode) => Promise<void>;
     onLabelStyleChange: (labelStyle: DotLabelStyle) => Promise<void>;
     onRecursiveStrategyChange: (strategy: RecursiveStrategy) => Promise<void>;
     onSourceClick: (targetId: string) => Promise<void>;
@@ -125,6 +127,9 @@ class PreviewController {
       },
       onLabelStyleChange: async (labelStyle) => {
         await this.showCurrentLabelStyle(labelStyle);
+      },
+      onSourceModeChange: async (sourceMode) => {
+        await this.showCurrentSourceMode(sourceMode);
       },
       onRecursiveStrategyChange: async (strategy) => {
         await this.showCurrentRecursiveStrategy(strategy);
@@ -186,17 +191,13 @@ class PreviewController {
   async showCurrentMode(mode: DotViewMode): Promise<void> {
     this.currentModeOverride = mode;
     if (this.lastPreview) {
-      const recoveryMetadata = await loadActionRecoveryPreviewMetadata(this.lastPreview.ir);
-      await renderDot(
-        this.panel(true),
+      await this.renderLastPreview(
         this.lastPreview.editor,
         this.lastPreview.ir,
         mode,
         this.labelStyle(),
         this.recursiveStrategy(),
-        this.metadataSourceFiles,
-        recoveryMetadata,
-        null
+        true
       );
       return;
     }
@@ -231,17 +232,20 @@ class PreviewController {
     );
 
     if (this.lastPreview) {
-      const recoveryMetadata = await loadActionRecoveryPreviewMetadata(this.lastPreview.ir);
-      await renderDot(
-        this.panel(true),
+      await this.renderLastPreview(this.lastPreview.editor, this.lastPreview.ir, this.currentMode(), labelStyle, this.currentRecursiveStrategy, true);
+    }
+  }
+
+  async showCurrentSourceMode(sourceMode: PreviewSourceMode): Promise<void> {
+    this.currentSourceMode = sourceMode;
+    if (this.lastPreview) {
+      await this.renderLastPreview(
         this.lastPreview.editor,
         this.lastPreview.ir,
         this.currentMode(),
-        labelStyle,
+        this.currentLabelStyle,
         this.currentRecursiveStrategy,
-        this.metadataSourceFiles,
-        recoveryMetadata,
-        null
+        true
       );
     }
   }
@@ -255,18 +259,7 @@ class PreviewController {
     );
 
     if (this.lastPreview) {
-      const recoveryMetadata = await loadActionRecoveryPreviewMetadata(this.lastPreview.ir);
-      await renderDot(
-        this.panel(true),
-        this.lastPreview.editor,
-        this.lastPreview.ir,
-        this.currentMode(),
-        this.currentLabelStyle,
-        strategy,
-        this.metadataSourceFiles,
-        recoveryMetadata,
-        null
-      );
+      await this.renderLastPreview(this.lastPreview.editor, this.lastPreview.ir, this.currentMode(), this.currentLabelStyle, strategy, true);
     }
   }
 
@@ -311,22 +304,11 @@ class PreviewController {
       const extractedIr = await runExtractor(request.editor.document, offset);
       const externalMetadata = await loadMetadataSources(this.metadataSourceFiles);
       const ir = mergeExternalMetadata(extractedIr, externalMetadata);
-      const recoveryMetadata = await loadActionRecoveryPreviewMetadata(ir);
       if (this.pending && this.pending.id > request.id) {
         return;
       }
       const mode = request.forcedMode ?? this.currentModeOverride ?? resolveDotViewMode(ir, offset);
-      await renderDot(
-        this.panel(!request.manual),
-        request.editor,
-        ir,
-        mode,
-        this.currentLabelStyle,
-        this.currentRecursiveStrategy,
-        this.metadataSourceFiles,
-        recoveryMetadata,
-        null
-      );
+      await this.renderLastPreview(request.editor, ir, mode, this.currentLabelStyle, this.currentRecursiveStrategy, !request.manual);
       this.lastPreview = {
         editor: request.editor,
         ir
@@ -363,6 +345,43 @@ class PreviewController {
 
   private currentMode(): DotViewMode {
     return this.currentModeOverride ?? PreviewPanel.current()?.snapshot()?.mode ?? "combined";
+  }
+
+  private async renderLastPreview(
+    editor: vscode.TextEditor,
+    baseIr: PatternIr,
+    mode: DotViewMode,
+    labelStyle: DotLabelStyle,
+    recursiveStrategy: RecursiveStrategy,
+    preserveFocus: boolean
+  ): Promise<void> {
+    const previewInput = await resolvePreviewInput(baseIr, this.currentSourceMode);
+    if (previewInput.kind === "unavailable") {
+      await renderTraceUnavailableNotice(
+        this.panel(preserveFocus),
+        editor,
+        mode,
+        this.currentSourceMode,
+        labelStyle,
+        recursiveStrategy,
+        this.metadataSourceFiles,
+        previewInput.message
+      );
+      return;
+    }
+
+    await renderDot(
+      this.panel(preserveFocus),
+      editor,
+      previewInput.ir,
+      mode,
+      this.currentSourceMode,
+      labelStyle,
+      recursiveStrategy,
+      this.metadataSourceFiles,
+      previewInput.recoveryMetadata,
+      previewInput.notice
+    );
   }
 
   private async selectMetadataSources(): Promise<void> {
@@ -495,6 +514,7 @@ async function renderDot(
   editor: vscode.TextEditor,
   ir: PatternIr,
   mode: DotViewMode,
+  sourceMode: PreviewSourceMode,
   labelStyle: DotLabelStyle,
   recursiveStrategy: RecursiveStrategy,
   metadataSourceFiles: string[],
@@ -508,8 +528,9 @@ async function renderDot(
   const svg = await dotToSvg(dot);
   const strategySuffix = labelStyle === "recursive" ? `, ${recursiveStrategy}` : "";
   await panel.render({
-    title: `Eggplant Pattern (${modeLabel(mode)}, ${labelStyle}${strategySuffix}): ${editor.document.fileName.split("/").pop() ?? "Preview"}`,
+    title: `Eggplant Pattern (${modeLabel(mode)}, ${sourceMode}, ${labelStyle}${strategySuffix}): ${editor.document.fileName.split("/").pop() ?? "Preview"}`,
     mode,
+    sourceMode,
     labelStyle,
     recursiveStrategy,
     fileName: editor.document.fileName.split("/").pop() ?? "Preview",
@@ -520,6 +541,8 @@ async function renderDot(
     metadataSourceFiles,
     recoverySummary: recoveryMetadata?.summary ?? null,
     recoveryDiagnostics: recoveryMetadata?.diagnostics.map((entry) => entry.message) ?? [],
+    sourceWarning: null,
+    showSwitchToAst: false,
     notice
   });
 }
@@ -536,6 +559,7 @@ async function renderNotice(panel: PreviewPanel, editor: vscode.TextEditor, mess
   await panel.render({
     title: `Eggplant Pattern (${modeLabel("combined")}, ${configuredDefaultLabelStyle()}): ${editor.document.fileName.split("/").pop() ?? "Preview"}`,
     mode: "combined",
+    sourceMode: "ast",
     labelStyle: configuredDefaultLabelStyle(),
     recursiveStrategy: configuredDefaultRecursiveStrategy(),
     fileName: editor.document.fileName.split("/").pop() ?? "Preview",
@@ -546,7 +570,47 @@ async function renderNotice(panel: PreviewPanel, editor: vscode.TextEditor, mess
     metadataSourceFiles: [],
     recoverySummary: null,
     recoveryDiagnostics: [],
+    sourceWarning: null,
+    showSwitchToAst: false,
     notice: message
+  });
+}
+
+async function renderTraceUnavailableNotice(
+  panel: PreviewPanel,
+  editor: vscode.TextEditor,
+  mode: DotViewMode,
+  sourceMode: PreviewSourceMode,
+  labelStyle: DotLabelStyle,
+  recursiveStrategy: RecursiveStrategy,
+  metadataSourceFiles: string[],
+  message: string
+): Promise<void> {
+  const dot = [
+    "digraph EggplantPatternStatus {",
+    "  graph [pad=0.3];",
+    "  node [shape=note, style=\"rounded,filled\", fillcolor=\"#fff4de\", color=\"#b26a00\", fontname=\"Helvetica\"];",
+    `  status [label=${JSON.stringify(message)}];`,
+    "}"
+  ].join("\n");
+  const svg = await dotToSvg(dot);
+  await panel.render({
+    title: `Eggplant Pattern (${modeLabel(mode)}, ${sourceMode}, ${labelStyle}${labelStyle === "recursive" ? `, ${recursiveStrategy}` : ""}): ${editor.document.fileName.split("/").pop() ?? "Preview"}`,
+    mode,
+    sourceMode,
+    labelStyle,
+    recursiveStrategy,
+    fileName: editor.document.fileName.split("/").pop() ?? "Preview",
+    dot,
+    svg,
+    typstRenderings: {},
+    sourceTargetIds: [],
+    metadataSourceFiles,
+    recoverySummary: "trace-unavailable",
+    recoveryDiagnostics: [message],
+    sourceWarning: message,
+    showSwitchToAst: true,
+    notice: null
   });
 }
 
@@ -658,6 +722,69 @@ async function loadActionRecoveryPreviewMetadata(
           source_range: null
         }
       ]
+    };
+  }
+}
+
+type PreviewInput =
+  | {
+      kind: "ready";
+      ir: PatternIr;
+      recoveryMetadata: ReturnType<typeof summarizeRuntimeActionSampleTrace> | null;
+      notice: string | null;
+    }
+  | {
+      kind: "unavailable";
+      message: string;
+    };
+
+async function resolvePreviewInput(
+  ir: PatternIr,
+  sourceMode: PreviewSourceMode
+): Promise<PreviewInput> {
+  if (sourceMode === "ast") {
+    return {
+      kind: "ready",
+      ir,
+      recoveryMetadata: null,
+      notice: null
+    };
+  }
+
+  const tracePath = vscode.workspace.getConfiguration().get<string>("eggplantPattern.actionSampleTracePath", "").trim();
+  if (tracePath.length === 0) {
+    return {
+      kind: "unavailable",
+      message: "trace-unavailable: set eggplantPattern.actionSampleTracePath"
+    };
+  }
+
+  try {
+    const raw = await fs.promises.readFile(tracePath, "utf8");
+    const tracePreview = buildTraceSourcePreview(JSON.parse(raw), ir.action_effects);
+    if (!tracePreview) {
+      return {
+        kind: "unavailable",
+        message: "trace-unavailable: trace payload is invalid"
+      };
+    }
+    return {
+      kind: "ready",
+      ir: {
+        ...ir,
+        action_effects: tracePreview.actionEffects
+      },
+      recoveryMetadata: {
+        summary: tracePreview.summary,
+        diagnostics: tracePreview.diagnostics
+      },
+      notice: null
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      kind: "unavailable",
+      message: `trace-unavailable: ${message}`
     };
   }
 }

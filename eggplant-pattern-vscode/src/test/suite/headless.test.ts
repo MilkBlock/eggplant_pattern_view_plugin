@@ -7,6 +7,7 @@ import { collectTypstReplacementSources, patternIrToDot, patternIrToDotWithMode 
 import { PatternIr } from "../../ir";
 import { mergeExternalMetadata, metadataCacheMatches } from "../../metadataSources";
 import {
+  buildTraceSourcePreview,
   indexActionEffectsByStableId,
   normalizeActionRecoveryMode,
   resolveTraceEventEffect,
@@ -183,6 +184,59 @@ suite("eggplant pattern headless tests", () => {
     assert.match(summary?.diagnostics[0].message ?? "", /dynamic-unknown at evt_1: branch not sampled/);
     assert.equal(summary?.diagnostics[0].source_range?.start, 30);
     assert.match(summary?.diagnostics[1].message ?? "", /did not match any extracted action effect/);
+  });
+
+  test("trace source preview reorders action effects by trace events", () => {
+    const preview = buildTraceSourcePreview(
+      {
+        version: 1,
+        events: [
+          {
+            Union: {
+              event_id: "evt_1",
+              effect_id: "effect@30:44",
+              lhs_debug: "lhs",
+              rhs_debug: "rhs"
+            }
+          },
+          {
+            DynamicUnknown: {
+              event_id: "evt_2",
+              effect_id: "effect@10:24",
+              reason: "branch not sampled"
+            }
+          }
+        ]
+      },
+      [
+        {
+          id: "effect_0",
+          effect_id: "effect@10:24",
+          bound_var: "tmp",
+          source_text: "ctx.insert_m_add(a, b)",
+          referenced_pat_vars: ["a", "b"],
+          referenced_action_vars: [],
+          range: { start: 10, end: 24 }
+        },
+        {
+          id: "effect_1",
+          effect_id: "effect@30:44",
+          bound_var: null,
+          source_text: "ctx.union(pat.x, tmp)",
+          referenced_pat_vars: ["x"],
+          referenced_action_vars: ["tmp"],
+          range: { start: 30, end: 44 }
+        }
+      ]
+    );
+
+    assert.ok(preview);
+    assert.deepEqual(
+      preview?.actionEffects.map((effect) => effect.id),
+      ["trace:evt_1", "trace:evt_2"]
+    );
+    assert.equal(preview?.actionEffects[1].source_text, "dynamic-unknown: branch not sampled");
+    assert.match(preview?.summary ?? "", /source=trace/);
   });
 
   test("extractor emits JSON for add_rule closure scope", () => {
