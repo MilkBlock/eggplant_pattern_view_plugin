@@ -410,6 +410,42 @@ suite("eggplant pattern headless tests", () => {
     assert.ok(renderings["effect:effect_41"]);
   });
 
+  test("typst sources quote multi-letter pattern leaves so root formulas still render", async () => {
+    const ir: PatternIr = {
+      scope: {
+        kind: "pattern_function",
+        text_range: { start: 0, end: 10 },
+        pattern_range: { start: 0, end: 10 },
+        action_range: null
+      },
+      nodes: [
+        { id: "x", kind: "query_leaf", dsl_type: "Math", label: "x: Math", range: { start: 0, end: 1 }, inputs: [] },
+        { id: "one", kind: "query", dsl_type: "MConst", label: "one: MConst", range: { start: 2, end: 5 }, inputs: [] },
+        { id: "integ", kind: "query", dsl_type: "MIntegral", label: "integ: MIntegral", range: { start: 6, end: 11 }, inputs: ["one", "x"] }
+      ],
+      edges: [
+        { from: "integ", to: "one", kind: "operand", index: 0 },
+        { from: "integ", to: "x", kind: "operand", index: 1 }
+      ],
+      roots: ["integ"],
+      constraints: [],
+      action_effects: [],
+      seed_facts: [],
+      display_templates: [],
+      typst_templates: [
+        { variant_name: "MIntegral", template: "integral {f} quad d {x}", fields: ["f", "x"] }
+      ],
+      precedence_templates: [{ variant_name: "MIntegral", precedence: 90 }],
+      diagnostics: []
+    };
+
+    const typstSources = collectTypstReplacementSources(ir, "pattern", "compact");
+    assert.deepEqual(typstSources, [{ targetId: "integ", source: 'integral "one" quad d x' }]);
+
+    const renderings = await renderTypstSnippets(typstSources);
+    assert.ok(renderings.integ);
+  });
+
   test("extractor keeps inline assertions and unique ids", () => {
     const source = `
 fn demo() {

@@ -13,6 +13,7 @@ import {
 const EXTENSION_ID = "MilkBlock.eggplant-pattern-vscode";
 const FIXTURE_DIR = path.resolve(__dirname, "../../../test-fixtures/workspace");
 const RUST_FIXTURE = path.join(FIXTURE_DIR, "pattern_samples.rs");
+const ROOT_TYPST_FIXTURE = path.join(FIXTURE_DIR, "pattern_typst_root_failure.rs");
 const TEXT_FIXTURE = path.join(FIXTURE_DIR, "notes.txt");
 const TRACE_FIXTURE = path.join(FIXTURE_DIR, "tmp_action_sample_trace.json");
 const MATH_MICROBENCHMARK_FIXTURE = "/Users/mineralsteins/Repos/egg_related/eggplant_backup/benches/runners/eggplant_rewrite/math_microbenchmark.rs";
@@ -310,6 +311,19 @@ suite("eggplant pattern extension", () => {
     assert.ok(preview.typstRenderings["add"]);
     assert.ok(preview.typstRenderings["mul"]);
     assert.match(preview.dot, /"mul" \[label="a \* add".*width=.*height=/);
+  });
+
+  test("compact preview keeps typst root rendering when a pattern leaf has a multi-letter name", async () => {
+    const editor = await openEditor(ROOT_TYPST_FIXTURE);
+    placeCursor(editor, "let integ = MIntegral::query(&one, &x);");
+
+    await vscode.commands.executeCommand("eggplant-pattern.preview");
+    await dispatchPreviewPanelTestMessage({ type: "changeMode", mode: "pattern" });
+    await dispatchPreviewPanelTestMessage({ type: "changeLabelStyle", labelStyle: "compact" });
+
+    const preview = await waitForPreviewState((state) => state.mode === "pattern" && state.labelStyle === "compact");
+    assert.ok(preview.typstRenderings["integ"]);
+    assert.match(preview.dot, /"integ" \[label="integral one quad d x".*width=.*height=/);
   });
 
   test("panel can clear external metadata source selections", async () => {
