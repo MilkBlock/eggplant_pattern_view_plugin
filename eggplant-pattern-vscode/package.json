@@ -113,6 +113,21 @@
           ],
           "default": "dag-expand",
           "description": "Recursive rendering strategy. 'tree-safe' only expands tree-shaped display subgraphs, while 'dag-expand' repeats shared subgraphs when rendering recursive labels."
+        },
+        "eggplantPattern.experimentalDynamicActionRecovery": {
+          "type": "boolean",
+          "default": false,
+          "description": "Experimental: enable hybrid dynamic action recovery for complex action closures. This keeps the current static preview as the default and only activates feature-branch recovery code when explicitly enabled."
+        },
+        "eggplantPattern.dynamicActionRecoveryMode": {
+          "type": "string",
+          "enum": [
+            "static",
+            "sample",
+            "hybrid"
+          ],
+          "default": "hybrid",
+          "description": "Experimental dynamic action recovery strategy. 'static' tries deep inline only, 'sample' prefers sampled insert traces, and 'hybrid' uses static recovery first and sampled inserts as fallback."
         }
       }
     }

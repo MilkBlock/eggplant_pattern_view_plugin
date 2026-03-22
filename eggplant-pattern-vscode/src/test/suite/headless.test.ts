@@ -6,6 +6,7 @@ import { suite, test } from "mocha";
 import { collectTypstReplacementSources, patternIrToDot, patternIrToDotWithMode } from "../../dot";
 import { PatternIr } from "../../ir";
 import { mergeExternalMetadata, metadataCacheMatches } from "../../metadataSources";
+import { normalizeActionRecoveryMode, resolveDynamicActionRecoveryPolicy } from "../../actionRecovery";
 import { normalizeTypstMathSource, renderTypstSnippets } from "../../typst";
 
 const WORKSPACE_ROOT = path.resolve(__dirname, "../../../../");
@@ -24,6 +25,23 @@ suite("eggplant pattern headless tests", () => {
     assert.equal(normalizeTypstMathSource("x + y"), "x + y");
     assert.equal(normalizeTypstMathSource("$x + y$"), "x + y");
     assert.equal(normalizeTypstMathSource("$$x + y$$"), "x + y");
+  });
+
+  test("dynamic action recovery policy normalizes experimental mode settings", () => {
+    assert.equal(normalizeActionRecoveryMode("static"), "static");
+    assert.equal(normalizeActionRecoveryMode("sample"), "sample");
+    assert.equal(normalizeActionRecoveryMode("hybrid"), "hybrid");
+    assert.equal(normalizeActionRecoveryMode("unexpected"), "hybrid");
+
+    assert.deepEqual(
+      resolveDynamicActionRecoveryPolicy({ enabled: true, mode: "sample" }),
+      {
+        enabled: true,
+        mode: "sample",
+        failOpen: true,
+        unknownMarker: "dynamic-unknown"
+      }
+    );
   });
 
   test("extractor emits JSON for add_rule closure scope", () => {
