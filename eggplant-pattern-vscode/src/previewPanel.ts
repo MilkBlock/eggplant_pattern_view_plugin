@@ -3,6 +3,7 @@ import { DotLabelStyle, DotViewMode, RecursiveStrategy } from "./dot";
 import { RenderedTypstSnippet } from "./typst";
 
 export interface PreviewPanelState {
+  renderNonce?: number;
   title: string;
   mode: DotViewMode;
   labelStyle: DotLabelStyle;
@@ -43,6 +44,7 @@ export class PreviewPanel implements vscode.Disposable {
   private readonly panel: vscode.WebviewPanel;
   private readonly disposables: vscode.Disposable[] = [];
   private lastState: PreviewPanelState | undefined;
+  private renderNonce = 0;
 
   private constructor(
     private readonly extensionUri: vscode.Uri,
@@ -97,11 +99,15 @@ export class PreviewPanel implements vscode.Disposable {
   }
 
   async render(state: PreviewPanelState): Promise<void> {
-    this.lastState = state;
-    this.panel.title = state.title;
+    const nextState = {
+      ...state,
+      renderNonce: ++this.renderNonce
+    };
+    this.lastState = nextState;
+    this.panel.title = nextState.title;
     await this.panel.webview.postMessage({
       type: "render",
-      payload: state
+      payload: nextState
     });
   }
 

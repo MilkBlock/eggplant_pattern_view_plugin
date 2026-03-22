@@ -322,7 +322,8 @@ suite("eggplant pattern extension", () => {
     placeCursor(editor, "ctx.union(pat.p, op_value)");
 
     await vscode.commands.executeCommand("eggplant-pattern.preview");
-    await waitForPreviewState((state) => state.mode === "action");
+    const firstPreview = await waitForPreviewState((state) => state.mode === "action");
+    const baselineRenderNonce = firstPreview.renderNonce ?? 0;
     const sourceText = editor.document.getText();
     const start = sourceText.indexOf("ctx.union(pat.p, op_value)");
     assert.notEqual(start, -1);
@@ -349,12 +350,14 @@ suite("eggplant pattern extension", () => {
     };
     await fs.promises.writeFile(TRACE_FIXTURE, JSON.stringify(trace, null, 2), "utf8");
 
-    await vscode.workspace.getConfiguration().update("eggplantPattern.experimentalDynamicActionRecovery", true, vscode.ConfigurationTarget.Global);
-    await vscode.workspace.getConfiguration().update("eggplantPattern.dynamicActionRecoveryMode", "sample", vscode.ConfigurationTarget.Global);
-    await vscode.workspace.getConfiguration().update("eggplantPattern.actionSampleTracePath", TRACE_FIXTURE, vscode.ConfigurationTarget.Global);
+    await updateSettingAndWait("eggplantPattern.experimentalDynamicActionRecovery", true);
+    await updateSettingAndWait("eggplantPattern.dynamicActionRecoveryMode", "sample");
+    await updateSettingAndWait("eggplantPattern.actionSampleTracePath", TRACE_FIXTURE);
 
     await vscode.commands.executeCommand("eggplant-pattern.preview");
-    const preview = await waitForPreviewState((state) => state.recoverySummary !== null);
+    const preview = await waitForPreviewState(
+      (state) => (state.renderNonce ?? 0) > baselineRenderNonce && state.recoverySummary !== null
+    );
     assert.equal(preview.recoverySummary, "recovery=sample | events=2 | matched=2 | dynamic-unknown=1");
     assert.equal(preview.recoveryDiagnostics.length, 1);
     assert.match(preview.recoveryDiagnostics[0], /dynamic-unknown at evt_1: branch not sampled/);
@@ -410,4 +413,9 @@ async function waitForPreviewState(predicate?: (state: NonNullable<ReturnType<ty
   const state = getPreviewPanelTestState();
   assert.ok(state, "Expected preview panel state");
   return state;
+}
+
+async function updateSettingAndWait<T>(key: string, value: T): Promise<void> {
+  await vscode.workspace.getConfiguration().update(key, value, vscode.ConfigurationTarget.Global);
+  await waitFor(() => vscode.workspace.getConfiguration().get<T>(key) === value);
 }
