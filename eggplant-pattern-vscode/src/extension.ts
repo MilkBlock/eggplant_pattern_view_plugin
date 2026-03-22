@@ -83,6 +83,12 @@ export function activate(context: vscode.ExtensionContext): void {
       controller.scheduleRefresh(editor);
     })
   );
+
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      void controller.handleConfigurationChange(event);
+    })
+  );
 }
 
 class PreviewController {
@@ -262,6 +268,23 @@ class PreviewController {
         null
       );
     }
+  }
+
+  async handleConfigurationChange(event: vscode.ConfigurationChangeEvent): Promise<void> {
+    if (
+      !event.affectsConfiguration("eggplantPattern.experimentalDynamicActionRecovery") &&
+      !event.affectsConfiguration("eggplantPattern.dynamicActionRecoveryMode") &&
+      !event.affectsConfiguration("eggplantPattern.actionSampleTracePath")
+    ) {
+      return;
+    }
+
+    const editor = this.lastPreview?.editor ?? vscode.window.activeTextEditor;
+    if (!editor || editor.document.languageId !== "rust") {
+      return;
+    }
+
+    await this.requestPreview(editor, false, true);
   }
 
   private async drainQueue(): Promise<void> {
