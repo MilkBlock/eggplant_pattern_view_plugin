@@ -101,6 +101,7 @@ class PreviewController {
     onModeChange: (mode: DotViewMode) => Promise<void>;
     onLabelStyleChange: (labelStyle: DotLabelStyle) => Promise<void>;
     onRecursiveStrategyChange: (strategy: RecursiveStrategy) => Promise<void>;
+    onSourceClick: (targetId: string) => Promise<void>;
     onSelectMetadataSources: () => Promise<void>;
     onClearMetadataSources: () => Promise<void>;
     onRefresh: () => Promise<void>;
@@ -119,6 +120,9 @@ class PreviewController {
       },
       onRecursiveStrategyChange: async (strategy) => {
         await this.showCurrentRecursiveStrategy(strategy);
+      },
+      onSourceClick: async (targetId) => {
+        await this.revealSourceTarget(targetId);
       },
       onSelectMetadataSources: async () => {
         await this.selectMetadataSources();
@@ -330,6 +334,26 @@ class PreviewController {
     }
   }
 
+  private async revealSourceTarget(targetId: string): Promise<void> {
+    const preview = this.lastPreview;
+    if (!preview) {
+      return;
+    }
+
+    const span = resolveSourceSpan(preview.ir, targetId);
+    if (!span) {
+      return;
+    }
+
+    const document = preview.editor.document;
+    const editor = await vscode.window.showTextDocument(document, preview.editor.viewColumn);
+    const start = document.positionAt(span.start);
+    const end = document.positionAt(span.end);
+    const range = new vscode.Range(start, end);
+    editor.selection = new vscode.Selection(start, end);
+    editor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+  }
+
   private resetMetadataWatchers(): void {
     for (const watcher of this.metadataWatchers) {
       watcher.dispose();
@@ -436,6 +460,7 @@ async function renderDot(
     dot,
     svg,
     typstRenderings,
+    sourceTargetIds: collectSourceTargetIds(ir, mode),
     metadataSourceFiles,
     notice
   });
@@ -459,6 +484,7 @@ async function renderNotice(panel: PreviewPanel, editor: vscode.TextEditor, mess
     dot,
     svg,
     typstRenderings: {},
+    sourceTargetIds: [],
     metadataSourceFiles: [],
     notice: message
   });
@@ -502,6 +528,44 @@ interface PreviewRequest {
 interface LastPreview {
   editor: vscode.TextEditor;
   ir: PatternIr;
+}
+
+function collectSourceTargetIds(ir: PatternIr, mode: DotViewMode): string[] {
+  const targetIds: string[] = [];
+  if (mode === "pattern" || mode === "combined") {
+    for (const node of ir.nodes) {
+      targetIds.push(node.id);
+    }
+    for (const constraint of ir.constraints) {
+      targetIds.push(`constraint:${constraint.id}`);
+    }
+  }
+  if (mode === "action" || mode === "combined") {
+    for (const effect of ir.action_effects) {
+      targetIds.push(`effect:${effect.id}`);
+    }
+    for (const fact of ir.seed_facts) {
+      targetIds.push(`seed:${fact.id}`);
+    }
+  }
+  return targetIds;
+}
+
+function resolveSourceSpan(ir: PatternIr, targetId: string): { start: number; end: number } | null {
+  const node = ir.nodes.find((entry) => entry.id === targetId);
+  if (node) {
+    return node.range;
+  }
+  if (targetId.startsWith("constraint:")) {
+    return ir.constraints.find((entry) => `constraint:${entry.id}` === targetId)?.range ?? null;
+  }
+  if (targetId.startsWith("effect:")) {
+    return ir.action_effects.find((entry) => `effect:${entry.id}` === targetId)?.range ?? null;
+  }
+  if (targetId.startsWith("seed:")) {
+    return ir.seed_facts.find((entry) => `seed:${entry.id}` === targetId)?.range ?? null;
+  }
+  return null;
 }
 
 export function deactivate(): void {}

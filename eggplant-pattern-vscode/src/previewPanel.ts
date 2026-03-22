@@ -11,6 +11,7 @@ export interface PreviewPanelState {
   dot: string;
   svg: string;
   typstRenderings: Record<string, RenderedTypstSnippet>;
+  sourceTargetIds: string[];
   metadataSourceFiles: string[];
   notice: string | null;
 }
@@ -19,6 +20,7 @@ interface PreviewPanelCallbacks {
   onModeChange(mode: DotViewMode): Promise<void>;
   onLabelStyleChange(labelStyle: DotLabelStyle): Promise<void>;
   onRecursiveStrategyChange(strategy: RecursiveStrategy): Promise<void>;
+  onSourceClick(targetId: string): Promise<void>;
   onSelectMetadataSources(): Promise<void>;
   onClearMetadataSources(): Promise<void>;
   onRefresh(): Promise<void>;
@@ -28,6 +30,7 @@ type IncomingMessage =
   | { type: "changeMode"; mode: DotViewMode }
   | { type: "changeLabelStyle"; labelStyle: DotLabelStyle }
   | { type: "changeRecursiveStrategy"; recursiveStrategy: RecursiveStrategy }
+  | { type: "clickSource"; targetId: string }
   | { type: "selectMetadataSources" }
   | { type: "clearMetadataSources" }
   | { type: "refresh" };
@@ -124,6 +127,9 @@ export class PreviewPanel implements vscode.Disposable {
         return;
       case "changeRecursiveStrategy":
         await this.callbacks.onRecursiveStrategyChange(message.recursiveStrategy);
+        return;
+      case "clickSource":
+        await this.callbacks.onSourceClick(message.targetId);
         return;
       case "selectMetadataSources":
         await this.callbacks.onSelectMetadataSources();
@@ -252,6 +258,7 @@ export class PreviewPanel implements vscode.Disposable {
       const clearMetadataSources = document.getElementById("clearMetadataSources");
       const meta = document.getElementById("meta");
       const graph = document.getElementById("graph");
+      const sourceTargetIds = new Set();
 
       const syncRecursiveStrategyState = () => {
         recursiveStrategy.disabled = labelStyle.value !== "recursive";
@@ -307,6 +314,20 @@ export class PreviewPanel implements vscode.Disposable {
         }
       };
 
+      const bindSourceClicks = (root) => {
+        for (const nodeGroup of Array.from(root.querySelectorAll("g.node"))) {
+          const targetId = nodeGroup.querySelector("title")?.textContent;
+          if (!targetId || !sourceTargetIds.has(targetId)) {
+            nodeGroup.style.cursor = "";
+            continue;
+          }
+          nodeGroup.style.cursor = "pointer";
+          nodeGroup.addEventListener("click", () => {
+            vscode.postMessage({ type: "clickSource", targetId });
+          });
+        }
+      };
+
       mode.addEventListener("change", () => {
         vscode.postMessage({ type: "changeMode", mode: mode.value });
       });
@@ -343,6 +364,10 @@ export class PreviewPanel implements vscode.Disposable {
         labelStyle.value = payload.labelStyle;
         recursiveStrategy.value = payload.recursiveStrategy;
         syncRecursiveStrategyState();
+        sourceTargetIds.clear();
+        for (const targetId of payload.sourceTargetIds || []) {
+          sourceTargetIds.add(targetId);
+        }
         const sourceSummary = payload.metadataSourceFiles.length > 0
           ? " | meta sources: " + payload.metadataSourceFiles.length
           : "";
@@ -351,6 +376,7 @@ export class PreviewPanel implements vscode.Disposable {
         const rootSvg = graph.querySelector("svg");
         if (rootSvg) {
           applyTypstRenderings(rootSvg, payload.typstRenderings);
+          bindSourceClicks(rootSvg);
         }
       });
 
@@ -370,6 +396,7 @@ export async function dispatchPreviewPanelTestMessage(
     | { type: "changeMode"; mode: DotViewMode }
     | { type: "changeLabelStyle"; labelStyle: DotLabelStyle }
     | { type: "changeRecursiveStrategy"; recursiveStrategy: RecursiveStrategy }
+    | { type: "clickSource"; targetId: string }
     | { type: "selectMetadataSources" }
     | { type: "clearMetadataSources" }
     | { type: "refresh" }

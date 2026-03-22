@@ -287,6 +287,26 @@ suite("eggplant pattern extension", () => {
     assert.match(preview.title, /recursive, dag-expand/);
   });
 
+  test("preview node clicks reveal source ranges for pattern, action, and constraints", async () => {
+    const editor = await openEditor(RUST_FIXTURE);
+    placeCursor(editor, "MyTx::add_rule");
+
+    await vscode.commands.executeCommand("eggplant-pattern.preview");
+    let preview = await waitForPreviewState((state) => state.mode === "combined");
+    assert.ok(preview.sourceTargetIds.includes("p"));
+    assert.ok(preview.sourceTargetIds.includes("constraint:constraint_0"));
+    assert.ok(preview.sourceTargetIds.includes("effect:effect_1"));
+
+    await dispatchPreviewPanelTestMessage({ type: "clickSource", targetId: "p" });
+    assert.equal(selectedText(editor), "let p = Add::query(&l, &r);");
+
+    await dispatchPreviewPanelTestMessage({ type: "clickSource", targetId: "constraint:constraint_0" });
+    assert.equal(selectedText(editor), "eq");
+
+    await dispatchPreviewPanelTestMessage({ type: "clickSource", targetId: "effect:effect_1" });
+    assert.equal(selectedText(editor), "ctx.union(pat.p, op_value)");
+  });
+
   test("extractor resolution prefers bundled binary by default", async () => {
     assert.ok(fs.existsSync(BUNDLED_EXTRACTOR_PATH), `Expected bundled extractor at ${BUNDLED_EXTRACTOR_PATH}`);
     await vscode.workspace.getConfiguration().update("eggplantPattern.extractorPath", "", vscode.ConfigurationTarget.Global);
@@ -310,6 +330,10 @@ function placeCursor(editor: vscode.TextEditor, needle: string): void {
   assert.notEqual(offset, -1, `Needle not found: ${needle}`);
   const position = editor.document.positionAt(offset);
   editor.selection = new vscode.Selection(position, position);
+}
+
+function selectedText(editor: vscode.TextEditor): string {
+  return editor.document.getText(editor.selection);
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
