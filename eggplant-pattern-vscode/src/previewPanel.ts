@@ -4,6 +4,13 @@ import { RenderedTypstSnippet } from "./typst";
 
 export type PreviewSourceMode = "ast" | "trace";
 
+export interface PreviewMetadataSourcesView {
+  currentFile: string;
+  autoDiscovered: string[];
+  manual: string[];
+  effective: string[];
+}
+
 export interface PreviewPanelState {
   renderNonce?: number;
   title: string;
@@ -17,6 +24,7 @@ export interface PreviewPanelState {
   typstRenderings: Record<string, RenderedTypstSnippet>;
   sourceTargetIds: string[];
   metadataSourceFiles: string[];
+  metadataSourcesView: PreviewMetadataSourcesView;
   recoverySummary: string | null;
   recoveryDiagnostics: string[];
   sourceWarning: string | null;
@@ -237,6 +245,46 @@ export class PreviewPanel implements vscode.Disposable {
         overflow: auto;
         padding: 12px;
       }
+      .metadata-viewer {
+        padding: 12px;
+        border-bottom: 1px solid var(--border);
+        background: color-mix(in srgb, var(--panel) 72%, var(--bg) 28%);
+      }
+      .metadata-viewer[hidden] {
+        display: none;
+      }
+      .metadata-viewer-header {
+        margin: 0 0 8px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .metadata-viewer-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 10px;
+      }
+      .metadata-section {
+        border: 1px solid var(--border);
+        background: var(--bg);
+        padding: 10px;
+      }
+      .metadata-section h3 {
+        margin: 0 0 8px;
+        font-size: 12px;
+      }
+      .metadata-list {
+        margin: 0;
+        padding-left: 18px;
+        font-size: 12px;
+      }
+      .metadata-list li {
+        margin: 0 0 4px;
+        word-break: break-all;
+      }
+      .metadata-empty {
+        font-size: 12px;
+        color: var(--muted);
+      }
       .graph svg {
         max-width: none;
         height: auto;
@@ -284,10 +332,32 @@ export class PreviewPanel implements vscode.Disposable {
           <option value="dag-expand">dag-expand</option>
         </select>
         <button id="metadataSources" type="button">Meta Sources</button>
+        <button id="showCurrentMetadataSources" type="button">Show Current Meta Sources</button>
         <button id="clearMetadataSources" type="button">Clear Sources</button>
         <button id="refresh" type="button">Refresh</button>
       </div>
       <div class="meta" id="meta">No preview yet.</div>
+      <div class="metadata-viewer" id="metadataViewer" hidden>
+        <p class="metadata-viewer-header" id="metadataViewerHeader">Effective source set: 0</p>
+        <div class="metadata-viewer-grid">
+          <section class="metadata-section">
+            <h3>Current File</h3>
+            <ul class="metadata-list" id="metadataCurrentFile"></ul>
+          </section>
+          <section class="metadata-section">
+            <h3>Auto-discovered</h3>
+            <ul class="metadata-list" id="metadataAutoDiscovered"></ul>
+          </section>
+          <section class="metadata-section">
+            <h3>Manual</h3>
+            <ul class="metadata-list" id="metadataManual"></ul>
+          </section>
+          <section class="metadata-section">
+            <h3>Effective Source Set</h3>
+            <ul class="metadata-list" id="metadataEffective"></ul>
+          </section>
+        </div>
+      </div>
       <div class="graph" id="graph"></div>
       <div class="footer">
         <label for="sourceMode">Source</label>
@@ -307,15 +377,46 @@ export class PreviewPanel implements vscode.Disposable {
       const recursiveStrategy = document.getElementById("recursiveStrategy");
       const refresh = document.getElementById("refresh");
       const metadataSources = document.getElementById("metadataSources");
+      const showCurrentMetadataSources = document.getElementById("showCurrentMetadataSources");
       const clearMetadataSources = document.getElementById("clearMetadataSources");
+      const metadataViewer = document.getElementById("metadataViewer");
+      const metadataViewerHeader = document.getElementById("metadataViewerHeader");
+      const metadataCurrentFile = document.getElementById("metadataCurrentFile");
+      const metadataAutoDiscovered = document.getElementById("metadataAutoDiscovered");
+      const metadataManual = document.getElementById("metadataManual");
+      const metadataEffective = document.getElementById("metadataEffective");
       const sourceWarning = document.getElementById("sourceWarning");
       const switchToAst = document.getElementById("switchToAst");
       const meta = document.getElementById("meta");
       const graph = document.getElementById("graph");
       const sourceTargetIds = new Set();
+      let metadataViewerVisible = false;
 
       const syncRecursiveStrategyState = () => {
         recursiveStrategy.disabled = labelStyle.value !== "recursive";
+      };
+
+      const setMetadataViewerVisible = (visible) => {
+        metadataViewerVisible = visible;
+        metadataViewer.hidden = !visible;
+        showCurrentMetadataSources.textContent = visible ? "Hide Current Meta Sources" : "Show Current Meta Sources";
+      };
+
+      const renderMetadataList = (element, items) => {
+        element.innerHTML = "";
+        if (!items || items.length === 0) {
+          const empty = document.createElement("div");
+          empty.className = "metadata-empty";
+          empty.textContent = "None";
+          element.appendChild(empty);
+          return;
+        }
+
+        for (const item of items) {
+          const li = document.createElement("li");
+          li.textContent = item;
+          element.appendChild(li);
+        }
       };
 
       const parseSvgDimension = (svgMarkup, attr) => {
@@ -407,6 +508,10 @@ export class PreviewPanel implements vscode.Disposable {
         vscode.postMessage({ type: "selectMetadataSources" });
       });
 
+      showCurrentMetadataSources.addEventListener("click", () => {
+        setMetadataViewerVisible(!metadataViewerVisible);
+      });
+
       clearMetadataSources.addEventListener("click", () => {
         vscode.postMessage({ type: "clearMetadataSources" });
       });
@@ -431,6 +536,17 @@ export class PreviewPanel implements vscode.Disposable {
         for (const targetId of payload.sourceTargetIds || []) {
           sourceTargetIds.add(targetId);
         }
+        const metadataSourcesView = payload.metadataSourcesView || {
+          currentFile: payload.fileName,
+          autoDiscovered: [],
+          manual: [],
+          effective: []
+        };
+        metadataViewerHeader.textContent = "Effective source set: " + metadataSourcesView.effective.length;
+        renderMetadataList(metadataCurrentFile, metadataSourcesView.currentFile ? [metadataSourcesView.currentFile] : []);
+        renderMetadataList(metadataAutoDiscovered, metadataSourcesView.autoDiscovered || []);
+        renderMetadataList(metadataManual, metadataSourcesView.manual || []);
+        renderMetadataList(metadataEffective, metadataSourcesView.effective || []);
         const sourceSummary = payload.metadataSourceFiles.length > 0
           ? " | meta sources: " + payload.metadataSourceFiles.length
           : "";
@@ -450,6 +566,7 @@ export class PreviewPanel implements vscode.Disposable {
       });
 
       syncRecursiveStrategyState();
+      setMetadataViewerVisible(false);
     </script>
   </body>
 </html>`;

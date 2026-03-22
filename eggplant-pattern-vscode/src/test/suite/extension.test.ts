@@ -341,8 +341,26 @@ suite("eggplant pattern extension", () => {
       && state.typstRenderings["integ"] !== undefined
     );
     assert.ok(preview.metadataSourceFiles.some((filePath) => filePath.endsWith("cross_file_metadata_defs.rs")));
+    assert.equal(preview.metadataSourcesView.currentFile, editor.document.fileName);
+    assert.ok(preview.metadataSourcesView.autoDiscovered.some((filePath) => filePath.endsWith("cross_file_metadata_defs.rs")));
+    assert.deepEqual(preview.metadataSourcesView.manual, []);
+    assert.ok(preview.metadataSourcesView.effective.includes(editor.document.fileName));
+    assert.ok(preview.metadataSourcesView.effective.some((filePath) => filePath.endsWith("cross_file_metadata_defs.rs")));
     assert.ok(preview.typstRenderings["integ"]);
     assert.match(preview.dot, /"integ" \[label="integral one quad d x".*width=.*height=/);
+  });
+
+  test("preview exposes effective metadata source viewer payload with current file", async () => {
+    const editor = await openEditor(RUST_FIXTURE);
+    placeCursor(editor, "let p = Add::query");
+
+    await vscode.commands.executeCommand("eggplant-pattern.preview");
+
+    const preview = await waitForPreviewState((state) => state.mode === "pattern");
+    assert.equal(preview.metadataSourcesView.currentFile, editor.document.fileName);
+    assert.deepEqual(preview.metadataSourcesView.autoDiscovered, []);
+    assert.deepEqual(preview.metadataSourcesView.manual, []);
+    assert.deepEqual(preview.metadataSourcesView.effective, [editor.document.fileName]);
   });
 
   test("panel can clear external metadata source selections", async () => {

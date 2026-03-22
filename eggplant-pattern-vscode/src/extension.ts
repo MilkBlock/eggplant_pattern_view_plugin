@@ -6,7 +6,7 @@ import { collectTypstReplacementSources, DotLabelStyle, DotViewMode, patternIrTo
 import { configureExtractorResolution, ExtractorError, runExtractor } from "./extractor";
 import { PatternIr } from "./ir";
 import { clearMetadataSourceCache, discoverWorkspaceMetadataSourceFiles, loadMetadataSources, mergeExternalMetadata, pickMetadataSourceFiles } from "./metadataSources";
-import { PreviewPanel, PreviewSourceMode } from "./previewPanel";
+import { PreviewMetadataSourcesView, PreviewPanel, PreviewSourceMode } from "./previewPanel";
 import { dotToSvg } from "./svg";
 import { renderTypstSnippets } from "./typst";
 
@@ -379,6 +379,11 @@ class PreviewController {
       ...this.metadataSourceFiles
     ]))
   ): Promise<void> {
+    const metadataSourcesView = buildMetadataSourcesView(
+      editor.document.fileName,
+      this.autoMetadataSourceFiles,
+      this.metadataSourceFiles
+    );
     const previewInput = await resolvePreviewInput(baseIr, this.currentSourceMode);
     if (previewInput.kind === "unavailable") {
       await renderTraceUnavailableNotice(
@@ -389,6 +394,7 @@ class PreviewController {
         labelStyle,
         recursiveStrategy,
         metadataSourceFiles,
+        metadataSourcesView,
         previewInput.message
       );
       return;
@@ -403,6 +409,7 @@ class PreviewController {
       labelStyle,
       recursiveStrategy,
       metadataSourceFiles,
+      metadataSourcesView,
       previewInput.recoveryMetadata,
       previewInput.notice
     );
@@ -577,6 +584,7 @@ async function renderDot(
   labelStyle: DotLabelStyle,
   recursiveStrategy: RecursiveStrategy,
   metadataSourceFiles: string[],
+  metadataSourcesView: PreviewMetadataSourcesView,
   recoveryMetadata: ReturnType<typeof summarizeRuntimeActionSampleTrace> | null,
   notice: string | null
 ): Promise<void> {
@@ -598,6 +606,7 @@ async function renderDot(
     typstRenderings,
     sourceTargetIds: collectSourceTargetIds(ir, mode),
     metadataSourceFiles,
+    metadataSourcesView,
     recoverySummary: recoveryMetadata?.summary ?? null,
     recoveryDiagnostics: recoveryMetadata?.diagnostics.map((entry) => entry.message) ?? [],
     sourceWarning: null,
@@ -627,6 +636,12 @@ async function renderNotice(panel: PreviewPanel, editor: vscode.TextEditor, mess
     typstRenderings: {},
     sourceTargetIds: [],
     metadataSourceFiles: [],
+    metadataSourcesView: {
+      currentFile: editor.document.fileName,
+      autoDiscovered: [],
+      manual: [],
+      effective: [editor.document.fileName]
+    },
     recoverySummary: null,
     recoveryDiagnostics: [],
     sourceWarning: null,
@@ -643,6 +658,7 @@ async function renderTraceUnavailableNotice(
   labelStyle: DotLabelStyle,
   recursiveStrategy: RecursiveStrategy,
   metadataSourceFiles: string[],
+  metadataSourcesView: PreviewMetadataSourcesView,
   message: string
 ): Promise<void> {
   const dot = [
@@ -665,6 +681,7 @@ async function renderTraceUnavailableNotice(
     typstRenderings: {},
     sourceTargetIds: [],
     metadataSourceFiles,
+    metadataSourcesView,
     recoverySummary: "trace-unavailable",
     recoveryDiagnostics: [message],
     sourceWarning: message,
@@ -749,6 +766,22 @@ function resolveSourceSpan(ir: PatternIr, targetId: string): { start: number; en
     return ir.seed_facts.find((entry) => `seed:${entry.id}` === targetId)?.range ?? null;
   }
   return null;
+}
+
+function buildMetadataSourcesView(
+  currentFile: string,
+  autoMetadataSourceFiles: string[],
+  manualMetadataSourceFiles: string[]
+): PreviewMetadataSourcesView {
+  const autoDiscovered = Array.from(new Set(autoMetadataSourceFiles));
+  const manual = Array.from(new Set(manualMetadataSourceFiles));
+  const effective = Array.from(new Set([currentFile, ...autoDiscovered, ...manual]));
+  return {
+    currentFile,
+    autoDiscovered,
+    manual,
+    effective
+  };
 }
 
 async function loadActionRecoveryPreviewMetadata(
