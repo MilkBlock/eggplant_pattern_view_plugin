@@ -226,7 +226,10 @@ suite("eggplant pattern extension", () => {
 
     let baselineRenderNonce = currentPreviewRenderNonce();
     await vscode.commands.executeCommand("eggplant-pattern.preview");
-    let preview = await waitForPreviewState(undefined, { minRenderNonce: baselineRenderNonce + 1 });
+    let preview = await waitForPreviewState(
+      (state) => state.mode === "action" && /union\(p, op_value\)/.test(state.dot),
+      { minRenderNonce: baselineRenderNonce + 1 }
+    );
     assert.equal(preview.labelStyle, "recursive");
     assert.match(preview.dot, /union\(p, op_value\)/);
 
