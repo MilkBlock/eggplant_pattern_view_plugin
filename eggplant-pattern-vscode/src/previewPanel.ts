@@ -4,11 +4,25 @@ import { RenderedTypstSnippet } from "./typst";
 
 export type PreviewSourceMode = "ast" | "trace";
 
+export type PreviewMetadataSourceKind = "current" | "auto" | "manual";
+
+export interface PreviewMetadataSourceEntry {
+  path: string;
+  kind: PreviewMetadataSourceKind;
+}
+
+export interface PreviewMetadataEffectiveSourceEntry {
+  path: string;
+  kinds: PreviewMetadataSourceKind[];
+}
+
 export interface PreviewMetadataSourcesView {
   currentFile: string;
   autoDiscovered: string[];
   manual: string[];
   effective: string[];
+  entries: PreviewMetadataSourceEntry[];
+  effectiveEntries: PreviewMetadataEffectiveSourceEntry[];
 }
 
 export interface PreviewPanelState {
@@ -281,6 +295,26 @@ export class PreviewPanel implements vscode.Disposable {
         margin: 0 0 4px;
         word-break: break-all;
       }
+      .metadata-item {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+      }
+      .metadata-kind {
+        flex: none;
+        min-width: 52px;
+        padding: 1px 6px;
+        border: 1px solid var(--border);
+        background: var(--panel);
+        font-size: 11px;
+        line-height: 1.4;
+        text-transform: lowercase;
+      }
+      .metadata-path {
+        flex: 1;
+        user-select: text;
+        cursor: text;
+      }
       .metadata-empty {
         font-size: 12px;
         color: var(--muted);
@@ -405,7 +439,7 @@ export class PreviewPanel implements vscode.Disposable {
       const renderMetadataList = (element, items) => {
         element.innerHTML = "";
         if (!items || items.length === 0) {
-          const empty = document.createElement("div");
+          const empty = document.createElement("li");
           empty.className = "metadata-empty";
           empty.textContent = "None";
           element.appendChild(empty);
@@ -415,6 +449,33 @@ export class PreviewPanel implements vscode.Disposable {
         for (const item of items) {
           const li = document.createElement("li");
           li.textContent = item;
+          element.appendChild(li);
+        }
+      };
+
+      const renderMetadataEntries = (element, entries) => {
+        element.innerHTML = "";
+        if (!entries || entries.length === 0) {
+          const empty = document.createElement("li");
+          empty.className = "metadata-empty";
+          empty.textContent = "None";
+          element.appendChild(empty);
+          return;
+        }
+
+        for (const entry of entries) {
+          const li = document.createElement("li");
+          const row = document.createElement("div");
+          row.className = "metadata-item";
+          const kind = document.createElement("span");
+          kind.className = "metadata-kind";
+          kind.textContent = entry.kind;
+          const path = document.createElement("span");
+          path.className = "metadata-path";
+          path.textContent = entry.path;
+          row.appendChild(kind);
+          row.appendChild(path);
+          li.appendChild(row);
           element.appendChild(li);
         }
       };
@@ -540,13 +601,30 @@ export class PreviewPanel implements vscode.Disposable {
           currentFile: payload.fileName,
           autoDiscovered: [],
           manual: [],
-          effective: []
+          effective: [],
+          entries: [],
+          effectiveEntries: []
         };
         metadataViewerHeader.textContent = "Effective source set: " + metadataSourcesView.effective.length;
-        renderMetadataList(metadataCurrentFile, metadataSourcesView.currentFile ? [metadataSourcesView.currentFile] : []);
-        renderMetadataList(metadataAutoDiscovered, metadataSourcesView.autoDiscovered || []);
-        renderMetadataList(metadataManual, metadataSourcesView.manual || []);
-        renderMetadataList(metadataEffective, metadataSourcesView.effective || []);
+        renderMetadataEntries(
+          metadataCurrentFile,
+          (metadataSourcesView.entries || []).filter((entry) => entry.kind === "current")
+        );
+        renderMetadataEntries(
+          metadataAutoDiscovered,
+          (metadataSourcesView.entries || []).filter((entry) => entry.kind === "auto")
+        );
+        renderMetadataEntries(
+          metadataManual,
+          (metadataSourcesView.entries || []).filter((entry) => entry.kind === "manual")
+        );
+        renderMetadataEntries(
+          metadataEffective,
+          (metadataSourcesView.effectiveEntries || []).map((entry) => ({
+            path: entry.path,
+            kind: entry.kinds.join("+")
+          }))
+        );
         const sourceSummary = payload.metadataSourceFiles.length > 0
           ? " | meta sources: " + payload.metadataSourceFiles.length
           : "";

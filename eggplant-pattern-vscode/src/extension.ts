@@ -6,7 +6,7 @@ import { collectTypstReplacementSources, DotLabelStyle, DotViewMode, patternIrTo
 import { configureExtractorResolution, ExtractorError, runExtractor } from "./extractor";
 import { PatternIr } from "./ir";
 import { clearMetadataSourceCache, discoverWorkspaceMetadataSourceFiles, loadMetadataSources, mergeExternalMetadata, pickMetadataSourceFiles } from "./metadataSources";
-import { PreviewMetadataSourcesView, PreviewPanel, PreviewSourceMode } from "./previewPanel";
+import { PreviewMetadataSourceEntry, PreviewMetadataSourceKind, PreviewMetadataSourcesView, PreviewPanel, PreviewSourceMode } from "./previewPanel";
 import { dotToSvg } from "./svg";
 import { renderTypstSnippets } from "./typst";
 
@@ -640,7 +640,9 @@ async function renderNotice(panel: PreviewPanel, editor: vscode.TextEditor, mess
       currentFile: editor.document.fileName,
       autoDiscovered: [],
       manual: [],
-      effective: [editor.document.fileName]
+      effective: [editor.document.fileName],
+      entries: [{ path: editor.document.fileName, kind: "current" }],
+      effectiveEntries: [{ path: editor.document.fileName, kinds: ["current"] }]
     },
     recoverySummary: null,
     recoveryDiagnostics: [],
@@ -775,12 +777,29 @@ function buildMetadataSourcesView(
 ): PreviewMetadataSourcesView {
   const autoDiscovered = Array.from(new Set(autoMetadataSourceFiles));
   const manual = Array.from(new Set(manualMetadataSourceFiles));
-  const effective = Array.from(new Set([currentFile, ...autoDiscovered, ...manual]));
+  const entries: PreviewMetadataSourceEntry[] = [
+    { path: currentFile, kind: "current" },
+    ...autoDiscovered.map((filePath) => ({ path: filePath, kind: "auto" as const })),
+    ...manual.map((filePath) => ({ path: filePath, kind: "manual" as const }))
+  ];
+  const effectiveKinds = new Map<string, Set<PreviewMetadataSourceKind>>();
+  for (const entry of entries) {
+    const kinds = effectiveKinds.get(entry.path) ?? new Set<PreviewMetadataSourceKind>();
+    kinds.add(entry.kind);
+    effectiveKinds.set(entry.path, kinds);
+  }
+  const effectiveEntries = Array.from(effectiveKinds.entries()).map(([filePath, kinds]) => ({
+    path: filePath,
+    kinds: Array.from(kinds)
+  }));
+  const effective = effectiveEntries.map((entry) => entry.path);
   return {
     currentFile,
     autoDiscovered,
     manual,
-    effective
+    effective,
+    entries,
+    effectiveEntries
   };
 }
 

@@ -347,8 +347,13 @@ suite("eggplant pattern extension", () => {
     assert.equal(preview.metadataSourcesView.currentFile, editor.document.fileName);
     assert.ok(preview.metadataSourcesView.autoDiscovered.some((filePath) => filePath.endsWith("cross_file_metadata_defs.rs")));
     assert.deepEqual(preview.metadataSourcesView.manual, []);
+    assert.ok(preview.metadataSourcesView.entries.some((entry) => entry.kind === "current" && entry.path === editor.document.fileName));
+    assert.ok(preview.metadataSourcesView.entries.some((entry) => entry.kind === "auto" && entry.path.endsWith("cross_file_metadata_defs.rs")));
     assert.ok(preview.metadataSourcesView.effective.includes(editor.document.fileName));
     assert.ok(preview.metadataSourcesView.effective.some((filePath) => filePath.endsWith("cross_file_metadata_defs.rs")));
+    assert.ok(preview.metadataSourcesView.effectiveEntries.some((entry) =>
+      entry.path.endsWith("cross_file_metadata_defs.rs") && entry.kinds.includes("auto")
+    ));
     assert.ok(preview.typstRenderings["integ"]);
     assert.match(preview.dot, /"integ" \[label="integral one quad d x".*width=.*height=/);
   });
@@ -364,6 +369,8 @@ suite("eggplant pattern extension", () => {
     assert.deepEqual(preview.metadataSourcesView.autoDiscovered, []);
     assert.deepEqual(preview.metadataSourcesView.manual, []);
     assert.deepEqual(preview.metadataSourcesView.effective, [editor.document.fileName]);
+    assert.deepEqual(preview.metadataSourcesView.entries, [{ path: editor.document.fileName, kind: "current" }]);
+    assert.deepEqual(preview.metadataSourcesView.effectiveEntries, [{ path: editor.document.fileName, kinds: ["current"] }]);
   });
 
   test("panel can clear external metadata source selections", async () => {
