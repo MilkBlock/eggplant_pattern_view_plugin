@@ -5,7 +5,7 @@ import { buildTraceSourcePreview, resolveDynamicActionRecoveryPolicy, summarizeR
 import { collectTypstReplacementSources, DotLabelStyle, DotViewMode, patternIrToDotWithMode, RecursiveStrategy } from "./dot";
 import { configureExtractorResolution, ExtractorError, runExtractor } from "./extractor";
 import { PatternIr } from "./ir";
-import { clearMetadataSourceCache, loadMetadataSources, mergeExternalMetadata, pickMetadataSourceFiles } from "./metadataSources";
+import { clearMetadataSourceCache, discoverWorkspaceMetadataSourceFiles, loadMetadataSources, mergeExternalMetadata, pickMetadataSourceFiles } from "./metadataSources";
 import { PreviewPanel, PreviewSourceMode } from "./previewPanel";
 import { dotToSvg } from "./svg";
 import { renderTypstSnippets } from "./typst";
@@ -104,6 +104,7 @@ class PreviewController {
   private currentLabelStyle: DotLabelStyle;
   private currentRecursiveStrategy: RecursiveStrategy;
   private metadataSourceFiles: string[];
+  private autoMetadataSourceFiles: string[] = [];
   private metadataWatchers: vscode.Disposable[] = [];
   private metadataRefreshTimer: NodeJS.Timeout | undefined;
   private readonly callbacks: {
@@ -302,13 +303,32 @@ class PreviewController {
     try {
       const offset = request.editor.document.offsetAt(request.editor.selection.active);
       const extractedIr = await runExtractor(request.editor.document, offset);
-      const externalMetadata = await loadMetadataSources(this.metadataSourceFiles);
+      const requiredMetadataIdentifiers = collectMetadataIdentifiers(extractedIr);
+      const autoMetadataSourceFiles = await discoverWorkspaceMetadataSourceFiles(
+        request.editor.document.uri.fsPath,
+        this.metadataSourceFiles,
+        requiredMetadataIdentifiers
+      );
+      this.autoMetadataSourceFiles = autoMetadataSourceFiles;
+      const allMetadataSourceFiles = Array.from(new Set([
+        ...autoMetadataSourceFiles,
+        ...this.metadataSourceFiles
+      ]));
+      const externalMetadata = await loadMetadataSources(allMetadataSourceFiles);
       const ir = mergeExternalMetadata(extractedIr, externalMetadata);
       if (this.pending && this.pending.id > request.id) {
         return;
       }
       const mode = request.forcedMode ?? this.currentModeOverride ?? resolveDotViewMode(ir, offset);
-      await this.renderLastPreview(request.editor, ir, mode, this.currentLabelStyle, this.currentRecursiveStrategy, !request.manual);
+      await this.renderLastPreview(
+        request.editor,
+        ir,
+        mode,
+        this.currentLabelStyle,
+        this.currentRecursiveStrategy,
+        !request.manual,
+        allMetadataSourceFiles
+      );
       this.lastPreview = {
         editor: request.editor,
         ir
@@ -353,7 +373,11 @@ class PreviewController {
     mode: DotViewMode,
     labelStyle: DotLabelStyle,
     recursiveStrategy: RecursiveStrategy,
-    preserveFocus: boolean
+    preserveFocus: boolean,
+    metadataSourceFiles: string[] = Array.from(new Set([
+      ...this.autoMetadataSourceFiles,
+      ...this.metadataSourceFiles
+    ]))
   ): Promise<void> {
     const previewInput = await resolvePreviewInput(baseIr, this.currentSourceMode);
     if (previewInput.kind === "unavailable") {
@@ -364,7 +388,7 @@ class PreviewController {
         this.currentSourceMode,
         labelStyle,
         recursiveStrategy,
-        this.metadataSourceFiles,
+        metadataSourceFiles,
         previewInput.message
       );
       return;
@@ -378,7 +402,7 @@ class PreviewController {
       this.currentSourceMode,
       labelStyle,
       recursiveStrategy,
-      this.metadataSourceFiles,
+      metadataSourceFiles,
       previewInput.recoveryMetadata,
       previewInput.notice
     );
@@ -465,6 +489,41 @@ class PreviewController {
       }
     }, debounceMs);
   }
+}
+
+function collectMetadataIdentifiers(ir: PatternIr): Set<string> {
+  const localVariantNames = new Set<string>();
+  for (const template of ir.display_templates) {
+    localVariantNames.add(template.variant_name);
+  }
+  for (const template of ir.typst_templates) {
+    localVariantNames.add(template.variant_name);
+  }
+  for (const template of ir.precedence_templates) {
+    localVariantNames.add(template.variant_name);
+  }
+
+  const identifiers = new Set<string>();
+  for (const node of ir.nodes) {
+    if (!localVariantNames.has(node.dsl_type)) {
+      identifiers.add(node.dsl_type);
+    }
+  }
+  for (const effect of ir.action_effects) {
+    const match = effect.source_text.match(/insert_([A-Za-z0-9_]+)\(/);
+    if (!match?.[1]) {
+      continue;
+    }
+    const variantName = match[1]
+      .split("_")
+      .filter((part) => part.length > 0)
+      .map((part) => part[0].toUpperCase() + part.slice(1))
+      .join("");
+    if (variantName && !localVariantNames.has(variantName)) {
+      identifiers.add(variantName);
+    }
+  }
+  return identifiers;
 }
 
 function containsOffset(range: { start: number; end: number } | null, offset: number): boolean {

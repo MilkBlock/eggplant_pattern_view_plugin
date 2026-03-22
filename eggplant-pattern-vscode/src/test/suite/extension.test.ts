@@ -13,6 +13,7 @@ import {
 const EXTENSION_ID = "MilkBlock.eggplant-pattern-vscode";
 const FIXTURE_DIR = path.resolve(__dirname, "../../../test-fixtures/workspace");
 const RUST_FIXTURE = path.join(FIXTURE_DIR, "pattern_samples.rs");
+const CROSS_FILE_METADATA_FIXTURE = path.join(FIXTURE_DIR, "cross_file_metadata_usage.rs");
 const ROOT_TYPST_FIXTURE = path.join(FIXTURE_DIR, "pattern_typst_root_failure.rs");
 const TEXT_FIXTURE = path.join(FIXTURE_DIR, "notes.txt");
 const TRACE_FIXTURE = path.join(FIXTURE_DIR, "tmp_action_sample_trace.json");
@@ -326,6 +327,24 @@ suite("eggplant pattern extension", () => {
     assert.match(preview.dot, /"integ" \[label="integral one quad d x".*width=.*height=/);
   });
 
+  test("preview auto-discovers cross-file DSL metadata sources from the workspace", async () => {
+    const editor = await openEditor(CROSS_FILE_METADATA_FIXTURE);
+    placeCursor(editor, "let integ = SharedIntegral::query(&one, &x);");
+
+    await vscode.commands.executeCommand("eggplant-pattern.preview");
+    await dispatchPreviewPanelTestMessage({ type: "changeMode", mode: "pattern" });
+    await dispatchPreviewPanelTestMessage({ type: "changeLabelStyle", labelStyle: "compact" });
+
+    const preview = await waitForPreviewState((state) =>
+      state.mode === "pattern"
+      && state.labelStyle === "compact"
+      && state.typstRenderings["integ"] !== undefined
+    );
+    assert.ok(preview.metadataSourceFiles.some((filePath) => filePath.endsWith("cross_file_metadata_defs.rs")));
+    assert.ok(preview.typstRenderings["integ"]);
+    assert.match(preview.dot, /"integ" \[label="integral one quad d x".*width=.*height=/);
+  });
+
   test("panel can clear external metadata source selections", async () => {
     const editor = await openEditor(RUST_FIXTURE);
     placeCursor(editor, "let p = Add::query");
@@ -333,12 +352,12 @@ suite("eggplant pattern extension", () => {
     let baselineRenderNonce = currentPreviewRenderNonce();
     await vscode.commands.executeCommand("eggplant-pattern.preview");
     let preview = await waitForPreviewState(undefined, { minRenderNonce: baselineRenderNonce + 1 });
-    assert.deepEqual(preview.metadataSourceFiles, []);
+    const baselineMetadataSourceFiles = [...preview.metadataSourceFiles];
 
     baselineRenderNonce = preview.renderNonce ?? 0;
     await dispatchPreviewPanelTestMessage({ type: "clearMetadataSources" });
     preview = await waitForPreviewState(undefined, { minRenderNonce: baselineRenderNonce + 1 });
-    assert.deepEqual(preview.metadataSourceFiles, []);
+    assert.deepEqual(preview.metadataSourceFiles, baselineMetadataSourceFiles);
   });
 
   test("recursive strategy dropdown switches between tree-safe and dag-expand", async () => {

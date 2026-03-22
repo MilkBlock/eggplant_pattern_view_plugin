@@ -5,7 +5,7 @@ import { spawnSync } from "child_process";
 import { suite, test } from "mocha";
 import { collectTypstReplacementSources, patternIrToDot, patternIrToDotWithMode } from "../../dot";
 import { PatternIr } from "../../ir";
-import { mergeExternalMetadata, metadataCacheMatches } from "../../metadataSources";
+import { mergeExternalMetadata, metadataCacheMatches, metadataSourceMatchesIdentifiers } from "../../metadataSources";
 import {
   buildTraceSourcePreview,
   indexActionEffectsByStableId,
@@ -353,6 +353,19 @@ suite("eggplant pattern headless tests", () => {
 
     const dot = patternIrToDotWithMode(merged, "pattern", "compact");
     assert.match(dot, /label="a \* b"/);
+  });
+
+  test("metadata source matching detects relevant DSL enums and variants", () => {
+    const source = `
+#[eggplant::dsl]
+enum SharedMath {
+  #[eggplant::typst("integral {f} quad d {x}")]
+  SharedIntegral { f: SharedMath, x: SharedMath },
+}
+`;
+    assert.equal(metadataSourceMatchesIdentifiers(source, new Set(["SharedMath"])), true);
+    assert.equal(metadataSourceMatchesIdentifiers(source, new Set(["SharedIntegral"])), true);
+    assert.equal(metadataSourceMatchesIdentifiers(source, new Set(["OtherDsl"])), false);
   });
 
   test("metadata cache matching requires both mtime and size", () => {
