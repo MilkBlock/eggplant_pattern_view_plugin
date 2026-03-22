@@ -279,6 +279,10 @@ class PreviewController {
       return;
     }
 
+    if (!PreviewPanel.current()) {
+      return;
+    }
+
     const editor = this.lastPreview?.editor ?? vscode.window.activeTextEditor;
     if (!editor || editor.document.languageId !== "rust") {
       return;

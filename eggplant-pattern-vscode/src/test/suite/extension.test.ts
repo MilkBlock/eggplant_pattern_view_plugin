@@ -4,7 +4,11 @@ import * as path from "path";
 import * as vscode from "vscode";
 import { setup, suite, suiteSetup, suiteTeardown, test } from "mocha";
 import { resolveExtractorPath } from "../../extractor";
-import { dispatchPreviewPanelTestMessage, getPreviewPanelTestState } from "../../previewPanel";
+import {
+  clearPreviewPanelTestState,
+  dispatchPreviewPanelTestMessage,
+  getPreviewPanelTestState,
+} from "../../previewPanel";
 
 const EXTENSION_ID = "MilkBlock.eggplant-pattern-vscode";
 const FIXTURE_DIR = path.resolve(__dirname, "../../../test-fixtures/workspace");
@@ -50,6 +54,7 @@ suite("eggplant pattern extension", () => {
 
   setup(async () => {
     warningMessages.length = 0;
+    await clearPreviewPanelTestState();
     await vscode.workspace.getConfiguration().update("eggplantPattern.autoPreview", false, vscode.ConfigurationTarget.Global);
     await vscode.workspace.getConfiguration().update("eggplantPattern.defaultDotView", "auto", vscode.ConfigurationTarget.Global);
     await vscode.workspace.getConfiguration().update("eggplantPattern.defaultLabelStyle", "recursive", vscode.ConfigurationTarget.Global);
@@ -59,15 +64,18 @@ suite("eggplant pattern extension", () => {
     await vscode.workspace.getConfiguration().update("eggplantPattern.experimentalDynamicActionRecovery", false, vscode.ConfigurationTarget.Global);
     await vscode.workspace.getConfiguration().update("eggplantPattern.dynamicActionRecoveryMode", "hybrid", vscode.ConfigurationTarget.Global);
     await vscode.workspace.getConfiguration().update("eggplantPattern.actionSampleTracePath", "", vscode.ConfigurationTarget.Global);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await clearPreviewPanelTestState();
   });
 
   test("manual preview renders add_rule closure scope", async () => {
     const editor = await openEditor(RUST_FIXTURE);
     placeCursor(editor, "let p = Add::query");
 
+    const baselineRenderNonce = currentPreviewRenderNonce();
     await vscode.commands.executeCommand("eggplant-pattern.preview");
 
-    const preview = await waitForPreviewState();
+    const preview = await waitForPreviewState(undefined, { minRenderNonce: baselineRenderNonce + 1 });
     assert.match(preview.title, /pattern\.dot/);
     assert.equal(preview.labelStyle, "recursive");
     assert.match(preview.dot, /digraph EggplantPattern/);
@@ -123,9 +131,10 @@ suite("eggplant pattern extension", () => {
     const editor = await openEditor(RUST_FIXTURE);
     placeCursor(editor, "let q = Mul::query");
 
+    const baselineRenderNonce = currentPreviewRenderNonce();
     await vscode.commands.executeCommand("eggplant-pattern.preview");
 
-    const preview = await waitForPreviewState();
+    const preview = await waitForPreviewState(undefined, { minRenderNonce: baselineRenderNonce + 1 });
     assert.match(preview.dot, /"q" -> "lhs"/);
     assert.match(preview.dot, /"q" -> "rhs"/);
   });
@@ -134,9 +143,10 @@ suite("eggplant pattern extension", () => {
     const editor = await openEditor(RUST_FIXTURE);
     placeCursor(editor, "println!(\"not a pattern");
 
+    const baselineRenderNonce = currentPreviewRenderNonce();
     await vscode.commands.executeCommand("eggplant-pattern.preview");
 
-    const preview = await waitForPreviewState();
+    const preview = await waitForPreviewState(undefined, { minRenderNonce: baselineRenderNonce + 1 });
     assert.match(preview.dot, /No supported eggplant pattern scope found under the cursor/);
     assert.equal(warningMessages.length, 1);
   });
@@ -151,26 +161,29 @@ suite("eggplant pattern extension", () => {
 
   test("auto preview coalesces rapid cursor updates into a single render", async () => {
     const editor = await openEditor(RUST_FIXTURE);
-    await vscode.workspace.getConfiguration().update("eggplantPattern.autoPreview", true, vscode.ConfigurationTarget.Global);
+    await updateSettingAndWait("eggplantPattern.autoPreview", true);
 
+    const baselineRenderNonce = currentPreviewRenderNonce();
     placeCursor(editor, "let l = Const::query");
     placeCursor(editor, "let r = Const::query");
     placeCursor(editor, "let p = Add::query");
 
-    const preview = await waitForPreviewState();
+    const preview = await waitForPreviewState(undefined, { minRenderNonce: baselineRenderNonce + 1 });
     assert.match(preview.dot, /"p" -> "r"/);
   });
 
   test("auto preview keeps editor focus while updating the panel", async () => {
     const editor = await openEditor(RUST_FIXTURE);
-    await vscode.workspace.getConfiguration().update("eggplantPattern.autoPreview", true, vscode.ConfigurationTarget.Global);
+    await updateSettingAndWait("eggplantPattern.autoPreview", true);
 
+    let baselineRenderNonce = currentPreviewRenderNonce();
     placeCursor(editor, "let p = Add::query");
-    await waitForPreviewState();
+    await waitForPreviewState(undefined, { minRenderNonce: baselineRenderNonce + 1 });
     assert.strictEqual(vscode.window.activeTextEditor?.document.uri.toString(), editor.document.uri.toString());
 
+    baselineRenderNonce = currentPreviewRenderNonce();
     placeCursor(editor, "ctx.union(pat.p, op_value)");
-    await waitForPreviewState((state) => state.mode === "action");
+    await waitForPreviewState((state) => state.mode === "action", { minRenderNonce: baselineRenderNonce + 1 });
     assert.strictEqual(vscode.window.activeTextEditor?.document.uri.toString(), editor.document.uri.toString());
   });
 
@@ -188,7 +201,7 @@ suite("eggplant pattern extension", () => {
 
   test("manual dot mode survives auto refresh at the same cursor position", async () => {
     const editor = await openEditor(RUST_FIXTURE);
-    await vscode.workspace.getConfiguration().update("eggplantPattern.autoPreview", true, vscode.ConfigurationTarget.Global);
+    await updateSettingAndWait("eggplantPattern.autoPreview", true);
     placeCursor(editor, "ctx.union(pat.p, op_value)");
 
     await vscode.commands.executeCommand("eggplant-pattern.preview");
@@ -207,13 +220,18 @@ suite("eggplant pattern extension", () => {
     const editor = await openEditor(RUST_FIXTURE);
     placeCursor(editor, "ctx.union(pat.p, op_value)");
 
+    let baselineRenderNonce = currentPreviewRenderNonce();
     await vscode.commands.executeCommand("eggplant-pattern.preview");
-    let preview = await waitForPreviewState();
+    let preview = await waitForPreviewState(undefined, { minRenderNonce: baselineRenderNonce + 1 });
     assert.equal(preview.labelStyle, "recursive");
     assert.match(preview.dot, /union\(p, op_value\)/);
 
+    baselineRenderNonce = preview.renderNonce ?? 0;
     await dispatchPreviewPanelTestMessage({ type: "changeLabelStyle", labelStyle: "full" });
-    preview = await waitForPreviewState((state) => state.labelStyle === "full");
+    preview = await waitForPreviewState(
+      (state) => state.labelStyle === "full",
+      { minRenderNonce: baselineRenderNonce + 1 }
+    );
     assert.match(preview.title, /full/);
     assert.match(preview.dot, /ctx\.union\(pat\.p, op_value\)/);
   });
@@ -258,12 +276,14 @@ suite("eggplant pattern extension", () => {
     const editor = await openEditor(RUST_FIXTURE);
     placeCursor(editor, "let p = Add::query");
 
+    let baselineRenderNonce = currentPreviewRenderNonce();
     await vscode.commands.executeCommand("eggplant-pattern.preview");
-    let preview = await waitForPreviewState();
+    let preview = await waitForPreviewState(undefined, { minRenderNonce: baselineRenderNonce + 1 });
     assert.deepEqual(preview.metadataSourceFiles, []);
 
+    baselineRenderNonce = preview.renderNonce ?? 0;
     await dispatchPreviewPanelTestMessage({ type: "clearMetadataSources" });
-    preview = await waitForPreviewState();
+    preview = await waitForPreviewState(undefined, { minRenderNonce: baselineRenderNonce + 1 });
     assert.deepEqual(preview.metadataSourceFiles, []);
   });
 
@@ -281,7 +301,7 @@ suite("eggplant pattern extension", () => {
 
   test("auto preview keeps detail and recursive strategy across scope changes", async () => {
     const editor = await openEditor(RUST_FIXTURE);
-    await vscode.workspace.getConfiguration().update("eggplantPattern.autoPreview", true, vscode.ConfigurationTarget.Global);
+    await updateSettingAndWait("eggplantPattern.autoPreview", true);
 
     placeCursor(editor, "ctx.insert_m_integral(pat.f, pat.x)");
     await vscode.commands.executeCommand("eggplant-pattern.preview");
@@ -356,7 +376,9 @@ suite("eggplant pattern extension", () => {
 
     await vscode.commands.executeCommand("eggplant-pattern.preview");
     const preview = await waitForPreviewState(
-      (state) => (state.renderNonce ?? 0) > baselineRenderNonce && state.recoverySummary !== null
+      (state) =>
+        (state.renderNonce ?? 0) > baselineRenderNonce &&
+        state.recoverySummary === "recovery=sample | events=2 | matched=2 | dynamic-unknown=1"
     );
     assert.equal(preview.recoverySummary, "recovery=sample | events=2 | matched=2 | dynamic-unknown=1");
     assert.equal(preview.recoveryDiagnostics.length, 1);
@@ -385,6 +407,10 @@ function placeCursor(editor: vscode.TextEditor, needle: string): void {
   const offset = editor.document.getText().indexOf(needle);
   assert.notEqual(offset, -1, `Needle not found: ${needle}`);
   const position = editor.document.positionAt(offset);
+  if (editor.selection.active.isEqual(position)) {
+    const reset = new vscode.Position(0, 0);
+    editor.selection = new vscode.Selection(reset, reset);
+  }
   editor.selection = new vscode.Selection(position, position);
 }
 
@@ -402,10 +428,16 @@ async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<voi
   }
 }
 
-async function waitForPreviewState(predicate?: (state: NonNullable<ReturnType<typeof getPreviewPanelTestState>>) => boolean) {
+async function waitForPreviewState(
+  predicate?: (state: NonNullable<ReturnType<typeof getPreviewPanelTestState>>) => boolean,
+  options?: { minRenderNonce?: number }
+) {
   await waitFor(() => {
     const state = getPreviewPanelTestState();
     if (!state) {
+      return false;
+    }
+    if ((state.renderNonce ?? 0) < (options?.minRenderNonce ?? 0)) {
       return false;
     }
     return predicate ? predicate(state) : true;
@@ -413,6 +445,10 @@ async function waitForPreviewState(predicate?: (state: NonNullable<ReturnType<ty
   const state = getPreviewPanelTestState();
   assert.ok(state, "Expected preview panel state");
   return state;
+}
+
+function currentPreviewRenderNonce(): number {
+  return getPreviewPanelTestState()?.renderNonce ?? 0;
 }
 
 async function updateSettingAndWait<T>(key: string, value: T): Promise<void> {
