@@ -6,7 +6,13 @@ import { suite, test } from "mocha";
 import { collectTypstReplacementSources, patternIrToDot, patternIrToDotWithMode } from "../../dot";
 import { PatternIr } from "../../ir";
 import { mergeExternalMetadata, metadataCacheMatches } from "../../metadataSources";
-import { normalizeActionRecoveryMode, resolveDynamicActionRecoveryPolicy } from "../../actionRecovery";
+import {
+  indexActionEffectsByStableId,
+  normalizeActionRecoveryMode,
+  resolveTraceEventEffect,
+  resolveDynamicActionRecoveryPolicy,
+  summarizeRuntimeActionSampleTrace
+} from "../../actionRecovery";
 import { normalizeTypstMathSource, renderTypstSnippets } from "../../typst";
 
 const WORKSPACE_ROOT = path.resolve(__dirname, "../../../../");
@@ -44,6 +50,141 @@ suite("eggplant pattern headless tests", () => {
     );
   });
 
+  test("stable action effect ids index back to source ranges", () => {
+    const ir: PatternIr = {
+      scope: {
+        kind: "add_rule_call",
+        text_range: { start: 0, end: 20 },
+        pattern_range: { start: 0, end: 8 },
+        action_range: { start: 9, end: 20 }
+      },
+      nodes: [],
+      edges: [],
+      roots: [],
+      constraints: [],
+      action_effects: [
+        {
+          id: "effect_0",
+          effect_id: "effect@10:24",
+          bound_var: "tmp",
+          source_text: "ctx.insert_m_add(a, b)",
+          referenced_pat_vars: ["a", "b"],
+          referenced_action_vars: [],
+          range: { start: 10, end: 24 }
+        },
+        {
+          id: "effect_1",
+          effect_id: "effect@30:44",
+          bound_var: null,
+          source_text: "ctx.union(pat.x, tmp)",
+          referenced_pat_vars: ["x"],
+          referenced_action_vars: ["tmp"],
+          range: { start: 30, end: 44 }
+        }
+      ],
+      seed_facts: [],
+      display_templates: [],
+      typst_templates: [],
+      precedence_templates: [],
+      diagnostics: []
+    };
+
+    const byStableId = indexActionEffectsByStableId(ir.action_effects);
+    assert.equal(byStableId.get("effect@10:24")?.range.start, 10);
+    assert.equal(byStableId.get("effect@30:44")?.range.end, 44);
+    assert.equal(byStableId.get("effect@999:1000"), undefined);
+
+    assert.equal(
+      resolveTraceEventEffect(
+        {
+          kind: "insert",
+          id: "evt_0",
+          effect_id: "effect@10:24",
+          callee: "MAdd",
+          rendered_label: null,
+          source_range: { start: 10, end: 24 },
+          input_ids: []
+        },
+        byStableId
+      )?.id,
+      "effect_0"
+    );
+
+    assert.equal(
+      resolveTraceEventEffect(
+        {
+          kind: "dynamic-unknown",
+          id: "evt_1",
+          effect_id: null,
+          source_range: null,
+          reason: "branch not sampled"
+        },
+        byStableId
+      ),
+      null
+    );
+  });
+
+  test("runtime action sample trace summary reports matches and diagnostics", () => {
+    const summary = summarizeRuntimeActionSampleTrace(
+      {
+        version: 1,
+        events: [
+          {
+            Insert: {
+              event_id: "evt_0",
+              effect_id: "effect@10:24",
+              table: "MAdd",
+              key_debug: ["a", "b"]
+            }
+          },
+          {
+            DynamicUnknown: {
+              event_id: "evt_1",
+              effect_id: "effect@30:44",
+              reason: "branch not sampled"
+            }
+          },
+          {
+            Union: {
+              event_id: "evt_2",
+              effect_id: "effect@999:1000",
+              lhs_debug: "lhs",
+              rhs_debug: "rhs"
+            }
+          }
+        ]
+      },
+      [
+        {
+          id: "effect_0",
+          effect_id: "effect@10:24",
+          bound_var: "tmp",
+          source_text: "ctx.insert_m_add(a, b)",
+          referenced_pat_vars: ["a", "b"],
+          referenced_action_vars: [],
+          range: { start: 10, end: 24 }
+        },
+        {
+          id: "effect_1",
+          effect_id: "effect@30:44",
+          bound_var: null,
+          source_text: "ctx.union(pat.x, tmp)",
+          referenced_pat_vars: ["x"],
+          referenced_action_vars: ["tmp"],
+          range: { start: 30, end: 44 }
+        }
+      ]
+    );
+
+    assert.ok(summary);
+    assert.equal(summary?.summary, "recovery=sample | events=3 | matched=2 | dynamic-unknown=1 | unresolved=1");
+    assert.equal(summary?.diagnostics.length, 2);
+    assert.match(summary?.diagnostics[0].message ?? "", /dynamic-unknown at evt_1: branch not sampled/);
+    assert.equal(summary?.diagnostics[0].source_range?.start, 30);
+    assert.match(summary?.diagnostics[1].message ?? "", /did not match any extracted action effect/);
+  });
+
   test("extractor emits JSON for add_rule closure scope", () => {
     const source = fs.readFileSync(FIXTURE_PATH, "utf8");
     const offset = source.indexOf("let p = Add::query");
@@ -65,6 +206,10 @@ suite("eggplant pattern headless tests", () => {
     assert.equal(ir.constraints[0].source_text, "eq");
     assert.match(ir.constraints[0].resolved_text, /x1\.handle\(\)\.eq/);
     assert.equal(ir.action_effects.length, 2);
+    assert.equal(
+      ir.action_effects[1].effect_id,
+      `effect@${ir.action_effects[1].range.start}:${ir.action_effects[1].range.end}`
+    );
     assert.equal(ir.action_effects[1].source_text, "ctx.union(pat.p, op_value)");
     assert.deepEqual(ir.action_effects[1].referenced_pat_vars, ["p"]);
     assert.equal(ir.seed_facts.length, 1);
@@ -308,6 +453,7 @@ fn demo() {
       action_effects: [
         {
           id: "effect_0",
+          effect_id: "effect@8:9",
           bound_var: null,
           source_text: "ctx.union(pat.q, folded)",
           referenced_pat_vars: ["q"],
@@ -361,6 +507,7 @@ fn demo() {
       action_effects: [
         {
           id: "effect_0",
+          effect_id: "effect@0:1",
           bound_var: "x",
           source_text: "ctx.insert_m_var(\"x\".to_owned())",
           referenced_pat_vars: [],
@@ -369,6 +516,7 @@ fn demo() {
         },
         {
           id: "effect_1",
+          effect_id: "effect@2:3",
           bound_var: "ln_x",
           source_text: "ctx.insert_m_ln(x.clone())",
           referenced_pat_vars: [],
@@ -377,6 +525,7 @@ fn demo() {
         },
         {
           id: "effect_2",
+          effect_id: "effect@4:5",
           bound_var: null,
           source_text: "ctx.insert_m_integral(ln_x, x.clone())",
           referenced_pat_vars: [],
@@ -435,6 +584,7 @@ fn demo() {
       action_effects: [
         {
           id: "effect_0",
+          effect_id: "effect@10:12",
           bound_var: null,
           source_text: "ctx.insert_m_mul(pat.a, pat.a)",
           referenced_pat_vars: ["a"],
@@ -492,6 +642,7 @@ fn demo() {
       action_effects: [
         {
           id: "effect_0",
+          effect_id: "effect@4:5",
           bound_var: null,
           source_text: "ctx.union(pat.lhs, rhs.clone())",
           referenced_pat_vars: ["lhs"],
@@ -649,6 +800,7 @@ fn demo() {
       action_effects: [
         {
           id: "effect_0",
+          effect_id: "effect@1:2",
           bound_var: null,
           source_text: "ctx.insert_m_integral(lhs.clone(), rhs.clone())",
           referenced_pat_vars: [],

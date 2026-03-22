@@ -1,5 +1,7 @@
 import * as vscode from "vscode";
+import * as fs from "fs";
 import * as path from "path";
+import { resolveDynamicActionRecoveryPolicy, summarizeRuntimeActionSampleTrace } from "./actionRecovery";
 import { collectTypstReplacementSources, DotLabelStyle, DotViewMode, patternIrToDotWithMode, RecursiveStrategy } from "./dot";
 import { configureExtractorResolution, ExtractorError, runExtractor } from "./extractor";
 import { PatternIr } from "./ir";
@@ -178,7 +180,18 @@ class PreviewController {
   async showCurrentMode(mode: DotViewMode): Promise<void> {
     this.currentModeOverride = mode;
     if (this.lastPreview) {
-      await renderDot(this.panel(true), this.lastPreview.editor, this.lastPreview.ir, mode, this.labelStyle(), this.recursiveStrategy(), this.metadataSourceFiles, null);
+      const recoveryMetadata = await loadActionRecoveryPreviewMetadata(this.lastPreview.ir);
+      await renderDot(
+        this.panel(true),
+        this.lastPreview.editor,
+        this.lastPreview.ir,
+        mode,
+        this.labelStyle(),
+        this.recursiveStrategy(),
+        this.metadataSourceFiles,
+        recoveryMetadata,
+        null
+      );
       return;
     }
 
@@ -212,6 +225,7 @@ class PreviewController {
     );
 
     if (this.lastPreview) {
+      const recoveryMetadata = await loadActionRecoveryPreviewMetadata(this.lastPreview.ir);
       await renderDot(
         this.panel(true),
         this.lastPreview.editor,
@@ -220,6 +234,7 @@ class PreviewController {
         labelStyle,
         this.currentRecursiveStrategy,
         this.metadataSourceFiles,
+        recoveryMetadata,
         null
       );
     }
@@ -234,6 +249,7 @@ class PreviewController {
     );
 
     if (this.lastPreview) {
+      const recoveryMetadata = await loadActionRecoveryPreviewMetadata(this.lastPreview.ir);
       await renderDot(
         this.panel(true),
         this.lastPreview.editor,
@@ -242,6 +258,7 @@ class PreviewController {
         this.currentLabelStyle,
         strategy,
         this.metadataSourceFiles,
+        recoveryMetadata,
         null
       );
     }
@@ -267,11 +284,22 @@ class PreviewController {
       const extractedIr = await runExtractor(request.editor.document, offset);
       const externalMetadata = await loadMetadataSources(this.metadataSourceFiles);
       const ir = mergeExternalMetadata(extractedIr, externalMetadata);
+      const recoveryMetadata = await loadActionRecoveryPreviewMetadata(ir);
       if (this.pending && this.pending.id > request.id) {
         return;
       }
       const mode = request.forcedMode ?? this.currentModeOverride ?? resolveDotViewMode(ir, offset);
-      await renderDot(this.panel(!request.manual), request.editor, ir, mode, this.currentLabelStyle, this.currentRecursiveStrategy, this.metadataSourceFiles, null);
+      await renderDot(
+        this.panel(!request.manual),
+        request.editor,
+        ir,
+        mode,
+        this.currentLabelStyle,
+        this.currentRecursiveStrategy,
+        this.metadataSourceFiles,
+        recoveryMetadata,
+        null
+      );
       this.lastPreview = {
         editor: request.editor,
         ir
@@ -443,6 +471,7 @@ async function renderDot(
   labelStyle: DotLabelStyle,
   recursiveStrategy: RecursiveStrategy,
   metadataSourceFiles: string[],
+  recoveryMetadata: ReturnType<typeof summarizeRuntimeActionSampleTrace> | null,
   notice: string | null
 ): Promise<void> {
   const typstRenderings = await renderTypstSnippets(
@@ -462,6 +491,8 @@ async function renderDot(
     typstRenderings,
     sourceTargetIds: collectSourceTargetIds(ir, mode),
     metadataSourceFiles,
+    recoverySummary: recoveryMetadata?.summary ?? null,
+    recoveryDiagnostics: recoveryMetadata?.diagnostics.map((entry) => entry.message) ?? [],
     notice
   });
 }
@@ -486,6 +517,8 @@ async function renderNotice(panel: PreviewPanel, editor: vscode.TextEditor, mess
     typstRenderings: {},
     sourceTargetIds: [],
     metadataSourceFiles: [],
+    recoverySummary: null,
+    recoveryDiagnostics: [],
     notice: message
   });
 }
@@ -566,6 +599,40 @@ function resolveSourceSpan(ir: PatternIr, targetId: string): { start: number; en
     return ir.seed_facts.find((entry) => `seed:${entry.id}` === targetId)?.range ?? null;
   }
   return null;
+}
+
+async function loadActionRecoveryPreviewMetadata(
+  ir: PatternIr
+): Promise<ReturnType<typeof summarizeRuntimeActionSampleTrace> | null> {
+  const policy = resolveDynamicActionRecoveryPolicy({
+    enabled: vscode.workspace.getConfiguration().get<boolean>("eggplantPattern.experimentalDynamicActionRecovery", false),
+    mode: vscode.workspace.getConfiguration().get<string>("eggplantPattern.dynamicActionRecoveryMode", "hybrid")
+  });
+  if (!policy.enabled || policy.mode === "static") {
+    return null;
+  }
+
+  const tracePath = vscode.workspace.getConfiguration().get<string>("eggplantPattern.actionSampleTracePath", "").trim();
+  if (tracePath.length === 0) {
+    return null;
+  }
+
+  try {
+    const raw = await fs.promises.readFile(tracePath, "utf8");
+    return summarizeRuntimeActionSampleTrace(JSON.parse(raw), ir.action_effects);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      summary: "recovery=sample | trace-load-failed",
+      diagnostics: [
+        {
+          severity: "warning",
+          message: `sample trace load failed: ${message}`,
+          source_range: null
+        }
+      ]
+    };
+  }
 }
 
 export function deactivate(): void {}

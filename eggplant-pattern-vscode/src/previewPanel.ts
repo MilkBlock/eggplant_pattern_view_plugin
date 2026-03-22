@@ -13,6 +13,8 @@ export interface PreviewPanelState {
   typstRenderings: Record<string, RenderedTypstSnippet>;
   sourceTargetIds: string[];
   metadataSourceFiles: string[];
+  recoverySummary: string | null;
+  recoveryDiagnostics: string[];
   notice: string | null;
 }
 
@@ -371,7 +373,11 @@ export class PreviewPanel implements vscode.Disposable {
         const sourceSummary = payload.metadataSourceFiles.length > 0
           ? " | meta sources: " + payload.metadataSourceFiles.length
           : "";
-        meta.textContent = payload.notice || payload.fileName + " | " + payload.mode + " | " + payload.labelStyle + (payload.labelStyle === "recursive" ? " | " + payload.recursiveStrategy : "") + sourceSummary;
+        const recoverySummary = payload.recoverySummary ? " | " + payload.recoverySummary : "";
+        const recoveryDiagnostics = (payload.recoveryDiagnostics || []).length > 0
+          ? " | diag: " + payload.recoveryDiagnostics.join(" ; ")
+          : "";
+        meta.textContent = payload.notice || payload.fileName + " | " + payload.mode + " | " + payload.labelStyle + (payload.labelStyle === "recursive" ? " | " + payload.recursiveStrategy : "") + sourceSummary + recoverySummary + recoveryDiagnostics;
         graph.innerHTML = payload.svg;
         const rootSvg = graph.querySelector("svg");
         if (rootSvg) {

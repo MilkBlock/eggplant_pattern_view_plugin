@@ -10,6 +10,7 @@ const EXTENSION_ID = "MilkBlock.eggplant-pattern-vscode";
 const FIXTURE_DIR = path.resolve(__dirname, "../../../test-fixtures/workspace");
 const RUST_FIXTURE = path.join(FIXTURE_DIR, "pattern_samples.rs");
 const TEXT_FIXTURE = path.join(FIXTURE_DIR, "notes.txt");
+const TRACE_FIXTURE = path.join(FIXTURE_DIR, "tmp_action_sample_trace.json");
 const MATH_MICROBENCHMARK_FIXTURE = "/Users/mineralsteins/Repos/egg_related/eggplant_backup/benches/runners/eggplant_rewrite/math_microbenchmark.rs";
 const EXTRACTOR_PATH = path.resolve(__dirname, "../../../../", "eggplant-pattern-extractor", "target", "debug", process.platform === "win32" ? "eggplant-pattern-extractor.exe" : "eggplant-pattern-extractor");
 const BUNDLED_EXTRACTOR_PATH = path.resolve(__dirname, "../../../bin", `${process.platform}-${process.arch}`, process.platform === "win32" ? "eggplant-pattern-extractor.exe" : "eggplant-pattern-extractor");
@@ -39,6 +40,12 @@ suite("eggplant pattern extension", () => {
     await vscode.workspace.getConfiguration().update("eggplantPattern.defaultLabelStyle", undefined, vscode.ConfigurationTarget.Workspace);
     await vscode.workspace.getConfiguration().update("eggplantPattern.defaultRecursiveStrategy", undefined, vscode.ConfigurationTarget.Global);
     await vscode.workspace.getConfiguration().update("eggplantPattern.defaultRecursiveStrategy", undefined, vscode.ConfigurationTarget.Workspace);
+    await vscode.workspace.getConfiguration().update("eggplantPattern.experimentalDynamicActionRecovery", undefined, vscode.ConfigurationTarget.Global);
+    await vscode.workspace.getConfiguration().update("eggplantPattern.dynamicActionRecoveryMode", undefined, vscode.ConfigurationTarget.Global);
+    await vscode.workspace.getConfiguration().update("eggplantPattern.actionSampleTracePath", undefined, vscode.ConfigurationTarget.Global);
+    try {
+      await fs.promises.unlink(TRACE_FIXTURE);
+    } catch {}
   });
 
   setup(async () => {
@@ -49,6 +56,9 @@ suite("eggplant pattern extension", () => {
     await vscode.workspace.getConfiguration().update("eggplantPattern.defaultLabelStyle", "recursive", vscode.ConfigurationTarget.Workspace);
     await vscode.workspace.getConfiguration().update("eggplantPattern.defaultRecursiveStrategy", "dag-expand", vscode.ConfigurationTarget.Global);
     await vscode.workspace.getConfiguration().update("eggplantPattern.defaultRecursiveStrategy", "dag-expand", vscode.ConfigurationTarget.Workspace);
+    await vscode.workspace.getConfiguration().update("eggplantPattern.experimentalDynamicActionRecovery", false, vscode.ConfigurationTarget.Global);
+    await vscode.workspace.getConfiguration().update("eggplantPattern.dynamicActionRecoveryMode", "hybrid", vscode.ConfigurationTarget.Global);
+    await vscode.workspace.getConfiguration().update("eggplantPattern.actionSampleTracePath", "", vscode.ConfigurationTarget.Global);
   });
 
   test("manual preview renders add_rule closure scope", async () => {
@@ -305,6 +315,49 @@ suite("eggplant pattern extension", () => {
 
     await dispatchPreviewPanelTestMessage({ type: "clickSource", targetId: "effect:effect_1" });
     assert.equal(selectedText(editor), "ctx.union(pat.p, op_value)");
+  });
+
+  test("preview metadata surfaces sampled action recovery summary and diagnostics", async () => {
+    const editor = await openEditor(RUST_FIXTURE);
+    placeCursor(editor, "ctx.union(pat.p, op_value)");
+
+    await vscode.commands.executeCommand("eggplant-pattern.preview");
+    await waitForPreviewState((state) => state.mode === "action");
+    const sourceText = editor.document.getText();
+    const start = sourceText.indexOf("ctx.union(pat.p, op_value)");
+    assert.notEqual(start, -1);
+    const end = start + "ctx.union(pat.p, op_value)".length;
+    const trace = {
+      version: 1,
+      events: [
+        {
+          Union: {
+            event_id: "evt_0",
+            effect_id: `effect@${start}:${end}`,
+            lhs_debug: "pat.p",
+            rhs_debug: "op_value"
+          }
+        },
+        {
+          DynamicUnknown: {
+            event_id: "evt_1",
+            effect_id: `effect@${start}:${end}`,
+            reason: "branch not sampled"
+          }
+        }
+      ]
+    };
+    await fs.promises.writeFile(TRACE_FIXTURE, JSON.stringify(trace, null, 2), "utf8");
+
+    await vscode.workspace.getConfiguration().update("eggplantPattern.experimentalDynamicActionRecovery", true, vscode.ConfigurationTarget.Global);
+    await vscode.workspace.getConfiguration().update("eggplantPattern.dynamicActionRecoveryMode", "sample", vscode.ConfigurationTarget.Global);
+    await vscode.workspace.getConfiguration().update("eggplantPattern.actionSampleTracePath", TRACE_FIXTURE, vscode.ConfigurationTarget.Global);
+
+    await vscode.commands.executeCommand("eggplant-pattern.preview");
+    const preview = await waitForPreviewState((state) => state.recoverySummary !== null);
+    assert.equal(preview.recoverySummary, "recovery=sample | events=2 | matched=2 | dynamic-unknown=1");
+    assert.equal(preview.recoveryDiagnostics.length, 1);
+    assert.match(preview.recoveryDiagnostics[0], /dynamic-unknown at evt_1: branch not sampled/);
   });
 
   test("extractor resolution prefers bundled binary by default", async () => {

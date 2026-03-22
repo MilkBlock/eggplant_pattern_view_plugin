@@ -662,6 +662,7 @@ fn extract_action_effects(
             .collect::<Vec<_>>();
         effects.push(ActionEffect {
             id: format!("effect_{next_effect_id}"),
+            effect_id: stable_action_effect_id(method_call.syntax().text_range()),
             bound_var: enclosing_let_binding_name(method_call.syntax()),
             source_text: method_call.syntax().text().to_string(),
             referenced_pat_vars,
@@ -671,6 +672,10 @@ fn extract_action_effects(
         next_effect_id += 1;
     }
     effects
+}
+
+fn stable_action_effect_id(range: TextRange) -> String {
+    format!("effect@{}:{}", u32::from(range.start()), u32::from(range.end()))
 }
 
 fn collect_action_local_bindings(block: &ast::BlockExpr, ctx_name: &str) -> BTreeSet<String> {
@@ -908,6 +913,22 @@ fn demo() {
         );
         assert!(ir.constraints[0].referenced_vars.is_empty());
         assert_eq!(ir.action_effects.len(), 2);
+        assert_eq!(
+            ir.action_effects[0].effect_id,
+            format!(
+                "effect@{}:{}",
+                ir.action_effects[0].range.start,
+                ir.action_effects[0].range.end
+            )
+        );
+        assert_eq!(
+            ir.action_effects[1].effect_id,
+            format!(
+                "effect@{}:{}",
+                ir.action_effects[1].range.start,
+                ir.action_effects[1].range.end
+            )
+        );
         assert_eq!(ir.action_effects[1].source_text, "ctx.union(pat.p, op_value)");
         assert_eq!(ir.action_effects[1].referenced_pat_vars, vec!["p"]);
         assert_eq!(ir.seed_facts.len(), 1);
