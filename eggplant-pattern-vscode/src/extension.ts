@@ -733,6 +733,7 @@ async function renderDot(
     typstRenderings,
     sourceTargetIds: collectSourceTargetIds(ir, mode),
     constraints: visibleConstraints,
+    constraintCountByNodeId: buildConstraintCountByNodeId(constraints),
     constraintFilterMode,
     constraintFilterNodeId,
     activeConstraintId: activeConstraint?.id ?? null,
@@ -768,6 +769,7 @@ async function renderNotice(panel: PreviewPanel, editor: vscode.TextEditor, mess
     typstRenderings: {},
     sourceTargetIds: [],
     constraints: [],
+    constraintCountByNodeId: {},
     constraintFilterMode: "all",
     constraintFilterNodeId: null,
     activeConstraintId: null,
@@ -820,6 +822,7 @@ async function renderTraceUnavailableNotice(
     typstRenderings: {},
     sourceTargetIds: [],
     constraints: buildConstraintEntries(irlessPatternIr()),
+    constraintCountByNodeId: {},
     constraintFilterMode: "all",
     constraintFilterNodeId: null,
     activeConstraintId: null,
@@ -918,6 +921,18 @@ function filterConstraintEntries(
     return [];
   }
   return constraints.filter((constraint) => constraint.referencedNodeIds.includes(nodeId));
+}
+
+function buildConstraintCountByNodeId(
+  constraints: Array<{ id: string; compactText: string; fullText: string; referencedNodeIds: string[] }>
+): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const constraint of constraints) {
+    for (const nodeId of constraint.referencedNodeIds) {
+      counts[nodeId] = (counts[nodeId] ?? 0) + 1;
+    }
+  }
+  return counts;
 }
 
 function irlessPatternIr(): PatternIr {

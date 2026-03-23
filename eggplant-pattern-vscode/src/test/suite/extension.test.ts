@@ -444,6 +444,7 @@ suite("eggplant pattern extension", () => {
     let preview = await waitForPreviewState((state) => state.mode === "combined" && state.constraints.length > 0);
     assert.equal(preview.activeConstraintId, null);
     assert.equal(preview.constraints[0].compactText, "l == r");
+    assert.deepEqual(preview.constraintCountByNodeId, { l: 1, r: 1 });
 
     await dispatchPreviewPanelTestMessage({ type: "clickConstraint", constraintId: "constraint_0" });
     preview = await waitForPreviewState((state) => state.activeConstraintId === "constraint_0");

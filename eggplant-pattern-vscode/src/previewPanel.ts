@@ -46,6 +46,7 @@ export interface PreviewPanelState {
   typstRenderings: Record<string, RenderedTypstSnippet>;
   sourceTargetIds: string[];
   constraints: PreviewConstraintEntry[];
+  constraintCountByNodeId: Record<string, number>;
   constraintFilterMode: PreviewConstraintFilterMode;
   constraintFilterNodeId: string | null;
   activeConstraintId: string | null;
@@ -660,6 +661,7 @@ export class PreviewPanel implements vscode.Disposable {
 
       const constraintHighlightColor = "#c26d00";
       const constraintHighlightArtifactAttr = "data-constraint-highlight-artifact";
+      const constraintCountBadgeAttr = "data-constraint-count-badge";
 
       const encodeSvgDataUri = (svgMarkup) => {
         return "data:image/svg+xml;base64," + btoa(unescape(encodeURIComponent(svgMarkup)));
@@ -673,6 +675,12 @@ export class PreviewPanel implements vscode.Disposable {
 
       const clearConstraintHighlightArtifacts = (nodeGroup) => {
         for (const artifact of Array.from(nodeGroup.querySelectorAll("[" + constraintHighlightArtifactAttr + '="true"]'))) {
+          artifact.remove();
+        }
+      };
+
+      const clearConstraintCountBadges = (nodeGroup) => {
+        for (const artifact of Array.from(nodeGroup.querySelectorAll("[" + constraintCountBadgeAttr + '="true"]'))) {
           artifact.remove();
         }
       };
@@ -705,6 +713,42 @@ export class PreviewPanel implements vscode.Disposable {
         ring.setAttribute("pointer-events", "none");
         ring.setAttribute("vector-effect", "non-scaling-stroke");
         return ring;
+      };
+
+      const createConstraintCountBadge = (bbox, count) => {
+        const badge = document.createElementNS("http://www.w3.org/2000/svg", "g");
+        badge.setAttribute(constraintCountBadgeAttr, "true");
+        badge.setAttribute("pointer-events", "none");
+
+        const label = "C" + String(count);
+        const width = Math.max(26, 12 + label.length * 8);
+        const height = 18;
+        const x = bbox.x + bbox.width - width * 0.5;
+        const y = bbox.y - height * 0.35;
+
+        const bubble = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+        bubble.setAttribute("x", String(x));
+        bubble.setAttribute("y", String(y));
+        bubble.setAttribute("width", String(width));
+        bubble.setAttribute("height", String(height));
+        bubble.setAttribute("rx", "9");
+        bubble.setAttribute("ry", "9");
+        bubble.setAttribute("fill", "color-mix(in srgb, var(--vscode-editor-background) 18%, #c26d00 82%)");
+        bubble.setAttribute("stroke", "var(--vscode-editor-background)");
+        bubble.setAttribute("stroke-width", "1.5");
+
+        const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+        text.setAttribute("x", String(x + width / 2));
+        text.setAttribute("y", String(y + height / 2 + 4));
+        text.setAttribute("text-anchor", "middle");
+        text.setAttribute("font-size", "11");
+        text.setAttribute("font-weight", "700");
+        text.setAttribute("fill", "#fffdf7");
+        text.textContent = label;
+
+        badge.appendChild(bubble);
+        badge.appendChild(text);
+        return badge;
       };
 
       const applyTypstRenderings = (root, typstRenderings) => {
@@ -745,6 +789,22 @@ export class PreviewPanel implements vscode.Disposable {
           image.setAttribute("data-typst-rendering", "true");
           image.setAttribute("pointer-events", "none");
           nodeGroup.appendChild(image);
+        }
+      };
+
+      const applyConstraintCountBadges = (root, countsByNodeId) => {
+        for (const nodeGroup of Array.from(root.querySelectorAll("g.node"))) {
+          clearConstraintCountBadges(nodeGroup);
+          const targetId = nodeGroup.querySelector("title")?.textContent;
+          const count = targetId ? countsByNodeId?.[targetId] ?? 0 : 0;
+          if (!count) {
+            continue;
+          }
+          const shape = findNodeShape(nodeGroup);
+          if (!shape) {
+            continue;
+          }
+          nodeGroup.appendChild(createConstraintCountBadge(shape.getBBox(), count));
         }
       };
 
@@ -970,7 +1030,11 @@ export class PreviewPanel implements vscode.Disposable {
             }
           }
           for (const child of Array.from(nodeGroup.children)) {
-            if (child.tagName === "title" || child.tagName === "image") {
+            if (
+              child.tagName === "title"
+              || child.tagName === "image"
+              || child.getAttribute?.(constraintCountBadgeAttr) === "true"
+            ) {
               continue;
             }
             if (isHighlighted) {
@@ -1100,6 +1164,7 @@ export class PreviewPanel implements vscode.Disposable {
             bindGraphDragging(graph, rootSvg);
             rootSvg.dataset.boundSvg = "true";
           }
+          applyConstraintCountBadges(rootSvg, payload.constraintCountByNodeId || {});
           applyConstraintHighlights(rootSvg, payload.activeConstraintNodeIds || []);
         }
       });
