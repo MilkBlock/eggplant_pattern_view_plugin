@@ -721,8 +721,8 @@ export class PreviewPanel implements vscode.Disposable {
         badge.setAttribute("pointer-events", "none");
 
         const label = "C" + String(count);
-        const width = Math.max(26, 12 + label.length * 8);
-        const height = 18;
+        const width = Math.max(24, 10 + label.length * 7);
+        const height = 16;
         const x = bbox.x + bbox.width - width * 0.5;
         const y = bbox.y - height * 0.35;
 
@@ -731,19 +731,19 @@ export class PreviewPanel implements vscode.Disposable {
         bubble.setAttribute("y", String(y));
         bubble.setAttribute("width", String(width));
         bubble.setAttribute("height", String(height));
-        bubble.setAttribute("rx", "9");
-        bubble.setAttribute("ry", "9");
-        bubble.setAttribute("fill", "color-mix(in srgb, var(--vscode-editor-background) 18%, #c26d00 82%)");
-        bubble.setAttribute("stroke", "var(--vscode-editor-background)");
-        bubble.setAttribute("stroke-width", "1.5");
+        bubble.setAttribute("rx", "8");
+        bubble.setAttribute("ry", "8");
+        bubble.setAttribute("fill", "color-mix(in srgb, var(--vscode-editor-background) 82%, var(--vscode-editor-foreground) 18%)");
+        bubble.setAttribute("fill-opacity", "0.92");
+        bubble.setAttribute("stroke", "color-mix(in srgb, var(--vscode-editor-foreground) 24%, var(--vscode-editor-background) 76%)");
+        bubble.setAttribute("stroke-width", "1");
 
         const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
         text.setAttribute("x", String(x + width / 2));
-        text.setAttribute("y", String(y + height / 2 + 4));
+        text.setAttribute("y", String(y + height / 2 + 3.5));
         text.setAttribute("text-anchor", "middle");
-        text.setAttribute("font-size", "11");
-        text.setAttribute("font-weight", "700");
-        text.setAttribute("fill", "#fffdf7");
+        text.setAttribute("font-size", "10");
+        text.setAttribute("fill", "var(--vscode-editor-foreground)");
         text.textContent = label;
 
         badge.appendChild(bubble);
