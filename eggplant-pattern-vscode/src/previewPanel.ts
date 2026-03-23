@@ -605,8 +605,53 @@ export class PreviewPanel implements vscode.Disposable {
         return match ? Number(match[1]) : 0;
       };
 
+      const constraintHighlightColor = "#c26d00";
+      const constraintHighlightArtifactAttr = "data-constraint-highlight-artifact";
+
       const encodeSvgDataUri = (svgMarkup) => {
         return "data:image/svg+xml;base64," + btoa(unescape(encodeURIComponent(svgMarkup)));
+      };
+
+      const findNodeShape = (nodeGroup) => {
+        return Array.from(nodeGroup.children).find((child) => {
+          return child.tagName !== "title" && child.tagName !== "text" && child.tagName !== "image";
+        });
+      };
+
+      const clearConstraintHighlightArtifacts = (nodeGroup) => {
+        for (const artifact of Array.from(nodeGroup.querySelectorAll("[" + constraintHighlightArtifactAttr + '="true"]'))) {
+          artifact.remove();
+        }
+      };
+
+      const createConstraintHighlightHalo = (shape) => {
+        const halo = shape.cloneNode(true);
+        halo.setAttribute(constraintHighlightArtifactAttr, "true");
+        halo.setAttribute("fill", "none");
+        halo.setAttribute("stroke", constraintHighlightColor);
+        halo.setAttribute("stroke-width", "7");
+        halo.setAttribute("stroke-opacity", "0.28");
+        halo.setAttribute("pointer-events", "none");
+        halo.setAttribute("vector-effect", "non-scaling-stroke");
+        return halo;
+      };
+
+      const createConstraintHighlightRing = (bbox) => {
+        const ring = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+        const padding = 6;
+        ring.setAttribute(constraintHighlightArtifactAttr, "true");
+        ring.setAttribute("x", String(bbox.x - padding));
+        ring.setAttribute("y", String(bbox.y - padding));
+        ring.setAttribute("width", String(bbox.width + padding * 2));
+        ring.setAttribute("height", String(bbox.height + padding * 2));
+        ring.setAttribute("rx", "10");
+        ring.setAttribute("ry", "10");
+        ring.setAttribute("fill", "none");
+        ring.setAttribute("stroke", constraintHighlightColor);
+        ring.setAttribute("stroke-width", "3");
+        ring.setAttribute("pointer-events", "none");
+        ring.setAttribute("vector-effect", "non-scaling-stroke");
+        return ring;
       };
 
       const applyTypstRenderings = (root, typstRenderings) => {
@@ -617,9 +662,7 @@ export class PreviewPanel implements vscode.Disposable {
             continue;
           }
 
-          const shape = Array.from(nodeGroup.children).find((child) => {
-            return child.tagName !== "title" && child.tagName !== "text" && child.tagName !== "image";
-          });
+          const shape = findNodeShape(nodeGroup);
           if (!shape) {
             continue;
           }
@@ -646,6 +689,8 @@ export class PreviewPanel implements vscode.Disposable {
           image.setAttribute("y", String(bbox.y + (bbox.height - height) / 2));
           image.setAttribute("width", String(width));
           image.setAttribute("height", String(height));
+          image.setAttribute("data-typst-rendering", "true");
+          image.setAttribute("pointer-events", "none");
           nodeGroup.appendChild(image);
         }
       };
@@ -725,15 +770,24 @@ export class PreviewPanel implements vscode.Disposable {
         for (const nodeGroup of Array.from(root.querySelectorAll("g.node"))) {
           const targetId = nodeGroup.querySelector("title")?.textContent;
           const isHighlighted = targetId && highlights.has(targetId);
+          clearConstraintHighlightArtifacts(nodeGroup);
+          const shape = findNodeShape(nodeGroup);
+          const typstImage = nodeGroup.querySelector('image[data-typst-rendering="true"]');
+          if (isHighlighted && shape) {
+            nodeGroup.appendChild(createConstraintHighlightHalo(shape));
+            if (typstImage) {
+              nodeGroup.appendChild(createConstraintHighlightRing(shape.getBBox()));
+            }
+          }
           for (const child of Array.from(nodeGroup.children)) {
             if (child.tagName === "title" || child.tagName === "image") {
               continue;
             }
             if (isHighlighted) {
-              child.setAttribute("stroke", "#c26d00");
+              child.setAttribute("stroke", constraintHighlightColor);
               child.setAttribute("stroke-width", "2.5");
               if (child.tagName === "text") {
-                child.setAttribute("fill", "#c26d00");
+                child.setAttribute("fill", constraintHighlightColor);
               }
             }
           }
