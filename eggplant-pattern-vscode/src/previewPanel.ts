@@ -368,6 +368,12 @@ export class PreviewPanel implements vscode.Disposable {
       .graph svg {
         max-width: none;
         height: auto;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+      .graph svg * {
+        user-select: none;
+        -webkit-user-select: none;
       }
       .constraints-panel {
         border-left: 1px solid var(--border);
@@ -748,6 +754,22 @@ export class PreviewPanel implements vscode.Disposable {
         }
       };
 
+      const getEventNodeGroup = (event) => {
+        const path = typeof event.composedPath === "function" ? event.composedPath() : [];
+        for (const candidate of path) {
+          if (candidate instanceof Element && candidate.matches("g.node")) {
+            return candidate;
+          }
+        }
+        if (event.target instanceof Element) {
+          return event.target.closest("g.node");
+        }
+        if (event.target instanceof Node) {
+          return event.target.parentElement?.closest("g.node") || null;
+        }
+        return null;
+      };
+
       const bindSourceClicks = (root) => {
         for (const nodeGroup of Array.from(root.querySelectorAll("g.node"))) {
           const targetId = nodeGroup.querySelector("title")?.textContent;
@@ -758,8 +780,17 @@ export class PreviewPanel implements vscode.Disposable {
           nodeGroup.style.cursor = "pointer";
         }
 
+        root.addEventListener("mousedown", (event) => {
+          const nodeGroup = getEventNodeGroup(event);
+          const targetId = nodeGroup?.querySelector("title")?.textContent;
+          if (!targetId || !sourceTargetIds.has(targetId)) {
+            return;
+          }
+          event.preventDefault();
+        }, true);
+
         root.addEventListener("click", (event) => {
-          const nodeGroup = event.target instanceof Element ? event.target.closest("g.node") : null;
+          const nodeGroup = getEventNodeGroup(event);
           const targetId = nodeGroup?.querySelector("title")?.textContent;
           if (!targetId || !sourceTargetIds.has(targetId)) {
             return;
@@ -775,7 +806,7 @@ export class PreviewPanel implements vscode.Disposable {
         });
 
         root.addEventListener("dblclick", (event) => {
-          const nodeGroup = event.target instanceof Element ? event.target.closest("g.node") : null;
+          const nodeGroup = getEventNodeGroup(event);
           const targetId = nodeGroup?.querySelector("title")?.textContent;
           if (!targetId || !sourceTargetIds.has(targetId) || targetId.includes(":")) {
             return;
