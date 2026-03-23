@@ -6,7 +6,14 @@ import { collectTypstReplacementSources, compactConstraintLabel, DotLabelStyle, 
 import { configureExtractorResolution, ExtractorError, runExtractor } from "./extractor";
 import { PatternIr } from "./ir";
 import { clearMetadataSourceCache, discoverWorkspaceMetadataSourceFiles, loadMetadataSources, mergeExternalMetadata, pickMetadataSourceFiles } from "./metadataSources";
-import { PreviewMetadataSourceEntry, PreviewMetadataSourceKind, PreviewMetadataSourcesView, PreviewPanel, PreviewSourceMode } from "./previewPanel";
+import {
+  PreviewConstraintFilterMode,
+  PreviewMetadataSourceEntry,
+  PreviewMetadataSourceKind,
+  PreviewMetadataSourcesView,
+  PreviewPanel,
+  PreviewSourceMode
+} from "./previewPanel";
 import { dotToSvg } from "./svg";
 import { renderTypstSnippets } from "./typst";
 
@@ -106,6 +113,8 @@ class PreviewController {
   private metadataSourceFiles: string[];
   private autoMetadataSourceFiles: string[] = [];
   private activeConstraintId: string | null = null;
+  private constraintFilterMode: PreviewConstraintFilterMode = "all";
+  private constraintFilterNodeId: string | null = null;
   private metadataWatchers: vscode.Disposable[] = [];
   private metadataRefreshTimer: NodeJS.Timeout | undefined;
   private readonly callbacks: {
@@ -114,6 +123,8 @@ class PreviewController {
     onLabelStyleChange: (labelStyle: DotLabelStyle) => Promise<void>;
     onRecursiveStrategyChange: (strategy: RecursiveStrategy) => Promise<void>;
     onSourceClick: (targetId: string) => Promise<void>;
+    onConstraintFilterChange: (mode: PreviewConstraintFilterMode) => Promise<void>;
+    onConstraintNodeDrilldown: (targetId: string) => Promise<void>;
     onConstraintClick: (constraintId: string) => Promise<void>;
     onConstraintOpen: (constraintId: string) => Promise<void>;
     onSelectMetadataSources: () => Promise<void>;
@@ -140,6 +151,12 @@ class PreviewController {
       },
       onSourceClick: async (targetId) => {
         await this.revealSourceTarget(targetId);
+      },
+      onConstraintFilterChange: async (mode: PreviewConstraintFilterMode) => {
+        await this.setConstraintFilterMode(mode);
+      },
+      onConstraintNodeDrilldown: async (targetId: string) => {
+        await this.drilldownConstraintNode(targetId);
       },
       onConstraintClick: async (constraintId) => {
         await this.selectConstraint(constraintId);
@@ -201,6 +218,8 @@ class PreviewController {
   async showCurrentMode(mode: DotViewMode): Promise<void> {
     this.currentModeOverride = mode;
     this.activeConstraintId = null;
+    this.constraintFilterMode = "all";
+    this.constraintFilterNodeId = null;
     if (this.lastPreview) {
       await this.renderLastPreview(
         this.lastPreview.editor,
@@ -237,6 +256,8 @@ class PreviewController {
   async showCurrentLabelStyle(labelStyle: DotLabelStyle): Promise<void> {
     this.currentLabelStyle = labelStyle;
     this.activeConstraintId = null;
+    this.constraintFilterMode = "all";
+    this.constraintFilterNodeId = null;
     await vscode.workspace.getConfiguration().update(
       "eggplantPattern.defaultLabelStyle",
       labelStyle,
@@ -251,6 +272,8 @@ class PreviewController {
   async showCurrentSourceMode(sourceMode: PreviewSourceMode): Promise<void> {
     this.currentSourceMode = sourceMode;
     this.activeConstraintId = null;
+    this.constraintFilterMode = "all";
+    this.constraintFilterNodeId = null;
     if (this.lastPreview) {
       await this.renderLastPreview(
         this.lastPreview.editor,
@@ -266,6 +289,8 @@ class PreviewController {
   async showCurrentRecursiveStrategy(strategy: RecursiveStrategy): Promise<void> {
     this.currentRecursiveStrategy = strategy;
     this.activeConstraintId = null;
+    this.constraintFilterMode = "all";
+    this.constraintFilterNodeId = null;
     await vscode.workspace.getConfiguration().update(
       "eggplantPattern.defaultRecursiveStrategy",
       strategy,
@@ -392,7 +417,21 @@ class PreviewController {
       ...this.metadataSourceFiles
     ]))
   ): Promise<void> {
-    if (!baseIr.constraints.some((constraint) => constraint.id === this.activeConstraintId)) {
+    const constraintEntries = buildConstraintEntries(baseIr);
+    const constraintFilterNodeId = this.constraintFilterNodeId;
+    if (
+      this.constraintFilterMode === "node-specific"
+      && (!constraintFilterNodeId || !constraintEntries.some((constraint) => constraint.referencedNodeIds.includes(constraintFilterNodeId)))
+    ) {
+      this.constraintFilterMode = "all";
+      this.constraintFilterNodeId = null;
+    }
+    const visibleConstraints = filterConstraintEntries(
+      constraintEntries,
+      this.constraintFilterMode,
+      this.constraintFilterNodeId
+    );
+    if (!visibleConstraints.some((constraint) => constraint.id === this.activeConstraintId)) {
       this.activeConstraintId = null;
     }
     const metadataSourcesView = buildMetadataSourcesView(
@@ -426,6 +465,9 @@ class PreviewController {
       recursiveStrategy,
       metadataSourceFiles,
       metadataSourcesView,
+      constraintEntries,
+      this.constraintFilterMode,
+      this.constraintFilterNodeId,
       this.activeConstraintId,
       previewInput.recoveryMetadata,
       previewInput.notice
@@ -437,6 +479,48 @@ class PreviewController {
       return;
     }
     this.activeConstraintId = this.activeConstraintId === constraintId ? null : constraintId;
+    await this.renderLastPreview(
+      this.lastPreview.editor,
+      this.lastPreview.ir,
+      this.currentMode(),
+      this.currentLabelStyle,
+      this.currentRecursiveStrategy,
+      true
+    );
+  }
+
+  private async setConstraintFilterMode(mode: PreviewConstraintFilterMode): Promise<void> {
+    if (mode === this.constraintFilterMode) {
+      return;
+    }
+    this.constraintFilterMode = mode;
+    if (mode === "all") {
+      this.constraintFilterNodeId = null;
+    }
+    if (!this.lastPreview) {
+      return;
+    }
+    await this.renderLastPreview(
+      this.lastPreview.editor,
+      this.lastPreview.ir,
+      this.currentMode(),
+      this.currentLabelStyle,
+      this.currentRecursiveStrategy,
+      true
+    );
+  }
+
+  private async drilldownConstraintNode(targetId: string): Promise<void> {
+    if (!this.lastPreview) {
+      return;
+    }
+    const visibleConstraints = buildConstraintEntries(this.lastPreview.ir)
+      .filter((constraint) => constraint.referencedNodeIds.includes(targetId));
+    this.constraintFilterMode = "node-specific";
+    this.constraintFilterNodeId = targetId;
+    if (!visibleConstraints.some((constraint) => constraint.id === this.activeConstraintId)) {
+      this.activeConstraintId = null;
+    }
     await this.renderLastPreview(
       this.lastPreview.editor,
       this.lastPreview.ir,
@@ -621,6 +705,9 @@ async function renderDot(
   recursiveStrategy: RecursiveStrategy,
   metadataSourceFiles: string[],
   metadataSourcesView: PreviewMetadataSourcesView,
+  constraints: ReturnType<typeof buildConstraintEntries>,
+  constraintFilterMode: PreviewConstraintFilterMode,
+  constraintFilterNodeId: string | null,
   activeConstraintId: string | null,
   recoveryMetadata: ReturnType<typeof summarizeRuntimeActionSampleTrace> | null,
   notice: string | null
@@ -631,8 +718,8 @@ async function renderDot(
   const dot = patternIrToDotWithMode(ir, mode, labelStyle, recursiveStrategy, typstRenderings);
   const svg = await dotToSvg(dot);
   const strategySuffix = labelStyle === "recursive" ? `, ${recursiveStrategy}` : "";
-  const constraints = buildConstraintEntries(ir);
-  const activeConstraint = constraints.find((constraint) => constraint.id === activeConstraintId) ?? null;
+  const visibleConstraints = filterConstraintEntries(constraints, constraintFilterMode, constraintFilterNodeId);
+  const activeConstraint = visibleConstraints.find((constraint) => constraint.id === activeConstraintId) ?? null;
   await panel.render({
     title: `Eggplant Pattern (${modeLabel(mode)}, ${sourceMode}, ${labelStyle}${strategySuffix}): ${editor.document.fileName.split("/").pop() ?? "Preview"}`,
     mode,
@@ -644,7 +731,9 @@ async function renderDot(
     svg,
     typstRenderings,
     sourceTargetIds: collectSourceTargetIds(ir, mode),
-    constraints,
+    constraints: visibleConstraints,
+    constraintFilterMode,
+    constraintFilterNodeId,
     activeConstraintId: activeConstraint?.id ?? null,
     activeConstraintNodeIds: activeConstraint?.referencedNodeIds ?? [],
     metadataSourceFiles,
@@ -678,6 +767,8 @@ async function renderNotice(panel: PreviewPanel, editor: vscode.TextEditor, mess
     typstRenderings: {},
     sourceTargetIds: [],
     constraints: [],
+    constraintFilterMode: "all",
+    constraintFilterNodeId: null,
     activeConstraintId: null,
     activeConstraintNodeIds: [],
     metadataSourceFiles: [],
@@ -728,6 +819,8 @@ async function renderTraceUnavailableNotice(
     typstRenderings: {},
     sourceTargetIds: [],
     constraints: buildConstraintEntries(irlessPatternIr()),
+    constraintFilterMode: "all",
+    constraintFilterNodeId: null,
     activeConstraintId: null,
     activeConstraintNodeIds: [],
     metadataSourceFiles,
@@ -810,6 +903,17 @@ function buildConstraintEntries(ir: PatternIr): Array<{ id: string; compactText:
       return referenced.length > 0 ? referenced : [...ir.roots];
     })()
   }));
+}
+
+function filterConstraintEntries(
+  constraints: Array<{ id: string; compactText: string; fullText: string; referencedNodeIds: string[] }>,
+  mode: PreviewConstraintFilterMode,
+  nodeId: string | null
+): Array<{ id: string; compactText: string; fullText: string; referencedNodeIds: string[] }> {
+  if (mode !== "node-specific" || !nodeId) {
+    return constraints;
+  }
+  return constraints.filter((constraint) => constraint.referencedNodeIds.includes(nodeId));
 }
 
 function irlessPatternIr(): PatternIr {

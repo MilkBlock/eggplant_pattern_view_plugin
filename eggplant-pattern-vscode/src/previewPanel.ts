@@ -3,6 +3,7 @@ import { DotLabelStyle, DotViewMode, RecursiveStrategy } from "./dot";
 import { RenderedTypstSnippet } from "./typst";
 
 export type PreviewSourceMode = "ast" | "trace";
+export type PreviewConstraintFilterMode = "all" | "node-specific";
 
 export type PreviewMetadataSourceKind = "current" | "auto" | "manual";
 
@@ -45,6 +46,8 @@ export interface PreviewPanelState {
   typstRenderings: Record<string, RenderedTypstSnippet>;
   sourceTargetIds: string[];
   constraints: PreviewConstraintEntry[];
+  constraintFilterMode: PreviewConstraintFilterMode;
+  constraintFilterNodeId: string | null;
   activeConstraintId: string | null;
   activeConstraintNodeIds: string[];
   metadataSourceFiles: string[];
@@ -62,6 +65,8 @@ interface PreviewPanelCallbacks {
   onLabelStyleChange(labelStyle: DotLabelStyle): Promise<void>;
   onRecursiveStrategyChange(strategy: RecursiveStrategy): Promise<void>;
   onSourceClick(targetId: string): Promise<void>;
+  onConstraintFilterChange(mode: PreviewConstraintFilterMode): Promise<void>;
+  onConstraintNodeDrilldown(targetId: string): Promise<void>;
   onConstraintClick(constraintId: string): Promise<void>;
   onConstraintOpen(constraintId: string): Promise<void>;
   onSelectMetadataSources(): Promise<void>;
@@ -75,6 +80,8 @@ type IncomingMessage =
   | { type: "changeLabelStyle"; labelStyle: DotLabelStyle }
   | { type: "changeRecursiveStrategy"; recursiveStrategy: RecursiveStrategy }
   | { type: "clickSource"; targetId: string }
+  | { type: "changeConstraintFilter"; constraintFilterMode: PreviewConstraintFilterMode }
+  | { type: "drilldownConstraintNode"; targetId: string }
   | { type: "clickConstraint"; constraintId: string }
   | { type: "openConstraint"; constraintId: string }
   | { type: "selectMetadataSources" }
@@ -188,6 +195,12 @@ export class PreviewPanel implements vscode.Disposable {
         return;
       case "clickSource":
         await this.callbacks.onSourceClick(message.targetId);
+        return;
+      case "changeConstraintFilter":
+        await this.callbacks.onConstraintFilterChange(message.constraintFilterMode);
+        return;
+      case "drilldownConstraintNode":
+        await this.callbacks.onConstraintNodeDrilldown(message.targetId);
         return;
       case "clickConstraint":
         await this.callbacks.onConstraintClick(message.constraintId);
@@ -376,6 +389,19 @@ export class PreviewPanel implements vscode.Disposable {
         font-size: 12px;
         color: var(--muted);
       }
+      .constraints-toolbar {
+        display: flex;
+        gap: 8px;
+        margin-top: 8px;
+      }
+      .constraints-toolbar label {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .constraints-toolbar select {
+        flex: 1;
+        min-width: 0;
+      }
       .constraints-list {
         overflow: auto;
         padding: 8px 10px;
@@ -507,7 +533,14 @@ export class PreviewPanel implements vscode.Disposable {
         <aside class="constraints-panel">
           <div class="constraints-header">
             <h3>Constraints</h3>
-            <p>Single click highlights involved nodes. Double click jumps to the constraint definition.</p>
+            <p>Single click highlights involved nodes. Double click jumps to the constraint definition. Double click a graph node to drill into its related constraints.</p>
+            <div class="constraints-toolbar">
+              <label for="constraintFilter">Filter</label>
+              <select id="constraintFilter">
+                <option value="all">All Constraints</option>
+                <option value="node-specific">Node-Specific Constraints</option>
+              </select>
+            </div>
           </div>
           <div class="constraints-list" id="constraintsList"></div>
           <div class="constraint-selection">
@@ -548,11 +581,13 @@ export class PreviewPanel implements vscode.Disposable {
       const meta = document.getElementById("meta");
       const graph = document.getElementById("graph");
       const constraintsList = document.getElementById("constraintsList");
+      const constraintFilter = document.getElementById("constraintFilter");
       const constraintNodeList = document.getElementById("constraintNodeList");
       const constraintSelectionEmpty = document.getElementById("constraintSelectionEmpty");
       const sourceTargetIds = new Set();
       let metadataViewerVisible = false;
       let suppressGraphClicksUntil = 0;
+      let pendingSourceClickTimeout = null;
       graph.dataset.draggable = "false";
       graph.dataset.dragging = "false";
 
@@ -714,8 +749,23 @@ export class PreviewPanel implements vscode.Disposable {
           }
           nodeGroup.style.cursor = "pointer";
           nodeGroup.addEventListener("click", () => {
-            vscode.postMessage({ type: "clickSource", targetId });
+            if (pendingSourceClickTimeout) {
+              clearTimeout(pendingSourceClickTimeout);
+            }
+            pendingSourceClickTimeout = setTimeout(() => {
+              pendingSourceClickTimeout = null;
+              vscode.postMessage({ type: "clickSource", targetId });
+            }, 220);
           });
+          if (!targetId.includes(":")) {
+            nodeGroup.addEventListener("dblclick", () => {
+              if (pendingSourceClickTimeout) {
+                clearTimeout(pendingSourceClickTimeout);
+                pendingSourceClickTimeout = null;
+              }
+              vscode.postMessage({ type: "drilldownConstraintNode", targetId });
+            });
+          }
         }
       };
 
@@ -802,12 +852,23 @@ export class PreviewPanel implements vscode.Disposable {
         }
       };
 
-      const renderConstraints = (constraints, activeConstraintId, activeConstraintNodeIds) => {
+      const renderConstraints = (
+        constraints,
+        activeConstraintId,
+        activeConstraintNodeIds,
+        constraintFilterMode,
+        constraintFilterNodeId
+      ) => {
         constraintsList.innerHTML = "";
+        constraintFilter.value = constraintFilterMode || "all";
         if (!constraints || constraints.length === 0) {
           const empty = document.createElement("p");
           empty.className = "metadata-empty";
-          empty.textContent = "No constraints in this scope.";
+          empty.textContent = constraintFilterMode === "node-specific"
+            ? constraintFilterNodeId
+              ? "No constraints reference node " + constraintFilterNodeId + "."
+              : "Double click a graph node to inspect its related constraints."
+            : "No constraints in this scope.";
           constraintsList.appendChild(empty);
           setConstraintNodeList([]);
           return;
@@ -886,6 +947,10 @@ export class PreviewPanel implements vscode.Disposable {
         vscode.postMessage({ type: "changeSourceMode", sourceMode: sourceMode.value });
       });
 
+      constraintFilter.addEventListener("change", () => {
+        vscode.postMessage({ type: "changeConstraintFilter", constraintFilterMode: constraintFilter.value });
+      });
+
       recursiveStrategy.addEventListener("change", () => {
         vscode.postMessage({ type: "changeRecursiveStrategy", recursiveStrategy: recursiveStrategy.value });
       });
@@ -962,7 +1027,13 @@ export class PreviewPanel implements vscode.Disposable {
           ? " | diag: " + payload.recoveryDiagnostics.join(" ; ")
           : "";
         meta.textContent = payload.notice || payload.fileName + " | " + payload.mode + " | source=" + payload.sourceMode + " | " + payload.labelStyle + (payload.labelStyle === "recursive" ? " | " + payload.recursiveStrategy : "") + sourceSummary + recoverySummary + recoveryDiagnostics;
-        renderConstraints(payload.constraints || [], payload.activeConstraintId, payload.activeConstraintNodeIds || []);
+        renderConstraints(
+          payload.constraints || [],
+          payload.activeConstraintId,
+          payload.activeConstraintNodeIds || [],
+          payload.constraintFilterMode || "all",
+          payload.constraintFilterNodeId || null
+        );
         sourceWarning.textContent = payload.sourceWarning || "";
         switchToAst.hidden = !payload.showSwitchToAst;
         graph.innerHTML = payload.svg;
@@ -1001,6 +1072,8 @@ export async function dispatchPreviewPanelTestMessage(
     | { type: "changeLabelStyle"; labelStyle: DotLabelStyle }
     | { type: "changeRecursiveStrategy"; recursiveStrategy: RecursiveStrategy }
     | { type: "clickSource"; targetId: string }
+    | { type: "changeConstraintFilter"; constraintFilterMode: PreviewConstraintFilterMode }
+    | { type: "drilldownConstraintNode"; targetId: string }
     | { type: "clickConstraint"; constraintId: string }
     | { type: "openConstraint"; constraintId: string }
     | { type: "selectMetadataSources" }

@@ -457,6 +457,28 @@ suite("eggplant pattern extension", () => {
     assert.equal(selectedText(editor), "l_r_eq");
   });
 
+  test("node drilldown switches the constraints panel into node-specific mode", async () => {
+    const editor = await openEditor(RUST_FIXTURE);
+    placeCursor(editor, "demo_assert_block");
+
+    await vscode.commands.executeCommand("eggplant-pattern.preview");
+    let preview = await waitForPreviewState((state) => state.mode === "combined" && state.constraints.length > 0);
+    assert.equal(preview.constraintFilterMode, "all");
+    assert.equal(preview.constraintFilterNodeId, null);
+
+    await dispatchPreviewPanelTestMessage({ type: "drilldownConstraintNode", targetId: "l" });
+    preview = await waitForPreviewState((state) =>
+      state.constraintFilterMode === "node-specific" && state.constraintFilterNodeId === "l"
+    );
+    assert.equal(preview.constraints.length, 1);
+    assert.equal(preview.constraints[0].id, "constraint_0");
+
+    await dispatchPreviewPanelTestMessage({ type: "changeConstraintFilter", constraintFilterMode: "all" });
+    preview = await waitForPreviewState((state) => state.constraintFilterMode === "all");
+    assert.equal(preview.constraintFilterNodeId, null);
+    assert.ok(preview.constraints.some((constraint) => constraint.id === "constraint_0"));
+  });
+
   test("trace source surfaces sampled action recovery summary and diagnostics", async () => {
     const editor = await openEditor(RUST_FIXTURE);
     placeCursor(editor, "ctx.union(pat.p, op_value)");
