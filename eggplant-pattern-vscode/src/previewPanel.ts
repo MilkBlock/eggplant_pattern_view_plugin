@@ -733,9 +733,9 @@ export class PreviewPanel implements vscode.Disposable {
         bubble.setAttribute("height", String(height));
         bubble.setAttribute("rx", "8");
         bubble.setAttribute("ry", "8");
-        bubble.setAttribute("fill", "color-mix(in srgb, var(--vscode-editor-background) 82%, var(--vscode-editor-foreground) 18%)");
-        bubble.setAttribute("fill-opacity", "0.92");
-        bubble.setAttribute("stroke", "color-mix(in srgb, var(--vscode-editor-foreground) 24%, var(--vscode-editor-background) 76%)");
+        bubble.setAttribute("fill", "color-mix(in srgb, var(--vscode-editor-background) 94%, var(--vscode-editor-foreground) 6%)");
+        bubble.setAttribute("fill-opacity", "0.88");
+        bubble.setAttribute("stroke", "color-mix(in srgb, var(--vscode-panel-border) 88%, var(--vscode-editor-foreground) 12%)");
         bubble.setAttribute("stroke-width", "1");
 
         const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
@@ -743,7 +743,7 @@ export class PreviewPanel implements vscode.Disposable {
         text.setAttribute("y", String(y + height / 2 + 3.5));
         text.setAttribute("text-anchor", "middle");
         text.setAttribute("font-size", "10");
-        text.setAttribute("fill", "var(--vscode-editor-foreground)");
+        text.setAttribute("fill", "var(--vscode-descriptionForeground)");
         text.textContent = label;
 
         badge.appendChild(bubble);
