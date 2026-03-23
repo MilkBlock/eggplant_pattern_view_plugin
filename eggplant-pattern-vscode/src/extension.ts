@@ -421,7 +421,8 @@ class PreviewController {
     const constraintFilterNodeId = this.constraintFilterNodeId;
     if (
       this.constraintFilterMode === "node-specific"
-      && (!constraintFilterNodeId || !constraintEntries.some((constraint) => constraint.referencedNodeIds.includes(constraintFilterNodeId)))
+      && constraintFilterNodeId
+      && !constraintEntries.some((constraint) => constraint.referencedNodeIds.includes(constraintFilterNodeId))
     ) {
       this.constraintFilterMode = "all";
       this.constraintFilterNodeId = null;
@@ -910,8 +911,11 @@ function filterConstraintEntries(
   mode: PreviewConstraintFilterMode,
   nodeId: string | null
 ): Array<{ id: string; compactText: string; fullText: string; referencedNodeIds: string[] }> {
-  if (mode !== "node-specific" || !nodeId) {
+  if (mode !== "node-specific") {
     return constraints;
+  }
+  if (!nodeId) {
+    return [];
   }
   return constraints.filter((constraint) => constraint.referencedNodeIds.includes(nodeId));
 }
