@@ -438,22 +438,23 @@ suite("eggplant pattern extension", () => {
 
   test("constraint list click highlights referenced nodes and double click reveals source range", async () => {
     const editor = await openEditor(RUST_FIXTURE);
-    placeCursor(editor, "MyTx::add_rule");
+    placeCursor(editor, "demo_assert_block");
 
     await vscode.commands.executeCommand("eggplant-pattern.preview");
     let preview = await waitForPreviewState((state) => state.mode === "combined" && state.constraints.length > 0);
     assert.equal(preview.activeConstraintId, null);
+    assert.equal(preview.constraints[0].compactText, "l == r");
 
     await dispatchPreviewPanelTestMessage({ type: "clickConstraint", constraintId: "constraint_0" });
     preview = await waitForPreviewState((state) => state.activeConstraintId === "constraint_0");
-    assert.deepEqual(preview.activeConstraintNodeIds, ["l", "r", "p"]);
+    assert.deepEqual(preview.activeConstraintNodeIds, ["l", "r"]);
     assert.deepEqual(
       preview.constraints.find((constraint) => constraint.id === "constraint_0")?.referencedNodeIds,
-      ["l", "r", "p"]
+      ["l", "r"]
     );
 
     await dispatchPreviewPanelTestMessage({ type: "openConstraint", constraintId: "constraint_0" });
-    assert.equal(selectedText(editor), "eq");
+    assert.equal(selectedText(editor), "l_r_eq");
   });
 
   test("trace source surfaces sampled action recovery summary and diagnostics", async () => {
