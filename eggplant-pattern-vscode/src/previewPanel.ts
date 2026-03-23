@@ -588,6 +588,7 @@ export class PreviewPanel implements vscode.Disposable {
       let metadataViewerVisible = false;
       let suppressGraphClicksUntil = 0;
       let pendingSourceClickTimeout = null;
+      const sourceClickDelayMs = 400;
       graph.dataset.draggable = "false";
       graph.dataset.dragging = "false";
 
@@ -755,7 +756,7 @@ export class PreviewPanel implements vscode.Disposable {
             pendingSourceClickTimeout = setTimeout(() => {
               pendingSourceClickTimeout = null;
               vscode.postMessage({ type: "clickSource", targetId });
-            }, 220);
+            }, sourceClickDelayMs);
           });
           if (!targetId.includes(":")) {
             nodeGroup.addEventListener("dblclick", () => {
