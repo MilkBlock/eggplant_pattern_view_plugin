@@ -545,6 +545,7 @@ export class PreviewPanel implements vscode.Disposable {
       const constraintSelectionEmpty = document.getElementById("constraintSelectionEmpty");
       const sourceTargetIds = new Set();
       let metadataViewerVisible = false;
+      let suppressGraphClicksUntil = 0;
 
       const syncRecursiveStrategyState = () => {
         recursiveStrategy.disabled = labelStyle.value !== "recursive";
@@ -707,6 +708,70 @@ export class PreviewPanel implements vscode.Disposable {
             vscode.postMessage({ type: "clickSource", targetId });
           });
         }
+      };
+
+      const bindGraphDragging = (container, root) => {
+        let dragState = null;
+        const dragThreshold = 4;
+        container.style.cursor = "grab";
+
+        root.addEventListener("click", (event) => {
+          if (Date.now() < suppressGraphClicksUntil) {
+            event.preventDefault();
+            event.stopPropagation();
+          }
+        }, true);
+
+        container.addEventListener("pointerdown", (event) => {
+          if (event.button !== 0) {
+            return;
+          }
+          dragState = {
+            pointerId: event.pointerId,
+            startX: event.clientX,
+            startY: event.clientY,
+            startScrollLeft: container.scrollLeft,
+            startScrollTop: container.scrollTop,
+            moved: false
+          };
+          container.setPointerCapture(event.pointerId);
+        });
+
+        container.addEventListener("pointermove", (event) => {
+          if (!dragState || dragState.pointerId !== event.pointerId) {
+            return;
+          }
+          const deltaX = event.clientX - dragState.startX;
+          const deltaY = event.clientY - dragState.startY;
+          if (!dragState.moved && Math.hypot(deltaX, deltaY) >= dragThreshold) {
+            dragState.moved = true;
+            container.style.cursor = "grabbing";
+          }
+          if (!dragState.moved) {
+            return;
+          }
+          container.scrollLeft = dragState.startScrollLeft - deltaX;
+          container.scrollTop = dragState.startScrollTop - deltaY;
+          event.preventDefault();
+        });
+
+        const finishDrag = (event) => {
+          if (!dragState || dragState.pointerId !== event.pointerId) {
+            return;
+          }
+          const didMove = dragState.moved;
+          dragState = null;
+          container.style.cursor = "grab";
+          if (container.hasPointerCapture(event.pointerId)) {
+            container.releasePointerCapture(event.pointerId);
+          }
+          if (didMove) {
+            suppressGraphClicksUntil = Date.now() + 150;
+          }
+        };
+
+        container.addEventListener("pointerup", finishDrag);
+        container.addEventListener("pointercancel", finishDrag);
       };
 
       const setConstraintNodeList = (nodeIds) => {
@@ -891,6 +956,7 @@ export class PreviewPanel implements vscode.Disposable {
         if (rootSvg) {
           applyTypstRenderings(rootSvg, payload.typstRenderings);
           bindSourceClicks(rootSvg);
+          bindGraphDragging(graph, rootSvg);
           applyConstraintHighlights(rootSvg, payload.activeConstraintNodeIds || []);
         }
       });
