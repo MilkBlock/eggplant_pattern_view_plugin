@@ -1,0 +1,11 @@
+.git/**
+.github/**
+.humanize/**
+src/**
+scripts/**
+test-fixtures/**
+node_modules/**
+out/test/**
+.vscode-test/**
+*.ts
+*.vsix

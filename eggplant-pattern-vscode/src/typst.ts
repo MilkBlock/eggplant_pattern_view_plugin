@@ -1,4 +1,6 @@
 import { spawn } from "child_process";
+import { existsSync } from "fs";
+import * as path from "path";
 
 export interface RenderedTypstSnippet {
   svg: string;
@@ -7,6 +9,7 @@ export interface RenderedTypstSnippet {
 }
 
 const renderCache = new Map<string, Promise<RenderedTypstSnippet | null>>();
+let missingTypstWarningShown = false;
 
 export async function renderTypstSnippets(
   sources: Array<{ targetId: string; source: string }>
@@ -41,7 +44,8 @@ async function renderTypstSnippetUncached(source: string): Promise<RenderedTypst
       width: parseDimension(stdout, "width"),
       height: parseDimension(stdout, "height")
     };
-  } catch {
+  } catch (error) {
+    warnTypstFailure(error);
     return null;
   }
 }
@@ -53,7 +57,7 @@ function parseDimension(svg: string, attr: "width" | "height"): number {
 
 function runTypst(document: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn("typst", ["compile", "-", "-", "--format", "svg"], {
+    const child = spawn(resolveTypstExecutable(), ["compile", "-", "-", "--format", "svg"], {
       stdio: ["pipe", "pipe", "pipe"]
     });
 
@@ -78,6 +82,49 @@ function runTypst(document: string): Promise<string> {
 
     child.stdin.end(document);
   });
+}
+
+function resolveTypstExecutable(): string {
+  const configuredPath = configuredTypstPath();
+  if (configuredPath) {
+    return configuredPath;
+  }
+
+  const envPath = process.env.EGGPLANT_PATTERN_TYPST_PATH?.trim();
+  if (envPath) {
+    return envPath;
+  }
+
+  const localAppData = process.env.LOCALAPPDATA;
+  if (localAppData) {
+    const wingetAlias = path.join(localAppData, "Microsoft", "WinGet", "Links", "typst.exe");
+    if (existsSync(wingetAlias)) {
+      return wingetAlias;
+    }
+  }
+
+  return "typst";
+}
+
+function configuredTypstPath(): string {
+  try {
+    // Keep this module testable outside the VS Code extension host.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const vscode = require("vscode") as typeof import("vscode");
+    const value = vscode.workspace.getConfiguration().get<string>("eggplantPattern.typstPath", "").trim();
+    return value || "";
+  } catch {
+    return "";
+  }
+}
+
+function warnTypstFailure(error: unknown): void {
+  if (missingTypstWarningShown) {
+    return;
+  }
+  missingTypstWarningShown = true;
+  const message = error instanceof Error ? error.message : String(error);
+  console.warn(`Eggplant pattern typst rendering disabled: ${message}`);
 }
 
 export function normalizeTypstMathSource(source: string): string {

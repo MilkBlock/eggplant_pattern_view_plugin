@@ -25,14 +25,6 @@
     "onCommand:eggplant-pattern.selectDotView"
   ],
   "main": "./out/extension.js",
-  "files": [
-    "out/*.js",
-    "out/*.js.map",
-    "bin/**",
-    "LICENSE",
-    "package.json",
-    "README.md"
-  ],
   "contributes": {
     "commands": [
       {
@@ -72,6 +64,11 @@
           "type": "string",
           "default": "",
           "description": "Optional absolute path to the eggplant-pattern-extractor binary."
+        },
+        "eggplantPattern.typstPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional absolute path to the Typst CLI executable used for formula rendering in graph nodes."
         },
         "eggplantPattern.autoPreview": {
           "type": "boolean",
@@ -124,8 +121,8 @@
     "compile": "tsc -p .",
     "watch": "tsc -w -p .",
     "package:extension": "npm run build:extractor && npm run bundle:extractor && npm run compile",
-    "package:vsix": "npm run package:extension && npx @vscode/vsce package",
-    "package:vsix:prebuilt": "npm run compile && npx @vscode/vsce package",
+    "package:vsix": "npm run package:extension && npx @vscode/vsce package --no-dependencies",
+    "package:vsix:prebuilt": "npm run compile && npx @vscode/vsce package --no-dependencies",
     "publish:vsix": "npm run package:vsix && npx @vscode/vsce publish --packagePath *.vsix",
     "pretest": "npm run build:extractor && npm run bundle:extractor && npm run compile",
     "pretest:extension-host": "npm run build:extractor && npm run bundle:extractor && npm run compile",
