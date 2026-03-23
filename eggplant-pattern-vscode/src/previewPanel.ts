@@ -285,6 +285,13 @@ export class PreviewPanel implements vscode.Disposable {
         padding: 12px;
         min-width: 0;
       }
+      .graph[data-draggable="true"] {
+        cursor: grab;
+      }
+      .graph[data-dragging="true"] {
+        cursor: grabbing;
+        user-select: none;
+      }
       .metadata-viewer {
         padding: 12px;
         border-bottom: 1px solid var(--border);
@@ -546,6 +553,8 @@ export class PreviewPanel implements vscode.Disposable {
       const sourceTargetIds = new Set();
       let metadataViewerVisible = false;
       let suppressGraphClicksUntil = 0;
+      graph.dataset.draggable = "false";
+      graph.dataset.dragging = "false";
 
       const syncRecursiveStrategyState = () => {
         recursiveStrategy.disabled = labelStyle.value !== "recursive";
@@ -711,9 +720,7 @@ export class PreviewPanel implements vscode.Disposable {
       };
 
       const bindGraphDragging = (container, root) => {
-        let dragState = null;
-        const dragThreshold = 4;
-        container.style.cursor = "grab";
+        container.dataset.draggable = "true";
 
         root.addEventListener("click", (event) => {
           if (Date.now() < suppressGraphClicksUntil) {
@@ -721,6 +728,13 @@ export class PreviewPanel implements vscode.Disposable {
             event.stopPropagation();
           }
         }, true);
+
+        if (container.dataset.dragBound === "true") {
+          return;
+        }
+        container.dataset.dragBound = "true";
+        let dragState = null;
+        const dragThreshold = 4;
 
         container.addEventListener("pointerdown", (event) => {
           if (event.button !== 0) {
@@ -745,7 +759,7 @@ export class PreviewPanel implements vscode.Disposable {
           const deltaY = event.clientY - dragState.startY;
           if (!dragState.moved && Math.hypot(deltaX, deltaY) >= dragThreshold) {
             dragState.moved = true;
-            container.style.cursor = "grabbing";
+            container.dataset.dragging = "true";
           }
           if (!dragState.moved) {
             return;
@@ -761,7 +775,7 @@ export class PreviewPanel implements vscode.Disposable {
           }
           const didMove = dragState.moved;
           dragState = null;
-          container.style.cursor = "grab";
+          container.dataset.dragging = "false";
           if (container.hasPointerCapture(event.pointerId)) {
             container.releasePointerCapture(event.pointerId);
           }
