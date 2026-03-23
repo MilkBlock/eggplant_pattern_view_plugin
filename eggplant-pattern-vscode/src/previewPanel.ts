@@ -756,24 +756,35 @@ export class PreviewPanel implements vscode.Disposable {
             continue;
           }
           nodeGroup.style.cursor = "pointer";
-          nodeGroup.addEventListener("click", (event) => {
-            if (event.detail >= 2 && !targetId.includes(":")) {
-              clearPendingSourceClick();
-              vscode.postMessage({ type: "drilldownConstraintNode", targetId });
-              return;
-            }
-            clearPendingSourceClick();
-            pendingSourceClickTimeout = setTimeout(() => {
-              pendingSourceClickTimeout = null;
-              vscode.postMessage({ type: "clickSource", targetId });
-            }, sourceClickDelayMs);
-          });
-          if (!targetId.includes(":")) {
-            nodeGroup.addEventListener("dblclick", () => {
-              clearPendingSourceClick();
-            });
-          }
         }
+
+        root.addEventListener("click", (event) => {
+          const nodeGroup = event.target instanceof Element ? event.target.closest("g.node") : null;
+          const targetId = nodeGroup?.querySelector("title")?.textContent;
+          if (!targetId || !sourceTargetIds.has(targetId)) {
+            return;
+          }
+          if (event.detail !== 1) {
+            return;
+          }
+          clearPendingSourceClick();
+          pendingSourceClickTimeout = setTimeout(() => {
+            pendingSourceClickTimeout = null;
+            vscode.postMessage({ type: "clickSource", targetId });
+          }, sourceClickDelayMs);
+        });
+
+        root.addEventListener("dblclick", (event) => {
+          const nodeGroup = event.target instanceof Element ? event.target.closest("g.node") : null;
+          const targetId = nodeGroup?.querySelector("title")?.textContent;
+          if (!targetId || !sourceTargetIds.has(targetId) || targetId.includes(":")) {
+            return;
+          }
+          clearPendingSourceClick();
+          vscode.postMessage({ type: "drilldownConstraintNode", targetId });
+          event.preventDefault();
+          event.stopPropagation();
+        });
       };
 
       const bindGraphDragging = (container, root) => {
