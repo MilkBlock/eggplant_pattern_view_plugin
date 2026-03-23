@@ -10,7 +10,19 @@ This extension:
 - calls the local Rust extractor with the current cursor offset
 - converts `PatternIR` to DOT
 - renders DOT to SVG with Graphviz in the extension host
+- renders Typst math snippets for eligible node labels through the local `typst` CLI
 - shows the graph in a built-in VSCode webview panel with an in-panel dropdown
+
+## Runtime requirements
+
+- The extension ships with a vendored `@viz-js/viz` runtime (`vendor/viz.cjs`) in the published VSIX so installs do not depend on `node_modules` dependency detection.
+- Typst formula rendering requires a local `typst` executable.
+  - By default the extension tries:
+    - `eggplantPattern.typstPath`
+    - `EGGPLANT_PATTERN_TYPST_PATH`
+    - the WinGet alias path on Windows: `%LOCALAPPDATA%\\Microsoft\\WinGet\\Links\\typst.exe`
+    - plain `typst` from `PATH`
+  - If Typst is unavailable, graph previews still work, but Typst formula replacements are skipped and a warning is logged once in the extension host.
 
 ## Development
 
@@ -30,6 +42,8 @@ cd ../eggplant-pattern-vscode
 npm install
 npm run compile
 ```
+
+If you want Typst formula previews during local development, also install Typst CLI on the machine running the extension host.
 
 Default repo-local validation paths:
 
