@@ -87,7 +87,7 @@ function typstAtomicExpression(value: string): string {
   return JSON.stringify(unescaped);
 }
 
-function compactConstraintLabel(sourceText: string, resolvedText: string): string {
+export function compactConstraintLabel(sourceText: string, resolvedText: string): string {
   const compactResolved = compactExpression(resolvedText);
   const primitiveOperators: Array<[string, string]> = [
     ["eq", "=="],
@@ -643,7 +643,7 @@ function nodeLabel(
   return dslType;
 }
 
-function constraintLabel(sourceText: string, resolvedText: string, labelStyle: DotLabelStyle): string {
+export function constraintLabel(sourceText: string, resolvedText: string, labelStyle: DotLabelStyle): string {
   if (labelStyle === "full") {
     return resolvedText;
   }
@@ -713,22 +713,6 @@ export function patternIrToDotWithMode(
   if (showPattern) {
     for (const edge of ir.edges) {
       lines.push(`  ${quote(edge.from)} -> ${quote(edge.to)} [label=${quote(String(edge.index))}];`);
-    }
-  }
-
-  if (showPattern) {
-    for (const constraint of ir.constraints) {
-      const id = `constraint:${constraint.id}`;
-      lines.push(`  ${quote(id)} [label=${quote(constraintLabel(constraint.source_text, constraint.resolved_text, labelStyle))}, shape=note, fillcolor="#eef3fb", color="#4e6a85"];`);
-    }
-
-    for (const constraint of ir.constraints) {
-      const id = `constraint:${constraint.id}`;
-      const targets = constraint.referenced_vars.filter((name) => nodeSet.has(name) || rootSet.has(name));
-      const attachmentTargets = targets.length > 0 ? targets : ir.roots;
-      for (const target of attachmentTargets) {
-        lines.push(`  ${quote(id)} -> ${quote(target)} [style=dashed, arrowhead=none, color="#7b8ea3"];`);
-      }
     }
   }
 

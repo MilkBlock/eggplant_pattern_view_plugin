@@ -2,9 +2,9 @@ import * as vscode from "vscode";
 import * as fs from "fs";
 import * as path from "path";
 import { buildTraceSourcePreview, resolveDynamicActionRecoveryPolicy, summarizeRuntimeActionSampleTrace } from "./actionRecovery";
-import { collectTypstReplacementSources, DotLabelStyle, DotViewMode, patternIrToDotWithMode, RecursiveStrategy } from "./dot";
+import { collectTypstReplacementSources, compactConstraintLabel, DotLabelStyle, DotViewMode, patternIrToDotWithMode, RecursiveStrategy } from "./dot";
 import { configureExtractorResolution, ExtractorError, runExtractor } from "./extractor";
-import { PatternIr } from "./ir";
+import { PatternConstraint, PatternIr } from "./ir";
 import { clearMetadataSourceCache, discoverWorkspaceMetadataSourceFiles, loadMetadataSources, mergeExternalMetadata, pickMetadataSourceFiles } from "./metadataSources";
 import { PreviewMetadataSourceEntry, PreviewMetadataSourceKind, PreviewMetadataSourcesView, PreviewPanel, PreviewSourceMode } from "./previewPanel";
 import { dotToSvg } from "./svg";
@@ -105,6 +105,7 @@ class PreviewController {
   private currentRecursiveStrategy: RecursiveStrategy;
   private metadataSourceFiles: string[];
   private autoMetadataSourceFiles: string[] = [];
+  private activeConstraintId: string | null = null;
   private metadataWatchers: vscode.Disposable[] = [];
   private metadataRefreshTimer: NodeJS.Timeout | undefined;
   private readonly callbacks: {
@@ -113,6 +114,8 @@ class PreviewController {
     onLabelStyleChange: (labelStyle: DotLabelStyle) => Promise<void>;
     onRecursiveStrategyChange: (strategy: RecursiveStrategy) => Promise<void>;
     onSourceClick: (targetId: string) => Promise<void>;
+    onConstraintClick: (constraintId: string) => Promise<void>;
+    onConstraintOpen: (constraintId: string) => Promise<void>;
     onSelectMetadataSources: () => Promise<void>;
     onClearMetadataSources: () => Promise<void>;
     onRefresh: () => Promise<void>;
@@ -137,6 +140,12 @@ class PreviewController {
       },
       onSourceClick: async (targetId) => {
         await this.revealSourceTarget(targetId);
+      },
+      onConstraintClick: async (constraintId) => {
+        await this.selectConstraint(constraintId);
+      },
+      onConstraintOpen: async (constraintId) => {
+        await this.openConstraint(constraintId);
       },
       onSelectMetadataSources: async () => {
         await this.selectMetadataSources();
@@ -191,6 +200,7 @@ class PreviewController {
 
   async showCurrentMode(mode: DotViewMode): Promise<void> {
     this.currentModeOverride = mode;
+    this.activeConstraintId = null;
     if (this.lastPreview) {
       await this.renderLastPreview(
         this.lastPreview.editor,
@@ -226,6 +236,7 @@ class PreviewController {
 
   async showCurrentLabelStyle(labelStyle: DotLabelStyle): Promise<void> {
     this.currentLabelStyle = labelStyle;
+    this.activeConstraintId = null;
     await vscode.workspace.getConfiguration().update(
       "eggplantPattern.defaultLabelStyle",
       labelStyle,
@@ -239,6 +250,7 @@ class PreviewController {
 
   async showCurrentSourceMode(sourceMode: PreviewSourceMode): Promise<void> {
     this.currentSourceMode = sourceMode;
+    this.activeConstraintId = null;
     if (this.lastPreview) {
       await this.renderLastPreview(
         this.lastPreview.editor,
@@ -253,6 +265,7 @@ class PreviewController {
 
   async showCurrentRecursiveStrategy(strategy: RecursiveStrategy): Promise<void> {
     this.currentRecursiveStrategy = strategy;
+    this.activeConstraintId = null;
     await vscode.workspace.getConfiguration().update(
       "eggplantPattern.defaultRecursiveStrategy",
       strategy,
@@ -379,6 +392,9 @@ class PreviewController {
       ...this.metadataSourceFiles
     ]))
   ): Promise<void> {
+    if (!baseIr.constraints.some((constraint) => constraint.id === this.activeConstraintId)) {
+      this.activeConstraintId = null;
+    }
     const metadataSourcesView = buildMetadataSourcesView(
       editor.document.fileName,
       this.autoMetadataSourceFiles,
@@ -410,9 +426,29 @@ class PreviewController {
       recursiveStrategy,
       metadataSourceFiles,
       metadataSourcesView,
+      this.activeConstraintId,
       previewInput.recoveryMetadata,
       previewInput.notice
     );
+  }
+
+  private async selectConstraint(constraintId: string): Promise<void> {
+    if (!this.lastPreview) {
+      return;
+    }
+    this.activeConstraintId = this.activeConstraintId === constraintId ? null : constraintId;
+    await this.renderLastPreview(
+      this.lastPreview.editor,
+      this.lastPreview.ir,
+      this.currentMode(),
+      this.currentLabelStyle,
+      this.currentRecursiveStrategy,
+      true
+    );
+  }
+
+  private async openConstraint(constraintId: string): Promise<void> {
+    await this.revealSourceTarget(`constraint:${constraintId}`);
   }
 
   private async selectMetadataSources(): Promise<void> {
@@ -585,6 +621,7 @@ async function renderDot(
   recursiveStrategy: RecursiveStrategy,
   metadataSourceFiles: string[],
   metadataSourcesView: PreviewMetadataSourcesView,
+  activeConstraintId: string | null,
   recoveryMetadata: ReturnType<typeof summarizeRuntimeActionSampleTrace> | null,
   notice: string | null
 ): Promise<void> {
@@ -594,6 +631,8 @@ async function renderDot(
   const dot = patternIrToDotWithMode(ir, mode, labelStyle, recursiveStrategy, typstRenderings);
   const svg = await dotToSvg(dot);
   const strategySuffix = labelStyle === "recursive" ? `, ${recursiveStrategy}` : "";
+  const constraints = buildConstraintEntries(ir);
+  const activeConstraint = constraints.find((constraint) => constraint.id === activeConstraintId) ?? null;
   await panel.render({
     title: `Eggplant Pattern (${modeLabel(mode)}, ${sourceMode}, ${labelStyle}${strategySuffix}): ${editor.document.fileName.split("/").pop() ?? "Preview"}`,
     mode,
@@ -605,6 +644,9 @@ async function renderDot(
     svg,
     typstRenderings,
     sourceTargetIds: collectSourceTargetIds(ir, mode),
+    constraints,
+    activeConstraintId: activeConstraint?.id ?? null,
+    activeConstraintNodeIds: activeConstraint?.referencedNodeIds ?? [],
     metadataSourceFiles,
     metadataSourcesView,
     recoverySummary: recoveryMetadata?.summary ?? null,
@@ -635,6 +677,9 @@ async function renderNotice(panel: PreviewPanel, editor: vscode.TextEditor, mess
     svg,
     typstRenderings: {},
     sourceTargetIds: [],
+    constraints: [],
+    activeConstraintId: null,
+    activeConstraintNodeIds: [],
     metadataSourceFiles: [],
     metadataSourcesView: {
       currentFile: editor.document.fileName,
@@ -682,6 +727,9 @@ async function renderTraceUnavailableNotice(
     svg,
     typstRenderings: {},
     sourceTargetIds: [],
+    constraints: buildConstraintEntries(irlessPatternIr()),
+    activeConstraintId: null,
+    activeConstraintNodeIds: [],
     metadataSourceFiles,
     metadataSourcesView,
     recoverySummary: "trace-unavailable",
@@ -738,9 +786,6 @@ function collectSourceTargetIds(ir: PatternIr, mode: DotViewMode): string[] {
     for (const node of ir.nodes) {
       targetIds.push(node.id);
     }
-    for (const constraint of ir.constraints) {
-      targetIds.push(`constraint:${constraint.id}`);
-    }
   }
   if (mode === "action" || mode === "combined") {
     for (const effect of ir.action_effects) {
@@ -751,6 +796,41 @@ function collectSourceTargetIds(ir: PatternIr, mode: DotViewMode): string[] {
     }
   }
   return targetIds;
+}
+
+function buildConstraintEntries(ir: PatternIr): Array<{ id: string; compactText: string; fullText: string; referencedNodeIds: string[] }> {
+  const nodeIds = new Set(ir.nodes.map((node) => node.id));
+  const rootIds = new Set(ir.roots);
+  return ir.constraints.map((constraint) => ({
+    id: constraint.id,
+    compactText: compactConstraintLabel(constraint.source_text, constraint.resolved_text),
+    fullText: constraint.resolved_text,
+    referencedNodeIds: (() => {
+      const referenced = constraint.referenced_vars.filter((name) => nodeIds.has(name) || rootIds.has(name));
+      return referenced.length > 0 ? referenced : [...ir.roots];
+    })()
+  }));
+}
+
+function irlessPatternIr(): PatternIr {
+  return {
+    scope: {
+      kind: "pattern_function",
+      text_range: { start: 0, end: 0 },
+      pattern_range: null,
+      action_range: null
+    },
+    nodes: [],
+    edges: [],
+    roots: [],
+    constraints: [],
+    action_effects: [],
+    seed_facts: [],
+    display_templates: [],
+    typst_templates: [],
+    precedence_templates: [],
+    diagnostics: []
+  };
 }
 
 function resolveSourceSpan(ir: PatternIr, targetId: string): { start: number; end: number } | null {

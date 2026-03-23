@@ -25,6 +25,13 @@ export interface PreviewMetadataSourcesView {
   effectiveEntries: PreviewMetadataEffectiveSourceEntry[];
 }
 
+export interface PreviewConstraintEntry {
+  id: string;
+  compactText: string;
+  fullText: string;
+  referencedNodeIds: string[];
+}
+
 export interface PreviewPanelState {
   renderNonce?: number;
   title: string;
@@ -37,6 +44,9 @@ export interface PreviewPanelState {
   svg: string;
   typstRenderings: Record<string, RenderedTypstSnippet>;
   sourceTargetIds: string[];
+  constraints: PreviewConstraintEntry[];
+  activeConstraintId: string | null;
+  activeConstraintNodeIds: string[];
   metadataSourceFiles: string[];
   metadataSourcesView: PreviewMetadataSourcesView;
   recoverySummary: string | null;
@@ -52,6 +62,8 @@ interface PreviewPanelCallbacks {
   onLabelStyleChange(labelStyle: DotLabelStyle): Promise<void>;
   onRecursiveStrategyChange(strategy: RecursiveStrategy): Promise<void>;
   onSourceClick(targetId: string): Promise<void>;
+  onConstraintClick(constraintId: string): Promise<void>;
+  onConstraintOpen(constraintId: string): Promise<void>;
   onSelectMetadataSources(): Promise<void>;
   onClearMetadataSources(): Promise<void>;
   onRefresh(): Promise<void>;
@@ -63,6 +75,8 @@ type IncomingMessage =
   | { type: "changeLabelStyle"; labelStyle: DotLabelStyle }
   | { type: "changeRecursiveStrategy"; recursiveStrategy: RecursiveStrategy }
   | { type: "clickSource"; targetId: string }
+  | { type: "clickConstraint"; constraintId: string }
+  | { type: "openConstraint"; constraintId: string }
   | { type: "selectMetadataSources" }
   | { type: "clearMetadataSources" }
   | { type: "refresh" };
@@ -175,6 +189,12 @@ export class PreviewPanel implements vscode.Disposable {
       case "clickSource":
         await this.callbacks.onSourceClick(message.targetId);
         return;
+      case "clickConstraint":
+        await this.callbacks.onConstraintClick(message.constraintId);
+        return;
+      case "openConstraint":
+        await this.callbacks.onConstraintOpen(message.constraintId);
+        return;
       case "selectMetadataSources":
         await this.callbacks.onSelectMetadataSources();
         return;
@@ -225,6 +245,11 @@ export class PreviewPanel implements vscode.Disposable {
         grid-template-rows: auto auto 1fr auto;
         height: 100vh;
       }
+      .content {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 320px;
+        min-height: 0;
+      }
       .toolbar {
         display: flex;
         align-items: center;
@@ -258,6 +283,7 @@ export class PreviewPanel implements vscode.Disposable {
       .graph {
         overflow: auto;
         padding: 12px;
+        min-width: 0;
       }
       .metadata-viewer {
         padding: 12px;
@@ -322,6 +348,83 @@ export class PreviewPanel implements vscode.Disposable {
       .graph svg {
         max-width: none;
         height: auto;
+      }
+      .constraints-panel {
+        border-left: 1px solid var(--border);
+        background: color-mix(in srgb, var(--panel) 78%, var(--bg) 22%);
+        min-width: 0;
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr) auto;
+      }
+      .constraints-header {
+        padding: 10px 12px 8px;
+        border-bottom: 1px solid var(--border);
+      }
+      .constraints-header h3 {
+        margin: 0;
+        font-size: 12px;
+      }
+      .constraints-header p {
+        margin: 6px 0 0;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .constraints-list {
+        overflow: auto;
+        padding: 8px 10px;
+      }
+      .constraint-item {
+        padding: 8px 10px;
+        border: 1px solid var(--border);
+        background: var(--bg);
+        cursor: pointer;
+        user-select: none;
+      }
+      .constraint-item + .constraint-item {
+        margin-top: 8px;
+      }
+      .constraint-item[data-active="true"] {
+        border-color: #c26d00;
+        box-shadow: inset 0 0 0 1px #c26d00;
+      }
+      .constraint-label {
+        margin: 0;
+        font-size: 12px;
+        line-height: 1.4;
+        user-select: text;
+        cursor: text;
+        word-break: break-word;
+      }
+      .constraint-id {
+        margin: 0 0 6px;
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .constraint-meta {
+        margin: 6px 0 0;
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .constraint-selection {
+        border-top: 1px solid var(--border);
+        padding: 10px 12px;
+      }
+      .constraint-selection h4 {
+        margin: 0 0 8px;
+        font-size: 12px;
+      }
+      .constraint-selection p {
+        margin: 0;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .constraint-node-list {
+        margin: 0;
+        padding-left: 18px;
+        font-size: 12px;
+      }
+      .constraint-node-list li + li {
+        margin-top: 4px;
       }
       .footer {
         display: flex;
@@ -392,7 +495,21 @@ export class PreviewPanel implements vscode.Disposable {
           </section>
         </div>
       </div>
-      <div class="graph" id="graph"></div>
+      <div class="content">
+        <div class="graph" id="graph"></div>
+        <aside class="constraints-panel">
+          <div class="constraints-header">
+            <h3>Constraints</h3>
+            <p>Single click highlights involved nodes. Double click jumps to the constraint definition.</p>
+          </div>
+          <div class="constraints-list" id="constraintsList"></div>
+          <div class="constraint-selection">
+            <h4>Referenced Nodes</h4>
+            <ul class="constraint-node-list" id="constraintNodeList"></ul>
+            <p id="constraintSelectionEmpty">Select a constraint to inspect its nodes.</p>
+          </div>
+        </aside>
+      </div>
       <div class="footer">
         <label for="sourceMode">Source</label>
         <select id="sourceMode">
@@ -423,6 +540,9 @@ export class PreviewPanel implements vscode.Disposable {
       const switchToAst = document.getElementById("switchToAst");
       const meta = document.getElementById("meta");
       const graph = document.getElementById("graph");
+      const constraintsList = document.getElementById("constraintsList");
+      const constraintNodeList = document.getElementById("constraintNodeList");
+      const constraintSelectionEmpty = document.getElementById("constraintSelectionEmpty");
       const sourceTargetIds = new Set();
       let metadataViewerVisible = false;
 
@@ -544,6 +664,82 @@ export class PreviewPanel implements vscode.Disposable {
         }
       };
 
+      const setConstraintNodeList = (nodeIds) => {
+        constraintNodeList.innerHTML = "";
+        if (!nodeIds || nodeIds.length === 0) {
+          constraintSelectionEmpty.hidden = false;
+          return;
+        }
+        constraintSelectionEmpty.hidden = true;
+        for (const nodeId of nodeIds) {
+          const item = document.createElement("li");
+          item.textContent = nodeId;
+          constraintNodeList.appendChild(item);
+        }
+      };
+
+      const renderConstraints = (constraints, activeConstraintId, activeConstraintNodeIds) => {
+        constraintsList.innerHTML = "";
+        if (!constraints || constraints.length === 0) {
+          const empty = document.createElement("p");
+          empty.className = "metadata-empty";
+          empty.textContent = "No constraints in this scope.";
+          constraintsList.appendChild(empty);
+          setConstraintNodeList([]);
+          return;
+        }
+
+        for (const constraint of constraints) {
+          const item = document.createElement("div");
+          item.className = "constraint-item";
+          item.dataset.active = String(constraint.id === activeConstraintId);
+          const idLine = document.createElement("p");
+          idLine.className = "constraint-id";
+          idLine.textContent = constraint.id;
+          const label = document.createElement("p");
+          label.className = "constraint-label";
+          label.textContent = constraint.compactText;
+          item.title = constraint.fullText;
+          const metaLine = document.createElement("p");
+          metaLine.className = "constraint-meta";
+          metaLine.textContent = constraint.referencedNodeIds.length > 0
+            ? "nodes: " + constraint.referencedNodeIds.join(", ")
+            : "nodes: none";
+          item.appendChild(idLine);
+          item.appendChild(label);
+          item.appendChild(metaLine);
+          item.addEventListener("click", () => {
+            vscode.postMessage({ type: "clickConstraint", constraintId: constraint.id });
+          });
+          item.addEventListener("dblclick", () => {
+            vscode.postMessage({ type: "openConstraint", constraintId: constraint.id });
+          });
+          constraintsList.appendChild(item);
+        }
+
+        setConstraintNodeList(activeConstraintNodeIds || []);
+      };
+
+      const applyConstraintHighlights = (root, highlightedNodeIds) => {
+        const highlights = new Set(highlightedNodeIds || []);
+        for (const nodeGroup of Array.from(root.querySelectorAll("g.node"))) {
+          const targetId = nodeGroup.querySelector("title")?.textContent;
+          const isHighlighted = targetId && highlights.has(targetId);
+          for (const child of Array.from(nodeGroup.children)) {
+            if (child.tagName === "title" || child.tagName === "image") {
+              continue;
+            }
+            if (isHighlighted) {
+              child.setAttribute("stroke", "#c26d00");
+              child.setAttribute("stroke-width", "2.5");
+              if (child.tagName === "text") {
+                child.setAttribute("fill", "#c26d00");
+              }
+            }
+          }
+        }
+      };
+
       mode.addEventListener("change", () => {
         vscode.postMessage({ type: "changeMode", mode: mode.value });
       });
@@ -633,6 +829,7 @@ export class PreviewPanel implements vscode.Disposable {
           ? " | diag: " + payload.recoveryDiagnostics.join(" ; ")
           : "";
         meta.textContent = payload.notice || payload.fileName + " | " + payload.mode + " | source=" + payload.sourceMode + " | " + payload.labelStyle + (payload.labelStyle === "recursive" ? " | " + payload.recursiveStrategy : "") + sourceSummary + recoverySummary + recoveryDiagnostics;
+        renderConstraints(payload.constraints || [], payload.activeConstraintId, payload.activeConstraintNodeIds || []);
         sourceWarning.textContent = payload.sourceWarning || "";
         switchToAst.hidden = !payload.showSwitchToAst;
         graph.innerHTML = payload.svg;
@@ -640,6 +837,7 @@ export class PreviewPanel implements vscode.Disposable {
         if (rootSvg) {
           applyTypstRenderings(rootSvg, payload.typstRenderings);
           bindSourceClicks(rootSvg);
+          applyConstraintHighlights(rootSvg, payload.activeConstraintNodeIds || []);
         }
       });
 
@@ -669,6 +867,8 @@ export async function dispatchPreviewPanelTestMessage(
     | { type: "changeLabelStyle"; labelStyle: DotLabelStyle }
     | { type: "changeRecursiveStrategy"; recursiveStrategy: RecursiveStrategy }
     | { type: "clickSource"; targetId: string }
+    | { type: "clickConstraint"; constraintId: string }
+    | { type: "openConstraint"; constraintId: string }
     | { type: "selectMetadataSources" }
     | { type: "clearMetadataSources" }
     | { type: "refresh" }

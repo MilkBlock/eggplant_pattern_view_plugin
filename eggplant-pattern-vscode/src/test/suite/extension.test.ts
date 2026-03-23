@@ -418,24 +418,42 @@ suite("eggplant pattern extension", () => {
     assert.match(preview.title, /recursive, dag-expand/);
   });
 
-  test("preview node clicks reveal source ranges for pattern, action, and constraints", async () => {
+  test("preview node clicks reveal source ranges for pattern and action", async () => {
     const editor = await openEditor(RUST_FIXTURE);
     placeCursor(editor, "MyTx::add_rule");
 
     await vscode.commands.executeCommand("eggplant-pattern.preview");
     let preview = await waitForPreviewState((state) => state.mode === "combined");
     assert.ok(preview.sourceTargetIds.includes("p"));
-    assert.ok(preview.sourceTargetIds.includes("constraint:constraint_0"));
     assert.ok(preview.sourceTargetIds.includes("effect:effect_1"));
+    assert.equal(/constraint:constraint_0/.test(preview.dot), false);
+    assert.ok(preview.constraints.some((constraint) => constraint.id === "constraint_0"));
 
     await dispatchPreviewPanelTestMessage({ type: "clickSource", targetId: "p" });
     assert.equal(selectedText(editor), "let p = Add::query(&l, &r);");
 
-    await dispatchPreviewPanelTestMessage({ type: "clickSource", targetId: "constraint:constraint_0" });
-    assert.equal(selectedText(editor), "eq");
-
     await dispatchPreviewPanelTestMessage({ type: "clickSource", targetId: "effect:effect_1" });
     assert.equal(selectedText(editor), "ctx.union(pat.p, op_value)");
+  });
+
+  test("constraint list click highlights referenced nodes and double click reveals source range", async () => {
+    const editor = await openEditor(RUST_FIXTURE);
+    placeCursor(editor, "MyTx::add_rule");
+
+    await vscode.commands.executeCommand("eggplant-pattern.preview");
+    let preview = await waitForPreviewState((state) => state.mode === "combined" && state.constraints.length > 0);
+    assert.equal(preview.activeConstraintId, null);
+
+    await dispatchPreviewPanelTestMessage({ type: "clickConstraint", constraintId: "constraint_0" });
+    preview = await waitForPreviewState((state) => state.activeConstraintId === "constraint_0");
+    assert.deepEqual(preview.activeConstraintNodeIds, ["l", "r", "p"]);
+    assert.deepEqual(
+      preview.constraints.find((constraint) => constraint.id === "constraint_0")?.referencedNodeIds,
+      ["l", "r", "p"]
+    );
+
+    await dispatchPreviewPanelTestMessage({ type: "openConstraint", constraintId: "constraint_0" });
+    assert.equal(selectedText(editor), "eq");
   });
 
   test("trace source surfaces sampled action recovery summary and diagnostics", async () => {

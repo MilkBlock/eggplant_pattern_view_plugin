@@ -3,7 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { spawnSync } from "child_process";
 import { suite, test } from "mocha";
-import { collectTypstReplacementSources, patternIrToDot, patternIrToDotWithMode } from "../../dot";
+import { collectTypstReplacementSources, compactConstraintLabel, patternIrToDot, patternIrToDotWithMode } from "../../dot";
 import { PatternIr } from "../../ir";
 import { mergeExternalMetadata, metadataCacheMatches, metadataSourceMatchesIdentifiers } from "../../metadataSources";
 import {
@@ -585,10 +585,8 @@ fn demo() {
     assert.match(dot, /"q" -> "lhs" \[label="0"\]/);
     assert.match(dot, /"q" -> "rhs" \[label="1"\]/);
     assert.match(dot, /penwidth=2/);
-    assert.match(dot, /lhs\.handle\(\)\.eq/);
-    assert.match(dot, /"constraint:constraint_0" -> "lhs"/);
-    assert.match(dot, /"constraint:constraint_0" -> "rhs"/);
-    assert.equal(/"constraint:constraint_0" -> "q"/.test(dot), false);
+    assert.equal(/lhs\.handle\(\)\.eq/.test(dot), false);
+    assert.equal(/constraint:constraint_0/.test(dot), false);
     assert.match(dot, /cluster_actions/);
     assert.match(dot, /ctx\.union\(pat\.q, folded\)/);
     assert.match(dot, /cluster_seed_facts/);
@@ -778,12 +776,11 @@ fn demo() {
     const fullDot = patternIrToDotWithMode(ir, "combined", "full");
 
     assert.match(compactDot, /label="DisplayMath"/);
-    assert.match(compactDot, /label="lhs == rhs"/);
     assert.match(compactDot, /label="union\(lhs, rhs\)"/);
     assert.match(compactDot, /label="expr\.commit\(\)"/);
+    assert.equal(compactConstraintLabel("lhs_eq_rhs", "lhs.handle().eq(&rhs.handle())"), "lhs == rhs");
 
     assert.match(fullDot, /label="lhs: DisplayMath"/);
-    assert.match(fullDot, /lhs\.handle\(\)\.eq/);
     assert.match(fullDot, /ctx\.union\(pat\.lhs, rhs\.clone\(\)\)/);
   });
 
@@ -842,8 +839,7 @@ fn demo() {
     ];
 
     for (const [resolvedText, expectedLabel] of cases) {
-      const dot = patternIrToDotWithMode(makeIr(resolvedText), "pattern", "compact");
-      assert.match(dot, new RegExp(`label=\"${expectedLabel.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}\"`));
+      assert.equal(compactConstraintLabel("constraint_alias", resolvedText), expectedLabel);
     }
   });
 
@@ -884,8 +880,10 @@ fn demo() {
       diagnostics: []
     };
 
-    const dot = patternIrToDotWithMode(ir, "pattern", "compact");
-    assert.match(dot, /label="lhs\.custom_constraint\(rhs\) \[raw\]"/);
+    assert.equal(
+      compactConstraintLabel("lhs.custom_constraint(rhs)", "lhs.handle().custom_constraint(&rhs.handle())"),
+      "lhs.custom_constraint(rhs) [raw]"
+    );
   });
 
   test("compact labels prefer display templates when available", () => {
