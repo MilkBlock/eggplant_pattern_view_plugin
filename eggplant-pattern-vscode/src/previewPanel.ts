@@ -595,6 +595,7 @@ export class PreviewPanel implements vscode.Disposable {
       let suppressGraphClicksUntil = 0;
       let pendingSourceClickTimeout = null;
       const sourceClickDelayMs = 400;
+      let lastRenderedSvgMarkup = "";
       graph.dataset.draggable = "false";
       graph.dataset.dragging = "false";
 
@@ -1085,12 +1086,20 @@ export class PreviewPanel implements vscode.Disposable {
         );
         sourceWarning.textContent = payload.sourceWarning || "";
         switchToAst.hidden = !payload.showSwitchToAst;
-        graph.innerHTML = payload.svg;
-        const rootSvg = graph.querySelector("svg");
+        const svgChanged = payload.svg !== lastRenderedSvgMarkup;
+        let rootSvg = graph.querySelector("svg");
+        if (svgChanged) {
+          graph.innerHTML = payload.svg;
+          lastRenderedSvgMarkup = payload.svg;
+          rootSvg = graph.querySelector("svg");
+        }
         if (rootSvg) {
-          applyTypstRenderings(rootSvg, payload.typstRenderings);
-          bindSourceClicks(rootSvg);
-          bindGraphDragging(graph, rootSvg);
+          if (svgChanged || rootSvg.dataset.boundSvg !== "true") {
+            applyTypstRenderings(rootSvg, payload.typstRenderings);
+            bindSourceClicks(rootSvg);
+            bindGraphDragging(graph, rootSvg);
+            rootSvg.dataset.boundSvg = "true";
+          }
           applyConstraintHighlights(rootSvg, payload.activeConstraintNodeIds || []);
         }
       });
