@@ -741,6 +741,13 @@ export class PreviewPanel implements vscode.Disposable {
         }
       };
 
+      const clearPendingSourceClick = () => {
+        if (pendingSourceClickTimeout) {
+          clearTimeout(pendingSourceClickTimeout);
+          pendingSourceClickTimeout = null;
+        }
+      };
+
       const bindSourceClicks = (root) => {
         for (const nodeGroup of Array.from(root.querySelectorAll("g.node"))) {
           const targetId = nodeGroup.querySelector("title")?.textContent;
@@ -749,10 +756,13 @@ export class PreviewPanel implements vscode.Disposable {
             continue;
           }
           nodeGroup.style.cursor = "pointer";
-          nodeGroup.addEventListener("click", () => {
-            if (pendingSourceClickTimeout) {
-              clearTimeout(pendingSourceClickTimeout);
+          nodeGroup.addEventListener("click", (event) => {
+            if (event.detail >= 2 && !targetId.includes(":")) {
+              clearPendingSourceClick();
+              vscode.postMessage({ type: "drilldownConstraintNode", targetId });
+              return;
             }
+            clearPendingSourceClick();
             pendingSourceClickTimeout = setTimeout(() => {
               pendingSourceClickTimeout = null;
               vscode.postMessage({ type: "clickSource", targetId });
@@ -760,11 +770,7 @@ export class PreviewPanel implements vscode.Disposable {
           });
           if (!targetId.includes(":")) {
             nodeGroup.addEventListener("dblclick", () => {
-              if (pendingSourceClickTimeout) {
-                clearTimeout(pendingSourceClickTimeout);
-                pendingSourceClickTimeout = null;
-              }
-              vscode.postMessage({ type: "drilldownConstraintNode", targetId });
+              clearPendingSourceClick();
             });
           }
         }
