@@ -409,11 +409,14 @@ export class PreviewPanel implements vscode.Disposable {
         width: 320px;
         display: grid;
         grid-template-rows: auto minmax(0, 1fr) auto;
+        overflow: hidden;
       }
       @media (max-width: 980px) {
         .content {
           display: grid;
           grid-template-columns: minmax(0, 1fr);
+          grid-template-rows: minmax(0, 1fr) auto;
+          overflow: hidden;
         }
         .graph {
           width: auto;
@@ -425,6 +428,12 @@ export class PreviewPanel implements vscode.Disposable {
           width: auto;
           border-left: none;
           border-top: 1px solid var(--border);
+          min-height: 160px;
+          max-height: min(42vh, 360px);
+        }
+        .constraint-selection {
+          max-height: 40%;
+          overflow: auto;
         }
       }
       .constraints-header {
@@ -455,6 +464,7 @@ export class PreviewPanel implements vscode.Disposable {
       }
       .constraints-list {
         overflow: auto;
+        min-height: 0;
         padding: 8px 10px;
       }
       .constraint-item {
