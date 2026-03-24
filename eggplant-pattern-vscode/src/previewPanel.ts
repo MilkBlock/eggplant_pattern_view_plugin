@@ -2,11 +2,17 @@ import * as vscode from "vscode";
 import { DotLabelStyle, DotViewMode, RecursiveStrategy } from "./dot";
 import { RenderedTypstSnippet } from "./typst";
 
+export type RecoveryUiMode = "off" | "static" | "sample" | "hybrid";
+
 export interface PreviewPanelState {
   title: string;
   mode: DotViewMode;
   labelStyle: DotLabelStyle;
   recursiveStrategy: RecursiveStrategy;
+  recoveryMode: RecoveryUiMode;
+  tracePath: string;
+  recoverySummary: string | null;
+  recoveryDiagnostics: string[];
   fileName: string;
   dot: string;
   svg: string;
@@ -19,6 +25,9 @@ interface PreviewPanelCallbacks {
   onModeChange(mode: DotViewMode): Promise<void>;
   onLabelStyleChange(labelStyle: DotLabelStyle): Promise<void>;
   onRecursiveStrategyChange(strategy: RecursiveStrategy): Promise<void>;
+  onRecoveryModeChange(mode: RecoveryUiMode): Promise<void>;
+  onSelectTraceFile(): Promise<void>;
+  onClearTraceFile(): Promise<void>;
   onSelectMetadataSources(): Promise<void>;
   onClearMetadataSources(): Promise<void>;
   onRefresh(): Promise<void>;
@@ -28,6 +37,9 @@ type IncomingMessage =
   | { type: "changeMode"; mode: DotViewMode }
   | { type: "changeLabelStyle"; labelStyle: DotLabelStyle }
   | { type: "changeRecursiveStrategy"; recursiveStrategy: RecursiveStrategy }
+  | { type: "changeRecoveryMode"; recoveryMode: RecoveryUiMode }
+  | { type: "selectTraceFile" }
+  | { type: "clearTraceFile" }
   | { type: "selectMetadataSources" }
   | { type: "clearMetadataSources" }
   | { type: "refresh" };
@@ -124,6 +136,15 @@ export class PreviewPanel implements vscode.Disposable {
         return;
       case "changeRecursiveStrategy":
         await this.callbacks.onRecursiveStrategyChange(message.recursiveStrategy);
+        return;
+      case "changeRecoveryMode":
+        await this.callbacks.onRecoveryModeChange(message.recoveryMode);
+        return;
+      case "selectTraceFile":
+        await this.callbacks.onSelectTraceFile();
+        return;
+      case "clearTraceFile":
+        await this.callbacks.onClearTraceFile();
         return;
       case "selectMetadataSources":
         await this.callbacks.onSelectMetadataSources();
@@ -235,6 +256,15 @@ export class PreviewPanel implements vscode.Disposable {
           <option value="tree-safe">tree-safe</option>
           <option value="dag-expand">dag-expand</option>
         </select>
+        <label for="recoveryMode">Recovery</label>
+        <select id="recoveryMode">
+          <option value="off">off</option>
+          <option value="static">static</option>
+          <option value="sample">sample</option>
+          <option value="hybrid">hybrid</option>
+        </select>
+        <button id="selectTraceFile" type="button">Select Trace</button>
+        <button id="clearTraceFile" type="button">Clear Trace</button>
         <button id="metadataSources" type="button">Meta Sources</button>
         <button id="clearMetadataSources" type="button">Clear Sources</button>
         <button id="refresh" type="button">Refresh</button>
@@ -247,6 +277,9 @@ export class PreviewPanel implements vscode.Disposable {
       const mode = document.getElementById("mode");
       const labelStyle = document.getElementById("labelStyle");
       const recursiveStrategy = document.getElementById("recursiveStrategy");
+      const recoveryMode = document.getElementById("recoveryMode");
+      const selectTraceFile = document.getElementById("selectTraceFile");
+      const clearTraceFile = document.getElementById("clearTraceFile");
       const refresh = document.getElementById("refresh");
       const metadataSources = document.getElementById("metadataSources");
       const clearMetadataSources = document.getElementById("clearMetadataSources");
@@ -320,6 +353,18 @@ export class PreviewPanel implements vscode.Disposable {
         vscode.postMessage({ type: "changeRecursiveStrategy", recursiveStrategy: recursiveStrategy.value });
       });
 
+      recoveryMode.addEventListener("change", () => {
+        vscode.postMessage({ type: "changeRecoveryMode", recoveryMode: recoveryMode.value });
+      });
+
+      selectTraceFile.addEventListener("click", () => {
+        vscode.postMessage({ type: "selectTraceFile" });
+      });
+
+      clearTraceFile.addEventListener("click", () => {
+        vscode.postMessage({ type: "clearTraceFile" });
+      });
+
       refresh.addEventListener("click", () => {
         vscode.postMessage({ type: "refresh" });
       });
@@ -342,11 +387,25 @@ export class PreviewPanel implements vscode.Disposable {
         mode.value = payload.mode;
         labelStyle.value = payload.labelStyle;
         recursiveStrategy.value = payload.recursiveStrategy;
+        recoveryMode.value = payload.recoveryMode || "off";
         syncRecursiveStrategyState();
+        const traceSummary = payload.tracePath ? " | trace: " + payload.tracePath : "";
+        const recoverySummary = payload.recoverySummary ? " | " + payload.recoverySummary : "";
+        const diagnosticSummary = payload.recoveryDiagnostics && payload.recoveryDiagnostics.length > 0
+          ? " | diag: " + payload.recoveryDiagnostics.length
+          : "";
         const sourceSummary = payload.metadataSourceFiles.length > 0
           ? " | meta sources: " + payload.metadataSourceFiles.length
           : "";
-        meta.textContent = payload.notice || payload.fileName + " | " + payload.mode + " | " + payload.labelStyle + (payload.labelStyle === "recursive" ? " | " + payload.recursiveStrategy : "") + sourceSummary;
+        meta.textContent = payload.notice || payload.fileName
+          + " | " + payload.mode
+          + " | " + payload.labelStyle
+          + (payload.labelStyle === "recursive" ? " | " + payload.recursiveStrategy : "")
+          + " | recovery=" + recoveryMode.value
+          + traceSummary
+          + recoverySummary
+          + diagnosticSummary
+          + sourceSummary;
         graph.innerHTML = payload.svg;
         const rootSvg = graph.querySelector("svg");
         if (rootSvg) {
@@ -370,6 +429,9 @@ export async function dispatchPreviewPanelTestMessage(
     | { type: "changeMode"; mode: DotViewMode }
     | { type: "changeLabelStyle"; labelStyle: DotLabelStyle }
     | { type: "changeRecursiveStrategy"; recursiveStrategy: RecursiveStrategy }
+    | { type: "changeRecoveryMode"; recoveryMode: RecoveryUiMode }
+    | { type: "selectTraceFile" }
+    | { type: "clearTraceFile" }
     | { type: "selectMetadataSources" }
     | { type: "clearMetadataSources" }
     | { type: "refresh" }

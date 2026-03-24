@@ -1,10 +1,12 @@
 import * as vscode from "vscode";
+import * as fs from "fs";
 import * as path from "path";
+import { ActionRecoveryMode, ActionRecoveryPreviewMetadata, summarizeRuntimeActionSampleTrace } from "./actionRecovery";
 import { collectTypstReplacementSources, DotLabelStyle, DotViewMode, patternIrToDotWithMode, RecursiveStrategy } from "./dot";
 import { configureExtractorResolution, ExtractorError, runExtractor } from "./extractor";
 import { PatternIr } from "./ir";
 import { clearMetadataSourceCache, loadMetadataSources, mergeExternalMetadata, pickMetadataSourceFiles } from "./metadataSources";
-import { PreviewPanel } from "./previewPanel";
+import { PreviewPanel, RecoveryUiMode } from "./previewPanel";
 import { dotToSvg } from "./svg";
 import { renderTypstSnippets } from "./typst";
 
@@ -81,6 +83,12 @@ export function activate(context: vscode.ExtensionContext): void {
       controller.scheduleRefresh(editor);
     })
   );
+
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      void controller.handleConfigurationChange(event);
+    })
+  );
 }
 
 class PreviewController {
@@ -94,6 +102,9 @@ class PreviewController {
   private currentModeOverride: DotViewMode | undefined;
   private currentLabelStyle: DotLabelStyle;
   private currentRecursiveStrategy: RecursiveStrategy;
+  private currentRecoveryEnabled: boolean;
+  private currentRecoveryMode: ActionRecoveryMode;
+  private actionSampleTracePath: string;
   private metadataSourceFiles: string[];
   private metadataWatchers: vscode.Disposable[] = [];
   private metadataRefreshTimer: NodeJS.Timeout | undefined;
@@ -101,6 +112,9 @@ class PreviewController {
     onModeChange: (mode: DotViewMode) => Promise<void>;
     onLabelStyleChange: (labelStyle: DotLabelStyle) => Promise<void>;
     onRecursiveStrategyChange: (strategy: RecursiveStrategy) => Promise<void>;
+    onRecoveryModeChange: (mode: RecoveryUiMode) => Promise<void>;
+    onSelectTraceFile: () => Promise<void>;
+    onClearTraceFile: () => Promise<void>;
     onSelectMetadataSources: () => Promise<void>;
     onClearMetadataSources: () => Promise<void>;
     onRefresh: () => Promise<void>;
@@ -109,6 +123,9 @@ class PreviewController {
   constructor(private readonly context: vscode.ExtensionContext) {
     this.currentLabelStyle = configuredDefaultLabelStyle();
     this.currentRecursiveStrategy = configuredDefaultRecursiveStrategy();
+    this.currentRecoveryEnabled = configuredRecoveryEnabled();
+    this.currentRecoveryMode = configuredRecoveryMode();
+    this.actionSampleTracePath = configuredActionSampleTracePath();
     this.metadataSourceFiles = context.workspaceState.get<string[]>(PreviewController.metadataSourceStateKey, []);
     this.callbacks = {
       onModeChange: async (mode) => {
@@ -119,6 +136,15 @@ class PreviewController {
       },
       onRecursiveStrategyChange: async (strategy) => {
         await this.showCurrentRecursiveStrategy(strategy);
+      },
+      onRecoveryModeChange: async (mode) => {
+        await this.showCurrentRecoveryMode(mode);
+      },
+      onSelectTraceFile: async () => {
+        await this.selectActionSampleTraceFile();
+      },
+      onClearTraceFile: async () => {
+        await this.clearActionSampleTraceFile();
       },
       onSelectMetadataSources: async () => {
         await this.selectMetadataSources();
@@ -174,7 +200,7 @@ class PreviewController {
   async showCurrentMode(mode: DotViewMode): Promise<void> {
     this.currentModeOverride = mode;
     if (this.lastPreview) {
-      await renderDot(this.panel(true), this.lastPreview.editor, this.lastPreview.ir, mode, this.labelStyle(), this.recursiveStrategy(), this.metadataSourceFiles, null);
+      await renderDot(this.panel(true), this.lastPreview.editor, this.lastPreview.ir, mode, this.labelStyle(), this.recursiveStrategy(), this.metadataSourceFiles, this.currentRecoveryConfig(), null);
       return;
     }
 
@@ -216,6 +242,7 @@ class PreviewController {
         labelStyle,
         this.currentRecursiveStrategy,
         this.metadataSourceFiles,
+        this.currentRecoveryConfig(),
         null
       );
     }
@@ -238,6 +265,45 @@ class PreviewController {
         this.currentLabelStyle,
         strategy,
         this.metadataSourceFiles,
+        this.currentRecoveryConfig(),
+        null
+      );
+    }
+  }
+
+  async showCurrentRecoveryMode(mode: RecoveryUiMode): Promise<void> {
+    if (mode === "off") {
+      this.currentRecoveryEnabled = false;
+      await vscode.workspace.getConfiguration().update(
+        "eggplantPattern.experimentalDynamicActionRecovery",
+        false,
+        vscode.ConfigurationTarget.Workspace
+      );
+    } else {
+      this.currentRecoveryEnabled = true;
+      this.currentRecoveryMode = mode;
+      await vscode.workspace.getConfiguration().update(
+        "eggplantPattern.experimentalDynamicActionRecovery",
+        true,
+        vscode.ConfigurationTarget.Workspace
+      );
+      await vscode.workspace.getConfiguration().update(
+        "eggplantPattern.dynamicActionRecoveryMode",
+        mode,
+        vscode.ConfigurationTarget.Workspace
+      );
+    }
+
+    if (this.lastPreview) {
+      await renderDot(
+        this.panel(true),
+        this.lastPreview.editor,
+        this.lastPreview.ir,
+        this.currentMode(),
+        this.currentLabelStyle,
+        this.currentRecursiveStrategy,
+        this.metadataSourceFiles,
+        this.currentRecoveryConfig(),
         null
       );
     }
@@ -267,7 +333,7 @@ class PreviewController {
         return;
       }
       const mode = request.forcedMode ?? this.currentModeOverride ?? resolveDotViewMode(ir, offset);
-      await renderDot(this.panel(!request.manual), request.editor, ir, mode, this.currentLabelStyle, this.currentRecursiveStrategy, this.metadataSourceFiles, null);
+      await renderDot(this.panel(!request.manual), request.editor, ir, mode, this.currentLabelStyle, this.currentRecursiveStrategy, this.metadataSourceFiles, this.currentRecoveryConfig(), null);
       this.lastPreview = {
         editor: request.editor,
         ir
@@ -302,8 +368,55 @@ class PreviewController {
     return this.currentRecursiveStrategy;
   }
 
+  private currentRecoveryConfig(): RecoveryConfig {
+    return {
+      enabled: this.currentRecoveryEnabled,
+      mode: this.currentRecoveryMode,
+      tracePath: this.actionSampleTracePath
+    };
+  }
+
   private currentMode(): DotViewMode {
     return this.currentModeOverride ?? PreviewPanel.current()?.snapshot()?.mode ?? "combined";
+  }
+
+  private async selectActionSampleTraceFile(): Promise<void> {
+    const picked = await vscode.window.showOpenDialog({
+      canSelectFiles: true,
+      canSelectFolders: false,
+      canSelectMany: false,
+      openLabel: "Select Action Trace",
+      filters: {
+        JSON: ["json"]
+      }
+    });
+    if (!picked || picked.length === 0) {
+      return;
+    }
+
+    this.actionSampleTracePath = picked[0].fsPath;
+    await vscode.workspace.getConfiguration().update(
+      "eggplantPattern.actionSampleTracePath",
+      this.actionSampleTracePath,
+      vscode.ConfigurationTarget.Workspace
+    );
+
+    if (this.lastPreview) {
+      await this.requestPreview(this.lastPreview.editor, true, true);
+    }
+  }
+
+  private async clearActionSampleTraceFile(): Promise<void> {
+    this.actionSampleTracePath = "";
+    await vscode.workspace.getConfiguration().update(
+      "eggplantPattern.actionSampleTracePath",
+      "",
+      vscode.ConfigurationTarget.Workspace
+    );
+
+    if (this.lastPreview) {
+      await this.requestPreview(this.lastPreview.editor, true, true);
+    }
   }
 
   private async selectMetadataSources(): Promise<void> {
@@ -367,6 +480,24 @@ class PreviewController {
       }
     }, debounceMs);
   }
+
+  async handleConfigurationChange(event: vscode.ConfigurationChangeEvent): Promise<void> {
+    if (
+      !event.affectsConfiguration("eggplantPattern.experimentalDynamicActionRecovery") &&
+      !event.affectsConfiguration("eggplantPattern.dynamicActionRecoveryMode") &&
+      !event.affectsConfiguration("eggplantPattern.actionSampleTracePath")
+    ) {
+      return;
+    }
+
+    this.currentRecoveryEnabled = configuredRecoveryEnabled();
+    this.currentRecoveryMode = configuredRecoveryMode();
+    this.actionSampleTracePath = configuredActionSampleTracePath();
+
+    if (this.lastPreview) {
+      await this.requestPreview(this.lastPreview.editor, false, true);
+    }
+  }
 }
 
 function containsOffset(range: { start: number; end: number } | null, offset: number): boolean {
@@ -394,6 +525,27 @@ function configuredDefaultRecursiveStrategy(): RecursiveStrategy {
   );
 }
 
+function configuredRecoveryEnabled(): boolean {
+  return vscode.workspace.getConfiguration().get<boolean>(
+    "eggplantPattern.experimentalDynamicActionRecovery",
+    false
+  );
+}
+
+function configuredRecoveryMode(): ActionRecoveryMode {
+  return vscode.workspace.getConfiguration().get<ActionRecoveryMode>(
+    "eggplantPattern.dynamicActionRecoveryMode",
+    "hybrid"
+  );
+}
+
+function configuredActionSampleTracePath(): string {
+  return vscode.workspace.getConfiguration().get<string>(
+    "eggplantPattern.actionSampleTracePath",
+    ""
+  ).trim();
+}
+
 function resolveDotViewMode(ir: PatternIr, offset: number): DotViewMode {
   const configured = configuredDefaultDotView();
   if (configured !== "auto") {
@@ -419,12 +571,22 @@ async function renderDot(
   labelStyle: DotLabelStyle,
   recursiveStrategy: RecursiveStrategy,
   metadataSourceFiles: string[],
+  recoveryConfig: RecoveryConfig,
   notice: string | null
 ): Promise<void> {
+  const recoveryMetadata = await loadActionRecoveryPreviewMetadata(ir, recoveryConfig);
+  const actionOverrides = recoveryMetadata?.graphOverride
+    ? {
+        effectLabels: recoveryMetadata.graphOverride.effectLabels,
+        visibleEffectIds: recoveryMetadata.graphOverride.visibleEffectIds
+          ? new Set(recoveryMetadata.graphOverride.visibleEffectIds)
+          : null
+      }
+    : {};
   const typstRenderings = await renderTypstSnippets(
-    collectTypstReplacementSources(ir, mode, labelStyle, recursiveStrategy)
+    collectTypstReplacementSources(ir, mode, labelStyle, recursiveStrategy, actionOverrides)
   );
-  const dot = patternIrToDotWithMode(ir, mode, labelStyle, recursiveStrategy, typstRenderings);
+  const dot = patternIrToDotWithMode(ir, mode, labelStyle, recursiveStrategy, typstRenderings, actionOverrides);
   const svg = await dotToSvg(dot);
   const strategySuffix = labelStyle === "recursive" ? `, ${recursiveStrategy}` : "";
   await panel.render({
@@ -432,6 +594,10 @@ async function renderDot(
     mode,
     labelStyle,
     recursiveStrategy,
+    recoveryMode: recoveryConfig.enabled ? recoveryConfig.mode : "off",
+    tracePath: recoveryConfig.tracePath,
+    recoverySummary: recoveryMetadata?.summary ?? null,
+    recoveryDiagnostics: recoveryMetadata?.diagnostics.map((entry) => entry.message) ?? [],
     fileName: editor.document.fileName.split("/").pop() ?? "Preview",
     dot,
     svg,
@@ -455,6 +621,10 @@ async function renderNotice(panel: PreviewPanel, editor: vscode.TextEditor, mess
     mode: "combined",
     labelStyle: configuredDefaultLabelStyle(),
     recursiveStrategy: configuredDefaultRecursiveStrategy(),
+    recoveryMode: configuredRecoveryEnabled() ? configuredRecoveryMode() : "off",
+    tracePath: configuredActionSampleTracePath(),
+    recoverySummary: null,
+    recoveryDiagnostics: [],
     fileName: editor.document.fileName.split("/").pop() ?? "Preview",
     dot,
     svg,
@@ -485,6 +655,81 @@ function modeLabel(mode: DotViewMode): string {
   }
 }
 
+async function loadActionRecoveryPreviewMetadata(
+  ir: PatternIr,
+  recovery: RecoveryConfig
+): Promise<ActionRecoveryPreviewMetadata | null> {
+  if (!recovery.enabled) {
+    return null;
+  }
+
+  if (recovery.mode === "static") {
+    return {
+      summary: "recovery=static",
+      diagnostics: [],
+      graphOverride: {
+        effectLabels: {},
+        visibleEffectIds: null
+      }
+    };
+  }
+
+  if (!recovery.tracePath) {
+    return {
+      summary: `recovery=${recovery.mode} | trace-missing`,
+      graphOverride: {
+        effectLabels: {},
+        visibleEffectIds: null
+      },
+      diagnostics: [
+        {
+          severity: "warning",
+          message: "trace path is empty",
+          source_range: null
+        }
+      ]
+    };
+  }
+
+  try {
+    const raw = await fs.promises.readFile(recovery.tracePath, "utf8");
+    const parsed = summarizeRuntimeActionSampleTrace(JSON.parse(raw), ir.action_effects, recovery.mode);
+    if (parsed) {
+      return parsed;
+    }
+    return {
+      summary: `recovery=${recovery.mode} | trace-invalid`,
+      graphOverride: {
+        effectLabels: {},
+        visibleEffectIds: null
+      },
+      diagnostics: [
+        {
+          severity: "warning",
+          message: "trace file is not a valid action sample trace JSON",
+          source_range: null
+        }
+      ]
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      summary: `recovery=${recovery.mode} | trace-load-failed`,
+      graphOverride: {
+        effectLabels: {},
+        visibleEffectIds: null
+      },
+      diagnostics: [
+        {
+          severity: "warning",
+          message,
+          source_range: null
+        }
+      ]
+    };
+  }
+}
+
 function formatPreviewError(error: unknown): string {
   if (error instanceof ExtractorError) {
     return error.message;
@@ -502,6 +747,12 @@ interface PreviewRequest {
 interface LastPreview {
   editor: vscode.TextEditor;
   ir: PatternIr;
+}
+
+interface RecoveryConfig {
+  enabled: boolean;
+  mode: ActionRecoveryMode;
+  tracePath: string;
 }
 
 export function deactivate(): void {}

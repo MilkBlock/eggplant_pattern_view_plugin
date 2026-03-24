@@ -110,6 +110,26 @@
           ],
           "default": "dag-expand",
           "description": "Recursive rendering strategy. 'tree-safe' only expands tree-shaped display subgraphs, while 'dag-expand' repeats shared subgraphs when rendering recursive labels."
+        },
+        "eggplantPattern.experimentalDynamicActionRecovery": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable experimental dynamic action recovery controls in the preview panel."
+        },
+        "eggplantPattern.dynamicActionRecoveryMode": {
+          "type": "string",
+          "enum": [
+            "static",
+            "sample",
+            "hybrid"
+          ],
+          "default": "hybrid",
+          "description": "Dynamic action recovery mode. 'sample' applies runtime trace-driven labels/branch filtering, 'hybrid' keeps full graph but overlays sampled labels, and 'static' disables trace overlays."
+        },
+        "eggplantPattern.actionSampleTracePath": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to a runtime action sample trace JSON file."
         }
       }
     }

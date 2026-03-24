@@ -14,6 +14,11 @@ export interface TypstSizingInfo {
   height: number;
 }
 
+export interface ActionRenderOverrides {
+  effectLabels?: Record<string, string>;
+  visibleEffectIds?: Set<string> | null;
+}
+
 interface RenderedTemplateField {
   precedence: number;
   text: string;
@@ -525,8 +530,13 @@ function actionEffectLabel(
   effectByBinding: Map<string, string>,
   nodeById: Map<string, PatternNode>,
   incomingCounts: Map<string, number>,
-  effectId: string
+  effectId: string,
+  overrides?: ActionRenderOverrides
 ): string {
+  const overrideLabel = overrides?.effectLabels?.[effectId];
+  if (overrideLabel) {
+    return overrideLabel;
+  }
   const parsed = parseSemanticInsert(sourceText);
   const semantic = parsed?.semantic ?? semanticInsertLabel(sourceText);
   if (labelStyle === "full") {
@@ -642,7 +652,8 @@ export function patternIrToDotWithMode(
   mode: DotViewMode,
   labelStyle: DotLabelStyle = "full",
   recursiveStrategy: RecursiveStrategy = "tree-safe",
-  typstSizing: Record<string, TypstSizingInfo> = {}
+  typstSizing: Record<string, TypstSizingInfo> = {},
+  actionOverrides: ActionRenderOverrides = {}
 ): string {
   const lines: string[] = [
     "digraph EggplantPattern {",
@@ -723,10 +734,13 @@ export function patternIrToDotWithMode(
         .filter((effect) => effect.bound_var !== null)
         .map((effect) => [effect.bound_var as string, effect.id])
     );
-    for (const effect of ir.action_effects) {
+    const visibleActionEffects = ir.action_effects.filter((effect) =>
+      !actionOverrides.visibleEffectIds || actionOverrides.visibleEffectIds.has(effect.id)
+    );
+    for (const effect of visibleActionEffects) {
       const id = `effect:${effect.id}`;
       const attrs = [
-        `label=${quote(actionEffectLabel(ir, effect.source_text, labelStyle, recursiveStrategy, effectByBinding, nodeById, incomingCounts, effect.id))}`,
+        `label=${quote(actionEffectLabel(ir, effect.source_text, labelStyle, recursiveStrategy, effectByBinding, nodeById, incomingCounts, effect.id, actionOverrides))}`,
         'shape=note',
         'fillcolor="#fff0e8"',
         'color="#a55d35"'
@@ -769,7 +783,8 @@ export function collectTypstReplacementSources(
   ir: PatternIr,
   mode: DotViewMode,
   labelStyle: DotLabelStyle = "full",
-  recursiveStrategy: RecursiveStrategy = "tree-safe"
+  recursiveStrategy: RecursiveStrategy = "tree-safe",
+  actionOverrides: ActionRenderOverrides = {}
 ): TypstReplacementSource[] {
   if (labelStyle === "full") {
     return [];
@@ -807,6 +822,12 @@ export function collectTypstReplacementSources(
     );
 
     for (const effect of ir.action_effects) {
+      if (actionOverrides.visibleEffectIds && !actionOverrides.visibleEffectIds.has(effect.id)) {
+        continue;
+      }
+      if (actionOverrides.effectLabels?.[effect.id]) {
+        continue;
+      }
       const parsed = parseSemanticInsert(effect.source_text);
       if (!parsed || !findTypstTemplate(ir, parsed.variantName)) {
         continue;
