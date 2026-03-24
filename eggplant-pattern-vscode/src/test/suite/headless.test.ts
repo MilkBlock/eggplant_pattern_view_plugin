@@ -55,6 +55,59 @@ suite("eggplant pattern headless tests", () => {
     assert.match(dot, /"effect:effect_1" -> "p"/);
   });
 
+  test("extractor emits JSON for add_rule_with_hook closure scope", () => {
+    const source = `
+#[eggplant::pat_vars]
+struct DemoPat<PR: PatRecSgl> {
+  l: Const,
+  r: Const,
+  p: Add,
+}
+
+fn demo_pat<PR: PatRecSgl>() -> DemoPat<PR> {
+  let l = Const::query();
+  let r = Const::query();
+  let p = Add::query(&l, &r);
+  DemoPat::new(l, r, p)
+}
+
+fn demo(use_mul: bool, recorder: ActionSampleRecorder) {
+  DemoTx::add_rule_with_hook(
+    "dynamic_action_trace_demo_rule",
+    ruleset,
+    demo_pat,
+    move |ctx, pat| {
+      if use_mul {
+        let two = ctx.insert_trace_const(2);
+        let mul = ctx.insert_trace_mul(pat.r, two);
+        ctx.union(pat.p, mul);
+      } else {
+        let one = ctx.insert_trace_const(1);
+        let add = ctx.insert_trace_add(pat.l, one);
+        ctx.union(pat.p, add);
+      }
+    },
+    Box::new(recorder),
+  );
+}
+`;
+    const offset = source.indexOf("let add = ctx.insert_trace_add(pat.l, one);");
+    assert.notEqual(offset, -1);
+
+    const result = spawnSync(EXTRACTOR_PATH, ["--offset", String(offset)], {
+      cwd: WORKSPACE_ROOT,
+      input: source,
+      encoding: "utf8"
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const ir = JSON.parse(result.stdout) as PatternIr;
+    assert.equal(ir.scope.kind, "add_rule_call");
+    assert.ok(ir.scope.action_range);
+    assert.ok(ir.scope.pattern_range);
+    assert.ok(ir.action_effects.length >= 2);
+  });
+
   test("extractor resolves assertion references for block host patterns", () => {
     const source = fs.readFileSync(FIXTURE_PATH, "utf8");
     const offset = source.indexOf("#[eggplant::pat_vars_catch]");

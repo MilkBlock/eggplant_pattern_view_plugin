@@ -92,7 +92,7 @@ fn is_add_rule_call(call: &ast::CallExpr) -> bool {
         return false;
     };
     let callee_text = callee.syntax().text().to_string();
-    if !callee_text.ends_with("add_rule") {
+    if !callee_text.ends_with("add_rule") && !callee_text.ends_with("add_rule_with_hook") {
         return false;
     }
     call.arg_list()
@@ -1187,6 +1187,44 @@ fn demo(rs: Ruleset) {
         let rhs = ctx.insert_m_add(ab, ac);
         ctx.union(pat.mul, rhs);
     });
+}
+"#;
+        let ir = extract(src, "let rhs = ctx.insert_m_add(ab, ac);");
+        assert!(matches!(ir.scope.kind, ScopeKind::AddRuleCall));
+        assert_eq!(ir.roots, vec!["a", "b", "c", "mul"]);
+        assert_eq!(ir.action_effects.len(), 4);
+        assert_eq!(ir.action_effects[2].bound_var.as_deref(), Some("rhs"));
+        assert_eq!(ir.action_effects[2].referenced_action_vars, vec!["ab", "ac"]);
+        assert_eq!(ir.action_effects[3].referenced_pat_vars, vec!["mul"]);
+    }
+
+    #[test]
+    fn extracts_add_rule_with_hook_with_pattern_function_reference_from_action_scope() {
+        let src = r#"
+#[eggplant::pat_vars]
+struct MulDistribPat<PR: PatRecSgl> {
+    a: Math,
+    b: Math,
+    c: Math,
+    mul: MMul,
+}
+
+fn mul_distrib_pat<PR: PatRecSgl>() -> MulDistribPat<PR> {
+    let a = Math::query_leaf();
+    let b = Math::query_leaf();
+    let c = Math::query_leaf();
+    let add = MAdd::query(&b, &c);
+    let mul = MMul::query(&a, &add);
+    MulDistribPat::new(a, b, c, mul)
+}
+
+fn demo(rs: Ruleset, recorder: ActionSampleRecorder) {
+    DemoTx::add_rule_with_hook("mul_distrib", rs, mul_distrib_pat, |ctx, pat| {
+        let ab = ctx.insert_m_mul(pat.a, pat.b);
+        let ac = ctx.insert_m_mul(pat.a, pat.c);
+        let rhs = ctx.insert_m_add(ab, ac);
+        ctx.union(pat.mul, rhs);
+    }, Box::new(recorder));
 }
 "#;
         let ir = extract(src, "let rhs = ctx.insert_m_add(ab, ac);");
