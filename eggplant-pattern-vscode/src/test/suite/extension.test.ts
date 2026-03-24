@@ -143,16 +143,17 @@ suite("eggplant pattern extension", () => {
     assert.match(preview.dot, /"q" -> "rhs"/);
   });
 
-  test("manual preview on non-pattern rust scope renders diagnostic notice", async () => {
+  test("manual preview on non-pattern rust scope is silent fail-open", async () => {
     const editor = await openEditor(RUST_FIXTURE);
     placeCursor(editor, "println!(\"not a pattern");
 
     const baselineRenderNonce = currentPreviewRenderNonce();
     await vscode.commands.executeCommand("eggplant-pattern.preview");
+    await new Promise((resolve) => setTimeout(resolve, 150));
 
-    const preview = await waitForPreviewState(undefined, { minRenderNonce: baselineRenderNonce + 1 });
-    assert.match(preview.dot, /No supported eggplant pattern scope found under the cursor/);
-    assert.equal(warningMessages.length, 1);
+    assert.equal(currentPreviewRenderNonce(), baselineRenderNonce);
+    assert.equal(getPreviewPanelTestState(), undefined);
+    assert.equal(warningMessages.length, 0);
   });
 
   test("manual preview on non-rust file does not invoke extractor", async () => {

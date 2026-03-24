@@ -461,6 +461,11 @@ class PreviewController {
         return;
       }
 
+      if (error instanceof ExtractorError && error.kind === "unsupported_scope") {
+        // Fail-open for unsupported scopes: keep current preview untouched and stay silent.
+        return;
+      }
+
       const message = formatPreviewError(error);
       const suppressRepeatedAutoWarning = !request.manual && message === this.lastAutoWarning;
       const renderedNotice = await tryRenderNotice(this.panel(!request.manual), request.editor, message);
