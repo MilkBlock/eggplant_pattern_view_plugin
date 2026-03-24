@@ -622,51 +622,85 @@ fn extract_action_effects(
     known_pattern_vars: &BTreeSet<String>,
 ) -> Vec<ActionEffect> {
     let action_bindings = collect_action_local_bindings(block, &bindings.ctx_name);
+    let action_method_calls = block
+        .syntax()
+        .descendants()
+        .filter_map(ast::MethodCallExpr::cast)
+        .filter(|method_call| {
+            !method_call
+                .syntax()
+                .ancestors()
+                .skip(1)
+                .take_while(|ancestor| ancestor != block.syntax())
+                .any(|ancestor| ast::ClosureExpr::can_cast(ancestor.kind()))
+        })
+        .filter(|method_call| {
+            method_call
+                .receiver()
+                .and_then(expr_variable_name)
+                .is_some_and(|receiver| receiver == bindings.ctx_name)
+        })
+        .filter(|method_call| {
+            method_call
+                .name_ref()
+                .map(|name_ref| {
+                    let method_name = name_ref.syntax().text().to_string();
+                    method_name == "union" || method_name.starts_with("insert_")
+                })
+                .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+
+    let synthetic_inline_bindings = action_method_calls
+        .iter()
+        .filter_map(|method_call| {
+            let method_name = method_call.name_ref()?.syntax().text().to_string();
+            if !method_name.starts_with("insert_") {
+                return None;
+            }
+            if enclosing_let_binding_name(method_call.syntax()).is_some() {
+                return None;
+            }
+            has_enclosing_action_method_call(method_call.syntax(), &bindings.ctx_name)
+                .then(|| method_call.syntax().text_range())
+        })
+        .enumerate()
+        .map(|(index, range)| (range, format!("tmp_{index}")))
+        .collect::<HashMap<_, _>>();
+
     let mut effects = Vec::new();
     let mut next_effect_id = 0usize;
-    for method_call in block.syntax().descendants().filter_map(ast::MethodCallExpr::cast) {
-        if method_call
-            .syntax()
-            .ancestors()
-            .skip(1)
-            .take_while(|ancestor| ancestor != block.syntax())
-            .any(|ancestor| ast::ClosureExpr::can_cast(ancestor.kind()))
-        {
-            continue;
-        }
-        let Some(receiver) = method_call.receiver() else {
-            continue;
-        };
-        if expr_variable_name(receiver) != Some(bindings.ctx_name.clone()) {
-            continue;
-        }
-        let Some(name_ref) = method_call.name_ref() else {
-            continue;
-        };
-        let method_name = name_ref.syntax().text().to_string();
-        if method_name != "union" && !method_name.starts_with("insert_") {
-            continue;
-        }
+    for method_call in action_method_calls {
         let referenced_pat_vars = collect_pat_field_references(method_call.syntax(), bindings.pat_name.as_deref())
             .into_iter()
             .filter(|name| known_pattern_vars.contains(name))
             .collect::<Vec<_>>();
-        let referenced_action_vars = method_call
+        let mut referenced_action_vars = method_call
             .arg_list()
             .into_iter()
             .flat_map(|args| args.args())
             .flat_map(|arg| collect_variable_references(&arg))
             .filter(|name| action_bindings.contains(name))
             .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
+            ;
+        for inline_binding in collect_nested_action_bindings(
+            &method_call,
+            &bindings.ctx_name,
+            &synthetic_inline_bindings,
+        ) {
+            referenced_action_vars.insert(inline_binding);
+        }
         effects.push(ActionEffect {
             id: format!("effect_{next_effect_id}"),
             effect_id: stable_action_effect_id(method_call.syntax().text_range()),
-            bound_var: enclosing_let_binding_name(method_call.syntax()),
+            bound_var: enclosing_let_binding_name(method_call.syntax()).or_else(|| {
+                synthetic_inline_bindings
+                    .get(&method_call.syntax().text_range())
+                    .cloned()
+            }),
             source_text: method_call.syntax().text().to_string(),
             referenced_pat_vars,
-            referenced_action_vars,
+            referenced_action_vars: referenced_action_vars.into_iter().collect(),
             range: span_from_text_range(method_call.syntax().text_range()),
         });
         next_effect_id += 1;
@@ -694,6 +728,73 @@ fn collect_action_local_bindings(block: &ast::BlockExpr, ctx_name: &str) -> BTre
                 .flatten()
         })
         .collect()
+}
+
+fn has_enclosing_action_method_call(node: &SyntaxNode, ctx_name: &str) -> bool {
+    node.ancestors().skip(1).filter_map(ast::MethodCallExpr::cast).any(|method_call| {
+        method_call
+            .receiver()
+            .and_then(expr_variable_name)
+            .is_some_and(|receiver| receiver == ctx_name)
+            && method_call
+                .name_ref()
+                .map(|name_ref| {
+                    let method_name = name_ref.syntax().text().to_string();
+                    method_name == "union" || method_name.starts_with("insert_")
+                })
+                .unwrap_or(false)
+    })
+}
+
+fn collect_nested_action_bindings(
+    method_call: &ast::MethodCallExpr,
+    ctx_name: &str,
+    synthetic_inline_bindings: &HashMap<TextRange, String>,
+) -> Vec<String> {
+    let Some(arg_list) = method_call.arg_list() else {
+        return Vec::new();
+    };
+    let mut bindings = BTreeSet::new();
+    for nested_call in arg_list.syntax().descendants().filter_map(ast::MethodCallExpr::cast) {
+        if nested_call.syntax() == method_call.syntax() {
+            continue;
+        }
+        if !nested_call
+            .receiver()
+            .and_then(expr_variable_name)
+            .is_some_and(|receiver| receiver == ctx_name)
+        {
+            continue;
+        }
+        if !nested_call
+            .name_ref()
+            .map(|name_ref| {
+                let method_name = name_ref.syntax().text().to_string();
+                method_name == "union" || method_name.starts_with("insert_")
+            })
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let is_direct_child = nested_call
+            .syntax()
+            .ancestors()
+            .skip(1)
+            .take_while(|ancestor| ancestor != method_call.syntax())
+            .filter_map(ast::MethodCallExpr::cast)
+            .all(|ancestor| ancestor.syntax() == method_call.syntax());
+        if !is_direct_child {
+            continue;
+        }
+        if let Some(binding) = enclosing_let_binding_name(nested_call.syntax()).or_else(|| {
+            synthetic_inline_bindings
+                .get(&nested_call.syntax().text_range())
+                .cloned()
+        }) {
+            bindings.insert(binding);
+        }
+    }
+    bindings.into_iter().collect()
 }
 
 fn enclosing_let_binding_name(node: &SyntaxNode) -> Option<String> {
@@ -1155,6 +1256,39 @@ fn demo() {
         assert_eq!(ir.action_effects.len(), 2);
         assert_eq!(ir.action_effects[0].source_text, "ctx.insert_const(3)");
         assert_eq!(ir.action_effects[1].source_text, "ctx.union(pat.p, folded)");
+    }
+
+    #[test]
+    fn synthesizes_tmp_bindings_for_inline_nested_action_calls() {
+        let src = r#"
+fn demo() {
+    MyTx::add_rule("demo", ruleset, || {
+        let x = Expr::query_leaf();
+        let y = Expr::query_leaf();
+        let bop = Bop::query(&x, &y);
+        DemoPat::new(x, y, bop)
+    }, |ctx, pat| {
+        ctx.union(pat.bop, ctx.insert_bop("Add", pat.y.val, pat.x.val));
+    });
+}
+"#;
+        let ir = extract(src, "ctx.union(pat.bop, ctx.insert_bop(");
+        assert_eq!(ir.action_effects.len(), 2);
+
+        let inline_insert = ir
+            .action_effects
+            .iter()
+            .find(|effect| effect.source_text == r#"ctx.insert_bop("Add", pat.y.val, pat.x.val)"#)
+            .expect("inline insert action effect should be extracted");
+        assert_eq!(inline_insert.bound_var.as_deref(), Some("tmp_0"));
+
+        let union = ir
+            .action_effects
+            .iter()
+            .find(|effect| effect.source_text == r#"ctx.union(pat.bop, ctx.insert_bop("Add", pat.y.val, pat.x.val))"#)
+            .expect("union effect should be extracted");
+        assert_eq!(union.referenced_pat_vars, vec!["bop", "x", "y"]);
+        assert_eq!(union.referenced_action_vars, vec!["tmp_0"]);
     }
 
     #[test]

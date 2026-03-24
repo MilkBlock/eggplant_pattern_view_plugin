@@ -761,7 +761,7 @@ export function patternIrToDotWithMode(
       for (const target of targets) {
         lines.push(`    ${quote(id)} -> ${quote(target)} [style=dashed, color="#c47a4a"];`);
       }
-      for (const actionVar of effect.referenced_action_vars) {
+      for (const actionVar of new Set(effect.referenced_action_vars)) {
         const target = actionBindingMap.get(actionVar);
         if (target) {
           lines.push(`    ${quote(id)} -> ${quote(target)} [style=dashed, color="#c47a4a"];`);
