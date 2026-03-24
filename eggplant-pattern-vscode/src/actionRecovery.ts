@@ -1,16 +1,81 @@
 import { ActionEffect, TextSpan } from "./ir";
 
 export type ActionRecoveryMode = "static" | "sample" | "hybrid";
+export type ActionRecoveryStatus = "resolved" | "dynamic-unknown" | "unsupported";
+export type ActionRecoverySource = "static-inline" | "sample-trace" | "fallback";
+
+export interface DynamicActionRecoveryPolicy {
+  enabled: boolean;
+  mode: ActionRecoveryMode;
+  failOpen: true;
+  unknownMarker: "dynamic-unknown";
+}
+
+export interface ActionRecoveryResult {
+  status: ActionRecoveryStatus;
+  source: ActionRecoverySource;
+  summary: string;
+  anchor: TextSpan | null;
+}
 
 export interface ActionRecoveryPreviewMetadata {
   summary: string;
   diagnostics: ActionSampleDiagnostic[];
-  graphOverride: ActionSampleGraphOverride;
 }
 
-export interface ActionSampleGraphOverride {
-  effectLabels: Record<string, string>;
-  visibleEffectIds: string[] | null;
+export interface TraceSourcePreview {
+  actionEffects: ActionEffect[];
+  summary: string;
+  diagnostics: ActionSampleDiagnostic[];
+}
+
+export interface ActionSampleTrace {
+  version: 1;
+  action_range: TextSpan;
+  events: ActionSampleEvent[];
+  diagnostics: ActionSampleDiagnostic[];
+}
+
+export type ActionSampleEvent =
+  | ActionInsertEvent
+  | ActionUnionEvent
+  | ActionBranchEvent
+  | ActionUnknownEvent;
+
+export interface ActionInsertEvent {
+  kind: "insert";
+  id: string;
+  effect_id: string;
+  callee: string;
+  rendered_label: string | null;
+  source_range: TextSpan;
+  input_ids: string[];
+}
+
+export interface ActionUnionEvent {
+  kind: "union";
+  id: string;
+  effect_id: string;
+  lhs: string;
+  rhs: string;
+  source_range: TextSpan;
+}
+
+export interface ActionBranchEvent {
+  kind: "branch";
+  id: string;
+  effect_id: string | null;
+  branch_kind: "if" | "match";
+  source_range: TextSpan;
+  chosen_arm_label: string | null;
+}
+
+export interface ActionUnknownEvent {
+  kind: "dynamic-unknown";
+  id: string;
+  effect_id: string | null;
+  source_range: TextSpan | null;
+  reason: string;
 }
 
 export interface ActionSampleDiagnostic {
@@ -25,24 +90,61 @@ interface RuntimeActionSampleTrace {
 }
 
 type RuntimeActionSampleEvent =
-  | { kind: "insert"; id: string; effect_id: string | null; table: string | null; key_debug: string[]; rendered_label: string | null }
-  | { kind: "union"; id: string; effect_id: string | null; lhs_debug: string | null; rhs_debug: string | null; rendered_label: string | null }
+  | { kind: "insert"; id: string; effect_id: string | null }
+  | { kind: "union"; id: string; effect_id: string | null }
   | { kind: "subsume"; id: string; effect_id: string | null }
   | { kind: "remove"; id: string; effect_id: string | null }
   | { kind: "dynamic-unknown"; id: string; effect_id: string | null; reason: string };
 
-function stableEffectId(effect: ActionEffect): string {
-  return `effect@${effect.range.start}:${effect.range.end}`;
+export const DEFAULT_DYNAMIC_ACTION_RECOVERY_POLICY: DynamicActionRecoveryPolicy = {
+  enabled: false,
+  mode: "hybrid",
+  failOpen: true,
+  unknownMarker: "dynamic-unknown"
+};
+
+export function normalizeActionRecoveryMode(value: string | undefined): ActionRecoveryMode {
+  switch (value) {
+    case "static":
+    case "sample":
+    case "hybrid":
+      return value;
+    default:
+      return DEFAULT_DYNAMIC_ACTION_RECOVERY_POLICY.mode;
+  }
 }
 
-function indexActionEffectsByStableId(actionEffects: ActionEffect[]): Map<string, ActionEffect> {
-  return new Map(actionEffects.map((effect) => [stableEffectId(effect), effect]));
+export function resolveDynamicActionRecoveryPolicy(settings: {
+  enabled?: boolean;
+  mode?: string;
+}): DynamicActionRecoveryPolicy {
+  return {
+    enabled: settings.enabled ?? DEFAULT_DYNAMIC_ACTION_RECOVERY_POLICY.enabled,
+    mode: normalizeActionRecoveryMode(settings.mode),
+    failOpen: true,
+    unknownMarker: "dynamic-unknown"
+  };
+}
+
+export function indexActionEffectsByStableId(
+  actionEffects: ActionEffect[]
+): Map<string, ActionEffect> {
+  return new Map(actionEffects.map((effect) => [effect.effect_id, effect]));
+}
+
+export function resolveTraceEventEffect(
+  event: ActionSampleEvent,
+  byStableId: Map<string, ActionEffect>
+): ActionEffect | null {
+  if (event.effect_id === null) {
+    return null;
+  }
+  return byStableId.get(event.effect_id) ?? null;
 }
 
 export function summarizeRuntimeActionSampleTrace(
   payload: unknown,
-  actionEffects: ActionEffect[],
-  mode: ActionRecoveryMode
+  actionEffects: ActionEffect[]
 ): ActionRecoveryPreviewMetadata | null {
   const trace = parseRuntimeActionSampleTrace(payload);
   if (!trace) {
@@ -54,14 +156,11 @@ export function summarizeRuntimeActionSampleTrace(
   let unresolvedCount = 0;
   let dynamicUnknownCount = 0;
   const diagnostics: ActionSampleDiagnostic[] = [];
-  const effectLabels: Record<string, string> = {};
-  const visibleEffectIds = new Set<string>();
 
   for (const event of trace.events) {
     const effect = event.effect_id === null ? null : effectsByStableId.get(event.effect_id) ?? null;
     if (effect) {
       matchedCount += 1;
-      visibleEffectIds.add(effect.id);
     } else {
       unresolvedCount += 1;
     }
@@ -78,13 +177,6 @@ export function summarizeRuntimeActionSampleTrace(
       continue;
     }
 
-    if (effect) {
-      const label = runtimeEventLabel(event);
-      if (label) {
-        effectLabels[effect.id] = label;
-      }
-    }
-
     if (!effect && event.effect_id !== null) {
       diagnostics.push({
         severity: "info",
@@ -95,7 +187,7 @@ export function summarizeRuntimeActionSampleTrace(
   }
 
   const summaryParts = [
-    `recovery=${mode}`,
+    `recovery=sample`,
     `events=${trace.events.length}`,
     `matched=${matchedCount}`
   ];
@@ -108,11 +200,79 @@ export function summarizeRuntimeActionSampleTrace(
 
   return {
     summary: summaryParts.join(" | "),
-    diagnostics,
-    graphOverride: {
-      effectLabels,
-      visibleEffectIds: mode === "sample" ? Array.from(visibleEffectIds) : null
+    diagnostics
+  };
+}
+
+export function buildTraceSourcePreview(
+  payload: unknown,
+  actionEffects: ActionEffect[]
+): TraceSourcePreview | null {
+  const trace = parseRuntimeActionSampleTrace(payload);
+  if (!trace) {
+    return null;
+  }
+
+  const effectsByStableId = indexActionEffectsByStableId(actionEffects);
+  let matchedCount = 0;
+  let unresolvedCount = 0;
+  let dynamicUnknownCount = 0;
+  const diagnostics: ActionSampleDiagnostic[] = [];
+  const traceActionEffects: ActionEffect[] = [];
+
+  for (const event of trace.events) {
+    const effect = event.effect_id === null ? null : effectsByStableId.get(event.effect_id) ?? null;
+    if (effect) {
+      matchedCount += 1;
+      traceActionEffects.push({
+        ...effect,
+        id: `trace:${event.id}`,
+        source_text:
+          event.kind === "dynamic-unknown"
+            ? `dynamic-unknown: ${event.reason}`
+            : effect.source_text
+      });
+    } else {
+      unresolvedCount += 1;
     }
+
+    if (event.kind === "dynamic-unknown") {
+      dynamicUnknownCount += 1;
+      diagnostics.push({
+        severity: "warning",
+        message: effect
+          ? `dynamic-unknown at ${event.id}: ${event.reason} (${event.effect_id})`
+          : `dynamic-unknown at ${event.id}: ${event.reason}`,
+        source_range: effect?.range ?? null
+      });
+      continue;
+    }
+
+    if (!effect && event.effect_id !== null) {
+      diagnostics.push({
+        severity: "info",
+        message: `trace event ${event.id} (${event.kind}) did not match any extracted action effect (${event.effect_id})`,
+        source_range: null
+      });
+    }
+  }
+
+  const summaryParts = [
+    "source=trace",
+    `events=${trace.events.length}`,
+    `matched=${matchedCount}`
+  ];
+  if (dynamicUnknownCount > 0) {
+    summaryParts.push(`dynamic-unknown=${dynamicUnknownCount}`);
+  }
+  if (unresolvedCount > 0) {
+    summaryParts.push(`unresolved=${unresolvedCount}`);
+  }
+
+  return {
+    actionEffects: traceActionEffects,
+    summary: summaryParts.join(" | "),
+    diagnostics
   };
 }
 
@@ -163,25 +323,9 @@ function parseRuntimeActionSampleEvent(payload: unknown): RuntimeActionSampleEve
 
   switch (variant) {
     case "Insert":
-      return {
-        kind: "insert",
-        id: eventId,
-        effect_id: effectId,
-        table: typeof record.table === "string" ? record.table : null,
-        key_debug: Array.isArray(record.key_debug)
-          ? record.key_debug.filter((entry): entry is string => typeof entry === "string")
-          : [],
-        rendered_label: typeof record.rendered_label === "string" ? record.rendered_label : null
-      };
+      return { kind: "insert", id: eventId, effect_id: effectId };
     case "Union":
-      return {
-        kind: "union",
-        id: eventId,
-        effect_id: effectId,
-        lhs_debug: typeof record.lhs_debug === "string" ? record.lhs_debug : null,
-        rhs_debug: typeof record.rhs_debug === "string" ? record.rhs_debug : null,
-        rendered_label: typeof record.rendered_label === "string" ? record.rendered_label : null
-      };
+      return { kind: "union", id: eventId, effect_id: effectId };
     case "Subsume":
       return { kind: "subsume", id: eventId, effect_id: effectId };
     case "Remove":
@@ -209,25 +353,7 @@ function parseAlreadyNormalizedRuntimeEvent(
 
   switch (candidate.kind) {
     case "insert":
-      return {
-        kind: "insert",
-        id,
-        effect_id: effectId,
-        table: typeof candidate.table === "string" ? candidate.table : null,
-        key_debug: Array.isArray(candidate.key_debug)
-          ? candidate.key_debug.filter((entry): entry is string => typeof entry === "string")
-          : [],
-        rendered_label: typeof candidate.rendered_label === "string" ? candidate.rendered_label : null
-      };
     case "union":
-      return {
-        kind: "union",
-        id,
-        effect_id: effectId,
-        lhs_debug: typeof candidate.lhs_debug === "string" ? candidate.lhs_debug : null,
-        rhs_debug: typeof candidate.rhs_debug === "string" ? candidate.rhs_debug : null,
-        rendered_label: typeof candidate.rendered_label === "string" ? candidate.rendered_label : null
-      };
     case "subsume":
     case "remove":
       return {
@@ -242,29 +368,6 @@ function parseAlreadyNormalizedRuntimeEvent(
         effect_id: effectId,
         reason: typeof candidate.reason === "string" ? candidate.reason : "unknown"
       };
-    default:
-      return null;
-  }
-}
-
-function runtimeEventLabel(event: RuntimeActionSampleEvent): string | null {
-  switch (event.kind) {
-    case "insert":
-      if (event.rendered_label) {
-        return event.rendered_label;
-      }
-      if (!event.table) {
-        return null;
-      }
-      return `${event.table}(${event.key_debug.join(", ")})`;
-    case "union":
-      if (event.rendered_label) {
-        return event.rendered_label;
-      }
-      if (event.lhs_debug && event.rhs_debug) {
-        return `union(${event.lhs_debug}, ${event.rhs_debug})`;
-      }
-      return null;
     default:
       return null;
   }

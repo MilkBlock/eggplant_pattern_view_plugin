@@ -1,12 +1,20 @@
 import * as vscode from "vscode";
 import * as fs from "fs";
 import * as path from "path";
-import { ActionRecoveryMode, ActionRecoveryPreviewMetadata, summarizeRuntimeActionSampleTrace } from "./actionRecovery";
-import { collectTypstReplacementSources, DotLabelStyle, DotViewMode, patternIrToDotWithMode, RecursiveStrategy } from "./dot";
+import { buildTraceSourcePreview, resolveDynamicActionRecoveryPolicy, summarizeRuntimeActionSampleTrace } from "./actionRecovery";
+import { collectTypstReplacementSources, compactConstraintLabel, DotLabelStyle, DotViewMode, patternIrToDotWithMode, RecursiveStrategy } from "./dot";
 import { configureExtractorResolution, ExtractorError, runExtractor } from "./extractor";
 import { PatternIr } from "./ir";
-import { clearMetadataSourceCache, loadMetadataSources, mergeExternalMetadata, pickMetadataSourceFiles } from "./metadataSources";
-import { PreviewPanel, RecoveryUiMode } from "./previewPanel";
+import { clearMetadataSourceCache, discoverWorkspaceMetadataSourceFiles, loadMetadataSources, mergeExternalMetadata, pickMetadataSourceFiles } from "./metadataSources";
+import {
+  PreviewConstraintFilterMode,
+  PreviewMetadataSourceEntry,
+  PreviewMetadataSourceKind,
+  PreviewMetadataSourcesView,
+  PreviewPanel,
+  PreviewSourceMode,
+  RecoveryUiMode
+} from "./previewPanel";
 import { dotToSvg } from "./svg";
 import { renderTypstSnippets } from "./typst";
 
@@ -100,21 +108,29 @@ class PreviewController {
   private lastAutoWarning: string | undefined;
   private lastPreview: LastPreview | undefined;
   private currentModeOverride: DotViewMode | undefined;
+  private currentSourceMode: PreviewSourceMode = "ast";
   private currentLabelStyle: DotLabelStyle;
   private currentRecursiveStrategy: RecursiveStrategy;
-  private currentRecoveryEnabled: boolean;
-  private currentRecoveryMode: ActionRecoveryMode;
-  private actionSampleTracePath: string;
   private metadataSourceFiles: string[];
+  private autoMetadataSourceFiles: string[] = [];
+  private activeConstraintId: string | null = null;
+  private constraintFilterMode: PreviewConstraintFilterMode = "all";
+  private constraintFilterNodeId: string | null = null;
   private metadataWatchers: vscode.Disposable[] = [];
   private metadataRefreshTimer: NodeJS.Timeout | undefined;
   private readonly callbacks: {
     onModeChange: (mode: DotViewMode) => Promise<void>;
+    onSourceModeChange: (sourceMode: PreviewSourceMode) => Promise<void>;
     onLabelStyleChange: (labelStyle: DotLabelStyle) => Promise<void>;
     onRecursiveStrategyChange: (strategy: RecursiveStrategy) => Promise<void>;
     onRecoveryModeChange: (mode: RecoveryUiMode) => Promise<void>;
     onSelectTraceFile: () => Promise<void>;
     onClearTraceFile: () => Promise<void>;
+    onSourceClick: (targetId: string) => Promise<void>;
+    onConstraintFilterChange: (mode: PreviewConstraintFilterMode) => Promise<void>;
+    onConstraintNodeDrilldown: (targetId: string) => Promise<void>;
+    onConstraintClick: (constraintId: string) => Promise<void>;
+    onConstraintOpen: (constraintId: string) => Promise<void>;
     onSelectMetadataSources: () => Promise<void>;
     onClearMetadataSources: () => Promise<void>;
     onRefresh: () => Promise<void>;
@@ -123,9 +139,6 @@ class PreviewController {
   constructor(private readonly context: vscode.ExtensionContext) {
     this.currentLabelStyle = configuredDefaultLabelStyle();
     this.currentRecursiveStrategy = configuredDefaultRecursiveStrategy();
-    this.currentRecoveryEnabled = configuredRecoveryEnabled();
-    this.currentRecoveryMode = configuredRecoveryMode();
-    this.actionSampleTracePath = configuredActionSampleTracePath();
     this.metadataSourceFiles = context.workspaceState.get<string[]>(PreviewController.metadataSourceStateKey, []);
     this.callbacks = {
       onModeChange: async (mode) => {
@@ -133,6 +146,9 @@ class PreviewController {
       },
       onLabelStyleChange: async (labelStyle) => {
         await this.showCurrentLabelStyle(labelStyle);
+      },
+      onSourceModeChange: async (sourceMode) => {
+        await this.showCurrentSourceMode(sourceMode);
       },
       onRecursiveStrategyChange: async (strategy) => {
         await this.showCurrentRecursiveStrategy(strategy);
@@ -145,6 +161,21 @@ class PreviewController {
       },
       onClearTraceFile: async () => {
         await this.clearActionSampleTraceFile();
+      },
+      onSourceClick: async (targetId) => {
+        await this.revealSourceTarget(targetId);
+      },
+      onConstraintFilterChange: async (mode: PreviewConstraintFilterMode) => {
+        await this.setConstraintFilterMode(mode);
+      },
+      onConstraintNodeDrilldown: async (targetId: string) => {
+        await this.drilldownConstraintNode(targetId);
+      },
+      onConstraintClick: async (constraintId) => {
+        await this.selectConstraint(constraintId);
+      },
+      onConstraintOpen: async (constraintId) => {
+        await this.openConstraint(constraintId);
       },
       onSelectMetadataSources: async () => {
         await this.selectMetadataSources();
@@ -199,8 +230,18 @@ class PreviewController {
 
   async showCurrentMode(mode: DotViewMode): Promise<void> {
     this.currentModeOverride = mode;
+    this.activeConstraintId = null;
+    this.constraintFilterMode = "all";
+    this.constraintFilterNodeId = null;
     if (this.lastPreview) {
-      await renderDot(this.panel(true), this.lastPreview.editor, this.lastPreview.ir, mode, this.labelStyle(), this.recursiveStrategy(), this.metadataSourceFiles, this.currentRecoveryConfig(), null);
+      await this.renderLastPreview(
+        this.lastPreview.editor,
+        this.lastPreview.ir,
+        mode,
+        this.labelStyle(),
+        this.recursiveStrategy(),
+        true
+      );
       return;
     }
 
@@ -227,6 +268,9 @@ class PreviewController {
 
   async showCurrentLabelStyle(labelStyle: DotLabelStyle): Promise<void> {
     this.currentLabelStyle = labelStyle;
+    this.activeConstraintId = null;
+    this.constraintFilterMode = "all";
+    this.constraintFilterNodeId = null;
     await vscode.workspace.getConfiguration().update(
       "eggplantPattern.defaultLabelStyle",
       labelStyle,
@@ -234,22 +278,32 @@ class PreviewController {
     );
 
     if (this.lastPreview) {
-      await renderDot(
-        this.panel(true),
+      await this.renderLastPreview(this.lastPreview.editor, this.lastPreview.ir, this.currentMode(), labelStyle, this.currentRecursiveStrategy, true);
+    }
+  }
+
+  async showCurrentSourceMode(sourceMode: PreviewSourceMode): Promise<void> {
+    this.currentSourceMode = sourceMode;
+    this.activeConstraintId = null;
+    this.constraintFilterMode = "all";
+    this.constraintFilterNodeId = null;
+    if (this.lastPreview) {
+      await this.renderLastPreview(
         this.lastPreview.editor,
         this.lastPreview.ir,
         this.currentMode(),
-        labelStyle,
+        this.currentLabelStyle,
         this.currentRecursiveStrategy,
-        this.metadataSourceFiles,
-        this.currentRecoveryConfig(),
-        null
+        true
       );
     }
   }
 
   async showCurrentRecursiveStrategy(strategy: RecursiveStrategy): Promise<void> {
     this.currentRecursiveStrategy = strategy;
+    this.activeConstraintId = null;
+    this.constraintFilterMode = "all";
+    this.constraintFilterNodeId = null;
     await vscode.workspace.getConfiguration().update(
       "eggplantPattern.defaultRecursiveStrategy",
       strategy,
@@ -257,31 +311,18 @@ class PreviewController {
     );
 
     if (this.lastPreview) {
-      await renderDot(
-        this.panel(true),
-        this.lastPreview.editor,
-        this.lastPreview.ir,
-        this.currentMode(),
-        this.currentLabelStyle,
-        strategy,
-        this.metadataSourceFiles,
-        this.currentRecoveryConfig(),
-        null
-      );
+      await this.renderLastPreview(this.lastPreview.editor, this.lastPreview.ir, this.currentMode(), this.currentLabelStyle, strategy, true);
     }
   }
 
   async showCurrentRecoveryMode(mode: RecoveryUiMode): Promise<void> {
     if (mode === "off") {
-      this.currentRecoveryEnabled = false;
       await vscode.workspace.getConfiguration().update(
         "eggplantPattern.experimentalDynamicActionRecovery",
         false,
         vscode.ConfigurationTarget.Workspace
       );
     } else {
-      this.currentRecoveryEnabled = true;
-      this.currentRecoveryMode = mode;
       await vscode.workspace.getConfiguration().update(
         "eggplantPattern.experimentalDynamicActionRecovery",
         true,
@@ -293,20 +334,77 @@ class PreviewController {
         vscode.ConfigurationTarget.Workspace
       );
     }
+    await this.refreshCurrentPreview();
+  }
 
-    if (this.lastPreview) {
-      await renderDot(
-        this.panel(true),
-        this.lastPreview.editor,
-        this.lastPreview.ir,
-        this.currentMode(),
-        this.currentLabelStyle,
-        this.currentRecursiveStrategy,
-        this.metadataSourceFiles,
-        this.currentRecoveryConfig(),
-        null
-      );
+  private async selectActionSampleTraceFile(): Promise<void> {
+    const picked = await vscode.window.showOpenDialog({
+      canSelectFiles: true,
+      canSelectFolders: false,
+      canSelectMany: false,
+      openLabel: "Select Action Trace",
+      filters: {
+        JSON: ["json"]
+      }
+    });
+    if (!picked || picked.length === 0) {
+      return;
     }
+
+    await vscode.workspace.getConfiguration().update(
+      "eggplantPattern.actionSampleTracePath",
+      picked[0].fsPath,
+      vscode.ConfigurationTarget.Workspace
+    );
+    await vscode.workspace.getConfiguration().update(
+      "eggplantPattern.experimentalDynamicActionRecovery",
+      true,
+      vscode.ConfigurationTarget.Workspace
+    );
+    await vscode.workspace.getConfiguration().update(
+      "eggplantPattern.dynamicActionRecoveryMode",
+      "sample",
+      vscode.ConfigurationTarget.Workspace
+    );
+    await this.refreshCurrentPreview();
+  }
+
+  private async clearActionSampleTraceFile(): Promise<void> {
+    await vscode.workspace.getConfiguration().update(
+      "eggplantPattern.actionSampleTracePath",
+      "",
+      vscode.ConfigurationTarget.Workspace
+    );
+    await this.refreshCurrentPreview();
+  }
+
+  private async refreshCurrentPreview(): Promise<void> {
+    const editor = this.lastPreview?.editor ?? vscode.window.activeTextEditor;
+    if (!editor || editor.document.languageId !== "rust") {
+      return;
+    }
+    await this.requestPreview(editor, true, true);
+  }
+
+  async handleConfigurationChange(event: vscode.ConfigurationChangeEvent): Promise<void> {
+    if (
+      !event.affectsConfiguration("eggplantPattern.experimentalDynamicActionRecovery") &&
+      !event.affectsConfiguration("eggplantPattern.dynamicActionRecoveryMode") &&
+      !event.affectsConfiguration("eggplantPattern.actionSampleTracePath")
+    ) {
+      return;
+    }
+
+    if (!PreviewPanel.current()) {
+      return;
+    }
+
+    const editor = this.lastPreview?.editor ?? vscode.window.activeTextEditor;
+    if (!editor || editor.document.languageId !== "rust") {
+      return;
+    }
+
+    await this.requestPreview(editor, false, true);
   }
 
   private async drainQueue(): Promise<void> {
@@ -327,13 +425,32 @@ class PreviewController {
     try {
       const offset = request.editor.document.offsetAt(request.editor.selection.active);
       const extractedIr = await runExtractor(request.editor.document, offset);
-      const externalMetadata = await loadMetadataSources(this.metadataSourceFiles);
+      const requiredMetadataIdentifiers = collectMetadataIdentifiers(extractedIr);
+      const autoMetadataSourceFiles = await discoverWorkspaceMetadataSourceFiles(
+        request.editor.document.uri.fsPath,
+        this.metadataSourceFiles,
+        requiredMetadataIdentifiers
+      );
+      this.autoMetadataSourceFiles = autoMetadataSourceFiles;
+      const allMetadataSourceFiles = Array.from(new Set([
+        ...autoMetadataSourceFiles,
+        ...this.metadataSourceFiles
+      ]));
+      const externalMetadata = await loadMetadataSources(allMetadataSourceFiles);
       const ir = mergeExternalMetadata(extractedIr, externalMetadata);
       if (this.pending && this.pending.id > request.id) {
         return;
       }
       const mode = request.forcedMode ?? this.currentModeOverride ?? resolveDotViewMode(ir, offset);
-      await renderDot(this.panel(!request.manual), request.editor, ir, mode, this.currentLabelStyle, this.currentRecursiveStrategy, this.metadataSourceFiles, this.currentRecoveryConfig(), null);
+      await this.renderLastPreview(
+        request.editor,
+        ir,
+        mode,
+        this.currentLabelStyle,
+        this.currentRecursiveStrategy,
+        !request.manual,
+        allMetadataSourceFiles
+      );
       this.lastPreview = {
         editor: request.editor,
         ir
@@ -368,75 +485,139 @@ class PreviewController {
     return this.currentRecursiveStrategy;
   }
 
-  private currentRecoveryConfig(): RecoveryConfig {
-    return {
-      enabled: this.currentRecoveryEnabled,
-      mode: this.currentRecoveryMode,
-      tracePath: this.actionSampleTracePath
-    };
-  }
-
   private currentMode(): DotViewMode {
     return this.currentModeOverride ?? PreviewPanel.current()?.snapshot()?.mode ?? "combined";
   }
 
-  private async selectActionSampleTraceFile(): Promise<void> {
-    const picked = await vscode.window.showOpenDialog({
-      canSelectFiles: true,
-      canSelectFolders: false,
-      canSelectMany: false,
-      openLabel: "Select Action Trace",
-      filters: {
-        JSON: ["json"]
-      }
-    });
-    if (!picked || picked.length === 0) {
+  private async renderLastPreview(
+    editor: vscode.TextEditor,
+    baseIr: PatternIr,
+    mode: DotViewMode,
+    labelStyle: DotLabelStyle,
+    recursiveStrategy: RecursiveStrategy,
+    preserveFocus: boolean,
+    metadataSourceFiles: string[] = Array.from(new Set([
+      ...this.autoMetadataSourceFiles,
+      ...this.metadataSourceFiles
+    ]))
+  ): Promise<void> {
+    const constraintEntries = buildConstraintEntries(baseIr);
+    const constraintFilterNodeId = this.constraintFilterNodeId;
+    if (
+      this.constraintFilterMode === "node-specific"
+      && constraintFilterNodeId
+      && !constraintEntries.some((constraint) => constraint.referencedNodeIds.includes(constraintFilterNodeId))
+    ) {
+      this.constraintFilterMode = "all";
+      this.constraintFilterNodeId = null;
+    }
+    const visibleConstraints = filterConstraintEntries(
+      constraintEntries,
+      this.constraintFilterMode,
+      this.constraintFilterNodeId
+    );
+    if (!visibleConstraints.some((constraint) => constraint.id === this.activeConstraintId)) {
+      this.activeConstraintId = null;
+    }
+    const metadataSourcesView = buildMetadataSourcesView(
+      editor.document.fileName,
+      this.autoMetadataSourceFiles,
+      this.metadataSourceFiles
+    );
+    const previewInput = await resolvePreviewInput(baseIr, this.currentSourceMode);
+    if (previewInput.kind === "unavailable") {
+      await renderTraceUnavailableNotice(
+        this.panel(preserveFocus),
+        editor,
+        mode,
+        this.currentSourceMode,
+        labelStyle,
+        recursiveStrategy,
+        metadataSourceFiles,
+        metadataSourcesView,
+        previewInput.message
+      );
       return;
     }
 
-    const nextRecoveryMode = this.nextTraceEnabledRecoveryMode();
-    this.currentRecoveryEnabled = true;
-    this.currentRecoveryMode = nextRecoveryMode;
-    this.actionSampleTracePath = picked[0].fsPath;
-    await vscode.workspace.getConfiguration().update(
-      "eggplantPattern.actionSampleTracePath",
-      this.actionSampleTracePath,
-      vscode.ConfigurationTarget.Workspace
+    await renderDot(
+      this.panel(preserveFocus),
+      editor,
+      previewInput.ir,
+      mode,
+      this.currentSourceMode,
+      labelStyle,
+      recursiveStrategy,
+      metadataSourceFiles,
+      metadataSourcesView,
+      constraintEntries,
+      this.constraintFilterMode,
+      this.constraintFilterNodeId,
+      this.activeConstraintId,
+      previewInput.recoveryMetadata,
+      previewInput.notice
     );
-    await vscode.workspace.getConfiguration().update(
-      "eggplantPattern.experimentalDynamicActionRecovery",
-      true,
-      vscode.ConfigurationTarget.Workspace
-    );
-    await vscode.workspace.getConfiguration().update(
-      "eggplantPattern.dynamicActionRecoveryMode",
-      nextRecoveryMode,
-      vscode.ConfigurationTarget.Workspace
-    );
-
-    await this.refreshRecoveryPreview();
   }
 
-  private nextTraceEnabledRecoveryMode(): ActionRecoveryMode {
-    return "sample";
-  }
-
-  private async clearActionSampleTraceFile(): Promise<void> {
-    this.actionSampleTracePath = "";
-    await vscode.workspace.getConfiguration().update(
-      "eggplantPattern.actionSampleTracePath",
-      "",
-      vscode.ConfigurationTarget.Workspace
-    );
-
-    await this.refreshRecoveryPreview();
-  }
-
-  private async refreshRecoveryPreview(): Promise<void> {
-    const editor = this.lastPreview?.editor ?? vscode.window.activeTextEditor;
-    if (editor?.document.languageId === "rust") {
-      await this.requestPreview(editor, true, true);
+  private async selectConstraint(constraintId: string): Promise<void> {
+    if (!this.lastPreview) {
+      return;
     }
+    this.activeConstraintId = this.activeConstraintId === constraintId ? null : constraintId;
+    await this.renderLastPreview(
+      this.lastPreview.editor,
+      this.lastPreview.ir,
+      this.currentMode(),
+      this.currentLabelStyle,
+      this.currentRecursiveStrategy,
+      true
+    );
+  }
+
+  private async setConstraintFilterMode(mode: PreviewConstraintFilterMode): Promise<void> {
+    if (mode === this.constraintFilterMode) {
+      return;
+    }
+    this.constraintFilterMode = mode;
+    if (mode === "all") {
+      this.constraintFilterNodeId = null;
+    }
+    if (!this.lastPreview) {
+      return;
+    }
+    await this.renderLastPreview(
+      this.lastPreview.editor,
+      this.lastPreview.ir,
+      this.currentMode(),
+      this.currentLabelStyle,
+      this.currentRecursiveStrategy,
+      true
+    );
+  }
+
+  private async drilldownConstraintNode(targetId: string): Promise<void> {
+    if (!this.lastPreview) {
+      return;
+    }
+    const visibleConstraints = buildConstraintEntries(this.lastPreview.ir)
+      .filter((constraint) => constraint.referencedNodeIds.includes(targetId));
+    this.constraintFilterMode = "node-specific";
+    this.constraintFilterNodeId = targetId;
+    if (!visibleConstraints.some((constraint) => constraint.id === this.activeConstraintId)) {
+      this.activeConstraintId = null;
+    }
+    await this.renderLastPreview(
+      this.lastPreview.editor,
+      this.lastPreview.ir,
+      this.currentMode(),
+      this.currentLabelStyle,
+      this.currentRecursiveStrategy,
+      true
+    );
+  }
+
+  private async openConstraint(constraintId: string): Promise<void> {
+    await this.revealSourceTarget(`constraint:${constraintId}`);
   }
 
   private async selectMetadataSources(): Promise<void> {
@@ -461,6 +642,26 @@ class PreviewController {
     if (this.lastPreview) {
       await this.requestPreview(this.lastPreview.editor, true, true);
     }
+  }
+
+  private async revealSourceTarget(targetId: string): Promise<void> {
+    const preview = this.lastPreview;
+    if (!preview) {
+      return;
+    }
+
+    const span = resolveSourceSpan(preview.ir, targetId);
+    if (!span) {
+      return;
+    }
+
+    const document = preview.editor.document;
+    const editor = await vscode.window.showTextDocument(document, preview.editor.viewColumn);
+    const start = document.positionAt(span.start);
+    const end = document.positionAt(span.end);
+    const range = new vscode.Range(start, end);
+    editor.selection = new vscode.Selection(start, end);
+    editor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
   }
 
   private resetMetadataWatchers(): void {
@@ -500,24 +701,41 @@ class PreviewController {
       }
     }, debounceMs);
   }
+}
 
-  async handleConfigurationChange(event: vscode.ConfigurationChangeEvent): Promise<void> {
-    if (
-      !event.affectsConfiguration("eggplantPattern.experimentalDynamicActionRecovery") &&
-      !event.affectsConfiguration("eggplantPattern.dynamicActionRecoveryMode") &&
-      !event.affectsConfiguration("eggplantPattern.actionSampleTracePath")
-    ) {
-      return;
-    }
+function collectMetadataIdentifiers(ir: PatternIr): Set<string> {
+  const localVariantNames = new Set<string>();
+  for (const template of ir.display_templates) {
+    localVariantNames.add(template.variant_name);
+  }
+  for (const template of ir.typst_templates) {
+    localVariantNames.add(template.variant_name);
+  }
+  for (const template of ir.precedence_templates) {
+    localVariantNames.add(template.variant_name);
+  }
 
-    this.currentRecoveryEnabled = configuredRecoveryEnabled();
-    this.currentRecoveryMode = configuredRecoveryMode();
-    this.actionSampleTracePath = configuredActionSampleTracePath();
-
-    if (this.lastPreview) {
-      await this.requestPreview(this.lastPreview.editor, false, true);
+  const identifiers = new Set<string>();
+  for (const node of ir.nodes) {
+    if (!localVariantNames.has(node.dsl_type)) {
+      identifiers.add(node.dsl_type);
     }
   }
+  for (const effect of ir.action_effects) {
+    const match = effect.source_text.match(/insert_([A-Za-z0-9_]+)\(/);
+    if (!match?.[1]) {
+      continue;
+    }
+    const variantName = match[1]
+      .split("_")
+      .filter((part) => part.length > 0)
+      .map((part) => part[0].toUpperCase() + part.slice(1))
+      .join("");
+    if (variantName && !localVariantNames.has(variantName)) {
+      identifiers.add(variantName);
+    }
+  }
+  return identifiers;
 }
 
 function containsOffset(range: { start: number; end: number } | null, offset: number): boolean {
@@ -545,18 +763,22 @@ function configuredDefaultRecursiveStrategy(): RecursiveStrategy {
   );
 }
 
-function configuredRecoveryEnabled(): boolean {
-  return vscode.workspace.getConfiguration().get<boolean>(
+function configuredRecoveryUiMode(): RecoveryUiMode {
+  const enabled = vscode.workspace.getConfiguration().get<boolean>(
     "eggplantPattern.experimentalDynamicActionRecovery",
     false
   );
-}
-
-function configuredRecoveryMode(): ActionRecoveryMode {
-  return vscode.workspace.getConfiguration().get<ActionRecoveryMode>(
+  if (!enabled) {
+    return "off";
+  }
+  const mode = vscode.workspace.getConfiguration().get<string>(
     "eggplantPattern.dynamicActionRecoveryMode",
     "hybrid"
   );
+  if (mode === "static" || mode === "sample" || mode === "hybrid") {
+    return mode;
+  }
+  return "hybrid";
 }
 
 function configuredActionSampleTracePath(): string {
@@ -588,41 +810,51 @@ async function renderDot(
   editor: vscode.TextEditor,
   ir: PatternIr,
   mode: DotViewMode,
+  sourceMode: PreviewSourceMode,
   labelStyle: DotLabelStyle,
   recursiveStrategy: RecursiveStrategy,
   metadataSourceFiles: string[],
-  recoveryConfig: RecoveryConfig,
+  metadataSourcesView: PreviewMetadataSourcesView,
+  constraints: ReturnType<typeof buildConstraintEntries>,
+  constraintFilterMode: PreviewConstraintFilterMode,
+  constraintFilterNodeId: string | null,
+  activeConstraintId: string | null,
+  recoveryMetadata: ReturnType<typeof summarizeRuntimeActionSampleTrace> | null,
   notice: string | null
 ): Promise<void> {
-  const recoveryMetadata = await loadActionRecoveryPreviewMetadata(ir, recoveryConfig);
-  const actionOverrides = recoveryMetadata?.graphOverride
-    ? {
-        effectLabels: recoveryMetadata.graphOverride.effectLabels,
-        visibleEffectIds: recoveryMetadata.graphOverride.visibleEffectIds
-          ? new Set(recoveryMetadata.graphOverride.visibleEffectIds)
-          : null
-      }
-    : {};
   const typstRenderings = await renderTypstSnippets(
-    collectTypstReplacementSources(ir, mode, labelStyle, recursiveStrategy, actionOverrides)
+    collectTypstReplacementSources(ir, mode, labelStyle, recursiveStrategy)
   );
-  const dot = patternIrToDotWithMode(ir, mode, labelStyle, recursiveStrategy, typstRenderings, actionOverrides);
+  const dot = patternIrToDotWithMode(ir, mode, labelStyle, recursiveStrategy, typstRenderings);
   const svg = await dotToSvg(dot);
   const strategySuffix = labelStyle === "recursive" ? `, ${recursiveStrategy}` : "";
+  const visibleConstraints = filterConstraintEntries(constraints, constraintFilterMode, constraintFilterNodeId);
+  const activeConstraint = visibleConstraints.find((constraint) => constraint.id === activeConstraintId) ?? null;
   await panel.render({
-    title: `Eggplant Pattern (${modeLabel(mode)}, ${labelStyle}${strategySuffix}): ${editor.document.fileName.split("/").pop() ?? "Preview"}`,
+    title: `Eggplant Pattern (${modeLabel(mode)}, ${sourceMode}, ${labelStyle}${strategySuffix}): ${editor.document.fileName.split("/").pop() ?? "Preview"}`,
     mode,
+    sourceMode,
+    recoveryMode: configuredRecoveryUiMode(),
+    tracePath: configuredActionSampleTracePath(),
     labelStyle,
     recursiveStrategy,
-    recoveryMode: recoveryConfig.enabled ? recoveryConfig.mode : "off",
-    tracePath: recoveryConfig.tracePath,
-    recoverySummary: recoveryMetadata?.summary ?? null,
-    recoveryDiagnostics: recoveryMetadata?.diagnostics.map((entry) => entry.message) ?? [],
     fileName: editor.document.fileName.split("/").pop() ?? "Preview",
     dot,
     svg,
     typstRenderings,
+    sourceTargetIds: collectSourceTargetIds(ir, mode),
+    constraints: visibleConstraints,
+    constraintCountByNodeId: buildConstraintCountByNodeId(constraints),
+    constraintFilterMode,
+    constraintFilterNodeId,
+    activeConstraintId: activeConstraint?.id ?? null,
+    activeConstraintNodeIds: activeConstraint?.referencedNodeIds ?? [],
     metadataSourceFiles,
+    metadataSourcesView,
+    recoverySummary: recoveryMetadata?.summary ?? null,
+    recoveryDiagnostics: recoveryMetadata?.diagnostics.map((entry) => entry.message) ?? [],
+    sourceWarning: null,
+    showSwitchToAst: false,
     notice
   });
 }
@@ -639,18 +871,84 @@ async function renderNotice(panel: PreviewPanel, editor: vscode.TextEditor, mess
   await panel.render({
     title: `Eggplant Pattern (${modeLabel("combined")}, ${configuredDefaultLabelStyle()}): ${editor.document.fileName.split("/").pop() ?? "Preview"}`,
     mode: "combined",
+    sourceMode: "ast",
+    recoveryMode: configuredRecoveryUiMode(),
+    tracePath: configuredActionSampleTracePath(),
     labelStyle: configuredDefaultLabelStyle(),
     recursiveStrategy: configuredDefaultRecursiveStrategy(),
-    recoveryMode: configuredRecoveryEnabled() ? configuredRecoveryMode() : "off",
-    tracePath: configuredActionSampleTracePath(),
-    recoverySummary: null,
-    recoveryDiagnostics: [],
     fileName: editor.document.fileName.split("/").pop() ?? "Preview",
     dot,
     svg,
     typstRenderings: {},
+    sourceTargetIds: [],
+    constraints: [],
+    constraintCountByNodeId: {},
+    constraintFilterMode: "all",
+    constraintFilterNodeId: null,
+    activeConstraintId: null,
+    activeConstraintNodeIds: [],
     metadataSourceFiles: [],
+    metadataSourcesView: {
+      currentFile: editor.document.fileName,
+      autoDiscovered: [],
+      manual: [],
+      effective: [editor.document.fileName],
+      entries: [{ path: editor.document.fileName, kind: "current" }],
+      effectiveEntries: [{ path: editor.document.fileName, kinds: ["current"] }]
+    },
+    recoverySummary: null,
+    recoveryDiagnostics: [],
+    sourceWarning: null,
+    showSwitchToAst: false,
     notice: message
+  });
+}
+
+async function renderTraceUnavailableNotice(
+  panel: PreviewPanel,
+  editor: vscode.TextEditor,
+  mode: DotViewMode,
+  sourceMode: PreviewSourceMode,
+  labelStyle: DotLabelStyle,
+  recursiveStrategy: RecursiveStrategy,
+  metadataSourceFiles: string[],
+  metadataSourcesView: PreviewMetadataSourcesView,
+  message: string
+): Promise<void> {
+  const dot = [
+    "digraph EggplantPatternStatus {",
+    "  graph [pad=0.3];",
+    "  node [shape=note, style=\"rounded,filled\", fillcolor=\"#fff4de\", color=\"#b26a00\", fontname=\"Helvetica\"];",
+    `  status [label=${JSON.stringify(message)}];`,
+    "}"
+  ].join("\n");
+  const svg = await dotToSvg(dot);
+  await panel.render({
+    title: `Eggplant Pattern (${modeLabel(mode)}, ${sourceMode}, ${labelStyle}${labelStyle === "recursive" ? `, ${recursiveStrategy}` : ""}): ${editor.document.fileName.split("/").pop() ?? "Preview"}`,
+    mode,
+    sourceMode,
+    recoveryMode: configuredRecoveryUiMode(),
+    tracePath: configuredActionSampleTracePath(),
+    labelStyle,
+    recursiveStrategy,
+    fileName: editor.document.fileName.split("/").pop() ?? "Preview",
+    dot,
+    svg,
+    typstRenderings: {},
+    sourceTargetIds: [],
+    constraints: buildConstraintEntries(irlessPatternIr()),
+    constraintCountByNodeId: {},
+    constraintFilterMode: "all",
+    constraintFilterNodeId: null,
+    activeConstraintId: null,
+    activeConstraintNodeIds: [],
+    metadataSourceFiles,
+    metadataSourcesView,
+    recoverySummary: "trace-unavailable",
+    recoveryDiagnostics: [message],
+    sourceWarning: message,
+    showSwitchToAst: true,
+    notice: null
   });
 }
 
@@ -675,81 +973,6 @@ function modeLabel(mode: DotViewMode): string {
   }
 }
 
-async function loadActionRecoveryPreviewMetadata(
-  ir: PatternIr,
-  recovery: RecoveryConfig
-): Promise<ActionRecoveryPreviewMetadata | null> {
-  if (!recovery.enabled) {
-    return null;
-  }
-
-  if (recovery.mode === "static") {
-    return {
-      summary: "recovery=static",
-      diagnostics: [],
-      graphOverride: {
-        effectLabels: {},
-        visibleEffectIds: null
-      }
-    };
-  }
-
-  if (!recovery.tracePath) {
-    return {
-      summary: `recovery=${recovery.mode} | trace-missing`,
-      graphOverride: {
-        effectLabels: {},
-        visibleEffectIds: null
-      },
-      diagnostics: [
-        {
-          severity: "warning",
-          message: "trace path is empty",
-          source_range: null
-        }
-      ]
-    };
-  }
-
-  try {
-    const raw = await fs.promises.readFile(recovery.tracePath, "utf8");
-    const parsed = summarizeRuntimeActionSampleTrace(JSON.parse(raw), ir.action_effects, recovery.mode);
-    if (parsed) {
-      return parsed;
-    }
-    return {
-      summary: `recovery=${recovery.mode} | trace-invalid`,
-      graphOverride: {
-        effectLabels: {},
-        visibleEffectIds: null
-      },
-      diagnostics: [
-        {
-          severity: "warning",
-          message: "trace file is not a valid action sample trace JSON",
-          source_range: null
-        }
-      ]
-    };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return {
-      summary: `recovery=${recovery.mode} | trace-load-failed`,
-      graphOverride: {
-        effectLabels: {},
-        visibleEffectIds: null
-      },
-      diagnostics: [
-        {
-          severity: "warning",
-          message,
-          source_range: null
-        }
-      ]
-    };
-  }
-}
-
 function formatPreviewError(error: unknown): string {
   if (error instanceof ExtractorError) {
     return error.message;
@@ -769,10 +992,230 @@ interface LastPreview {
   ir: PatternIr;
 }
 
-interface RecoveryConfig {
-  enabled: boolean;
-  mode: ActionRecoveryMode;
-  tracePath: string;
+function collectSourceTargetIds(ir: PatternIr, mode: DotViewMode): string[] {
+  const targetIds: string[] = [];
+  if (mode === "pattern" || mode === "combined") {
+    for (const node of ir.nodes) {
+      targetIds.push(node.id);
+    }
+  }
+  if (mode === "action" || mode === "combined") {
+    for (const effect of ir.action_effects) {
+      targetIds.push(`effect:${effect.id}`);
+    }
+    for (const fact of ir.seed_facts) {
+      targetIds.push(`seed:${fact.id}`);
+    }
+  }
+  return targetIds;
+}
+
+function buildConstraintEntries(ir: PatternIr): Array<{ id: string; compactText: string; fullText: string; referencedNodeIds: string[] }> {
+  const nodeIds = new Set(ir.nodes.map((node) => node.id));
+  const rootIds = new Set(ir.roots);
+  return ir.constraints.map((constraint) => ({
+    id: constraint.id,
+    compactText: compactConstraintLabel(constraint.source_text, constraint.resolved_text),
+    fullText: constraint.resolved_text,
+    referencedNodeIds: (() => {
+      const referenced = constraint.referenced_vars.filter((name) => nodeIds.has(name) || rootIds.has(name));
+      return referenced.length > 0 ? referenced : [...ir.roots];
+    })()
+  }));
+}
+
+function filterConstraintEntries(
+  constraints: Array<{ id: string; compactText: string; fullText: string; referencedNodeIds: string[] }>,
+  mode: PreviewConstraintFilterMode,
+  nodeId: string | null
+): Array<{ id: string; compactText: string; fullText: string; referencedNodeIds: string[] }> {
+  if (mode !== "node-specific") {
+    return constraints;
+  }
+  if (!nodeId) {
+    return [];
+  }
+  return constraints.filter((constraint) => constraint.referencedNodeIds.includes(nodeId));
+}
+
+function buildConstraintCountByNodeId(
+  constraints: Array<{ id: string; compactText: string; fullText: string; referencedNodeIds: string[] }>
+): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const constraint of constraints) {
+    for (const nodeId of constraint.referencedNodeIds) {
+      counts[nodeId] = (counts[nodeId] ?? 0) + 1;
+    }
+  }
+  return counts;
+}
+
+function irlessPatternIr(): PatternIr {
+  return {
+    scope: {
+      kind: "pattern_function",
+      text_range: { start: 0, end: 0 },
+      pattern_range: null,
+      action_range: null
+    },
+    nodes: [],
+    edges: [],
+    roots: [],
+    constraints: [],
+    action_effects: [],
+    seed_facts: [],
+    display_templates: [],
+    typst_templates: [],
+    precedence_templates: [],
+    diagnostics: []
+  };
+}
+
+function resolveSourceSpan(ir: PatternIr, targetId: string): { start: number; end: number } | null {
+  const node = ir.nodes.find((entry) => entry.id === targetId);
+  if (node) {
+    return node.range;
+  }
+  if (targetId.startsWith("constraint:")) {
+    return ir.constraints.find((entry) => `constraint:${entry.id}` === targetId)?.range ?? null;
+  }
+  if (targetId.startsWith("effect:")) {
+    return ir.action_effects.find((entry) => `effect:${entry.id}` === targetId)?.range ?? null;
+  }
+  if (targetId.startsWith("seed:")) {
+    return ir.seed_facts.find((entry) => `seed:${entry.id}` === targetId)?.range ?? null;
+  }
+  return null;
+}
+
+function buildMetadataSourcesView(
+  currentFile: string,
+  autoMetadataSourceFiles: string[],
+  manualMetadataSourceFiles: string[]
+): PreviewMetadataSourcesView {
+  const autoDiscovered = Array.from(new Set(autoMetadataSourceFiles));
+  const manual = Array.from(new Set(manualMetadataSourceFiles));
+  const entries: PreviewMetadataSourceEntry[] = [
+    { path: currentFile, kind: "current" },
+    ...autoDiscovered.map((filePath) => ({ path: filePath, kind: "auto" as const })),
+    ...manual.map((filePath) => ({ path: filePath, kind: "manual" as const }))
+  ];
+  const effectiveKinds = new Map<string, Set<PreviewMetadataSourceKind>>();
+  for (const entry of entries) {
+    const kinds = effectiveKinds.get(entry.path) ?? new Set<PreviewMetadataSourceKind>();
+    kinds.add(entry.kind);
+    effectiveKinds.set(entry.path, kinds);
+  }
+  const effectiveEntries = Array.from(effectiveKinds.entries()).map(([filePath, kinds]) => ({
+    path: filePath,
+    kinds: Array.from(kinds)
+  }));
+  const effective = effectiveEntries.map((entry) => entry.path);
+  return {
+    currentFile,
+    autoDiscovered,
+    manual,
+    effective,
+    entries,
+    effectiveEntries
+  };
+}
+
+async function loadActionRecoveryPreviewMetadata(
+  ir: PatternIr
+): Promise<ReturnType<typeof summarizeRuntimeActionSampleTrace> | null> {
+  const policy = resolveDynamicActionRecoveryPolicy({
+    enabled: vscode.workspace.getConfiguration().get<boolean>("eggplantPattern.experimentalDynamicActionRecovery", false),
+    mode: vscode.workspace.getConfiguration().get<string>("eggplantPattern.dynamicActionRecoveryMode", "hybrid")
+  });
+  if (!policy.enabled || policy.mode === "static") {
+    return null;
+  }
+
+  const tracePath = vscode.workspace.getConfiguration().get<string>("eggplantPattern.actionSampleTracePath", "").trim();
+  if (tracePath.length === 0) {
+    return null;
+  }
+
+  try {
+    const raw = await fs.promises.readFile(tracePath, "utf8");
+    return summarizeRuntimeActionSampleTrace(JSON.parse(raw), ir.action_effects);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      summary: "recovery=sample | trace-load-failed",
+      diagnostics: [
+        {
+          severity: "warning",
+          message: `sample trace load failed: ${message}`,
+          source_range: null
+        }
+      ]
+    };
+  }
+}
+
+type PreviewInput =
+  | {
+      kind: "ready";
+      ir: PatternIr;
+      recoveryMetadata: ReturnType<typeof summarizeRuntimeActionSampleTrace> | null;
+      notice: string | null;
+    }
+  | {
+      kind: "unavailable";
+      message: string;
+    };
+
+async function resolvePreviewInput(
+  ir: PatternIr,
+  sourceMode: PreviewSourceMode
+): Promise<PreviewInput> {
+  if (sourceMode === "ast") {
+    return {
+      kind: "ready",
+      ir,
+      recoveryMetadata: null,
+      notice: null
+    };
+  }
+
+  const tracePath = vscode.workspace.getConfiguration().get<string>("eggplantPattern.actionSampleTracePath", "").trim();
+  if (tracePath.length === 0) {
+    return {
+      kind: "unavailable",
+      message: "trace-unavailable: set eggplantPattern.actionSampleTracePath"
+    };
+  }
+
+  try {
+    const raw = await fs.promises.readFile(tracePath, "utf8");
+    const tracePreview = buildTraceSourcePreview(JSON.parse(raw), ir.action_effects);
+    if (!tracePreview) {
+      return {
+        kind: "unavailable",
+        message: "trace-unavailable: trace payload is invalid"
+      };
+    }
+    return {
+      kind: "ready",
+      ir: {
+        ...ir,
+        action_effects: tracePreview.actionEffects
+      },
+      recoveryMetadata: {
+        summary: tracePreview.summary,
+        diagnostics: tracePreview.diagnostics
+      },
+      notice: null
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      kind: "unavailable",
+      message: `trace-unavailable: ${message}`
+    };
+  }
 }
 
 export function deactivate(): void {}

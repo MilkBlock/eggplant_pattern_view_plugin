@@ -76,6 +76,12 @@ function typstAtomicExpression(value: string): string {
   const compacted = compactExpression(value);
   const stringLiteralMatch = compacted.match(/^"((?:\\.|[^"])*)"$/);
   if (!stringLiteralMatch) {
+    if (/^[A-Za-z]$/.test(compacted)) {
+      return compacted;
+    }
+    if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(compacted)) {
+      return JSON.stringify(compacted);
+    }
     return compacted;
   }
 
@@ -86,7 +92,7 @@ function typstAtomicExpression(value: string): string {
   return JSON.stringify(unescaped);
 }
 
-function compactConstraintLabel(sourceText: string, resolvedText: string): string {
+export function compactConstraintLabel(sourceText: string, resolvedText: string): string {
   const compactResolved = compactExpression(resolvedText);
   const primitiveOperators: Array<[string, string]> = [
     ["eq", "=="],
@@ -289,12 +295,13 @@ function recursivePatternLabel(
   incomingCounts: Map<string, number>,
   nodeId: string,
   strategy: RecursiveStrategy,
-  seen: Set<string>
+  seen: Set<string>,
+  atomicRenderer: (value: string) => string = compactExpression
 ): RecursivePatternResult | null {
   const node = nodeById.get(nodeId);
   if (!node) {
     return {
-      text: compactExpression(nodeId),
+      text: atomicRenderer(nodeId),
       precedence: Number.MAX_SAFE_INTEGER,
       isAtomic: true,
     };
@@ -309,7 +316,7 @@ function recursivePatternLabel(
   const template = findPreferredTemplate(ir, node.dsl_type);
   if (!template) {
     return node.inputs.length === 0
-      ? { text: compactExpression(node.id), precedence: Number.MAX_SAFE_INTEGER, isAtomic: true }
+      ? { text: atomicRenderer(node.id), precedence: Number.MAX_SAFE_INTEGER, isAtomic: true }
       : null;
   }
 
@@ -317,7 +324,7 @@ function recursivePatternLabel(
   nextSeen.add(nodeId);
   const renderedArgs: Array<{ name: string; value: RenderedTemplateField }> = [];
   for (const input of node.inputs) {
-    const child = recursivePatternLabel(ir, nodeById, incomingCounts, input, strategy, nextSeen);
+    const child = recursivePatternLabel(ir, nodeById, incomingCounts, input, strategy, nextSeen, atomicRenderer);
     if (!child) {
       return null;
     }
@@ -357,11 +364,28 @@ function typstPatternSource(
       incomingCounts,
       node.id,
       strategy,
-      new Set()
+      new Set(),
+      typstAtomicExpression
     );
     if (recursive) {
       return recursive.text;
     }
+  }
+
+  const typstTemplate = findTypstTemplate(ir, node.dsl_type);
+  if (typstTemplate) {
+    const rendered = applyDisplayTemplate(
+      typstTemplate,
+      node.inputs.map((input) => typstAtomicExpression(input)),
+      variantPrecedence(ir, node.dsl_type)
+    );
+    if (rendered) {
+      return rendered;
+    }
+  }
+
+  if (node.inputs.length === 0) {
+    return typstAtomicExpression(node.id);
   }
 
   return nodeLabel(
@@ -443,7 +467,7 @@ function recursiveActionArgLabel(
 
   const patVar = trimmed.replace(/^(?:pat|matched)\./, "");
   if (nodeById.has(patVar)) {
-    const child = recursivePatternLabel(ir, nodeById, incomingCounts, patVar, strategy, new Set());
+    const child = recursivePatternLabel(ir, nodeById, incomingCounts, patVar, strategy, new Set(), atomicRenderer);
     if (child) {
       return child;
     }
@@ -616,7 +640,7 @@ function nodeLabel(
     return label;
   }
   if (labelStyle === "recursive") {
-    const rendered = recursivePatternLabel(ir, nodeById, incomingCounts, nodeId, strategy, new Set());
+    const rendered = recursivePatternLabel(ir, nodeById, incomingCounts, nodeId, strategy, new Set(), displayAtomicExpression);
     if (rendered) {
       return rendered.text;
     }
@@ -629,7 +653,7 @@ function nodeLabel(
   return dslType;
 }
 
-function constraintLabel(sourceText: string, resolvedText: string, labelStyle: DotLabelStyle): string {
+export function constraintLabel(sourceText: string, resolvedText: string, labelStyle: DotLabelStyle): string {
   if (labelStyle === "full") {
     return resolvedText;
   }
@@ -700,22 +724,6 @@ export function patternIrToDotWithMode(
   if (showPattern) {
     for (const edge of ir.edges) {
       lines.push(`  ${quote(edge.from)} -> ${quote(edge.to)} [label=${quote(String(edge.index))}];`);
-    }
-  }
-
-  if (showPattern) {
-    for (const constraint of ir.constraints) {
-      const id = `constraint:${constraint.id}`;
-      lines.push(`  ${quote(id)} [label=${quote(constraintLabel(constraint.source_text, constraint.resolved_text, labelStyle))}, shape=note, fillcolor="#eef3fb", color="#4e6a85"];`);
-    }
-
-    for (const constraint of ir.constraints) {
-      const id = `constraint:${constraint.id}`;
-      const targets = constraint.referenced_vars.filter((name) => nodeSet.has(name) || rootSet.has(name));
-      const attachmentTargets = targets.length > 0 ? targets : ir.roots;
-      for (const target of attachmentTargets) {
-        lines.push(`  ${quote(id)} -> ${quote(target)} [style=dashed, arrowhead=none, color="#7b8ea3"];`);
-      }
     }
   }
 

@@ -2,7 +2,7 @@
   "name": "eggplant-pattern-vscode",
   "displayName": "Eggplant Pattern Preview",
   "description": "Live preview of cursor-scoped eggplant Rust patterns in VSCode.",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "publisher": "MilkBlock",
   "license": "SEE LICENSE IN LICENSE",
   "engines": {
@@ -114,7 +114,7 @@
         "eggplantPattern.experimentalDynamicActionRecovery": {
           "type": "boolean",
           "default": false,
-          "description": "Enable experimental dynamic action recovery controls in the preview panel."
+          "description": "Experimental: enable hybrid dynamic action recovery for complex action closures. This keeps the current static preview as the default and only activates feature-branch recovery code when explicitly enabled."
         },
         "eggplantPattern.dynamicActionRecoveryMode": {
           "type": "string",
@@ -124,12 +124,12 @@
             "hybrid"
           ],
           "default": "hybrid",
-          "description": "Dynamic action recovery mode. 'sample' applies runtime trace-driven labels/branch filtering, 'hybrid' keeps full graph but overlays sampled labels, and 'static' disables trace overlays."
+          "description": "Experimental dynamic action recovery strategy. 'static' tries deep inline only, 'sample' prefers sampled insert traces, and 'hybrid' uses static recovery first and sampled inserts as fallback."
         },
         "eggplantPattern.actionSampleTracePath": {
           "type": "string",
           "default": "",
-          "description": "Absolute path to a runtime action sample trace JSON file."
+          "description": "Optional path to an eggplant runtime ActionSampleTrace JSON file. When experimental dynamic action recovery is enabled, the preview loads this trace, maps sampled events back onto stable action effect ids, and surfaces match/diagnostic metadata fail-open."
         }
       }
     }

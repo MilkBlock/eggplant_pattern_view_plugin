@@ -3,9 +3,17 @@ import * as fs from "fs";
 import * as path from "path";
 import { spawnSync } from "child_process";
 import { suite, test } from "mocha";
-import { collectTypstReplacementSources, patternIrToDot, patternIrToDotWithMode } from "../../dot";
+import { collectTypstReplacementSources, compactConstraintLabel, patternIrToDot, patternIrToDotWithMode } from "../../dot";
 import { PatternIr } from "../../ir";
-import { mergeExternalMetadata, metadataCacheMatches } from "../../metadataSources";
+import { mergeExternalMetadata, metadataCacheMatches, metadataSourceMatchesIdentifiers } from "../../metadataSources";
+import {
+  buildTraceSourcePreview,
+  indexActionEffectsByStableId,
+  normalizeActionRecoveryMode,
+  resolveTraceEventEffect,
+  resolveDynamicActionRecoveryPolicy,
+  summarizeRuntimeActionSampleTrace
+} from "../../actionRecovery";
 import { normalizeTypstMathSource, renderTypstSnippets } from "../../typst";
 
 const WORKSPACE_ROOT = path.resolve(__dirname, "../../../../");
@@ -24,6 +32,211 @@ suite("eggplant pattern headless tests", () => {
     assert.equal(normalizeTypstMathSource("x + y"), "x + y");
     assert.equal(normalizeTypstMathSource("$x + y$"), "x + y");
     assert.equal(normalizeTypstMathSource("$$x + y$$"), "x + y");
+  });
+
+  test("dynamic action recovery policy normalizes experimental mode settings", () => {
+    assert.equal(normalizeActionRecoveryMode("static"), "static");
+    assert.equal(normalizeActionRecoveryMode("sample"), "sample");
+    assert.equal(normalizeActionRecoveryMode("hybrid"), "hybrid");
+    assert.equal(normalizeActionRecoveryMode("unexpected"), "hybrid");
+
+    assert.deepEqual(
+      resolveDynamicActionRecoveryPolicy({ enabled: true, mode: "sample" }),
+      {
+        enabled: true,
+        mode: "sample",
+        failOpen: true,
+        unknownMarker: "dynamic-unknown"
+      }
+    );
+  });
+
+  test("stable action effect ids index back to source ranges", () => {
+    const ir: PatternIr = {
+      scope: {
+        kind: "add_rule_call",
+        text_range: { start: 0, end: 20 },
+        pattern_range: { start: 0, end: 8 },
+        action_range: { start: 9, end: 20 }
+      },
+      nodes: [],
+      edges: [],
+      roots: [],
+      constraints: [],
+      action_effects: [
+        {
+          id: "effect_0",
+          effect_id: "effect@10:24",
+          bound_var: "tmp",
+          source_text: "ctx.insert_m_add(a, b)",
+          referenced_pat_vars: ["a", "b"],
+          referenced_action_vars: [],
+          range: { start: 10, end: 24 }
+        },
+        {
+          id: "effect_1",
+          effect_id: "effect@30:44",
+          bound_var: null,
+          source_text: "ctx.union(pat.x, tmp)",
+          referenced_pat_vars: ["x"],
+          referenced_action_vars: ["tmp"],
+          range: { start: 30, end: 44 }
+        }
+      ],
+      seed_facts: [],
+      display_templates: [],
+      typst_templates: [],
+      precedence_templates: [],
+      diagnostics: []
+    };
+
+    const byStableId = indexActionEffectsByStableId(ir.action_effects);
+    assert.equal(byStableId.get("effect@10:24")?.range.start, 10);
+    assert.equal(byStableId.get("effect@30:44")?.range.end, 44);
+    assert.equal(byStableId.get("effect@999:1000"), undefined);
+
+    assert.equal(
+      resolveTraceEventEffect(
+        {
+          kind: "insert",
+          id: "evt_0",
+          effect_id: "effect@10:24",
+          callee: "MAdd",
+          rendered_label: null,
+          source_range: { start: 10, end: 24 },
+          input_ids: []
+        },
+        byStableId
+      )?.id,
+      "effect_0"
+    );
+
+    assert.equal(
+      resolveTraceEventEffect(
+        {
+          kind: "dynamic-unknown",
+          id: "evt_1",
+          effect_id: null,
+          source_range: null,
+          reason: "branch not sampled"
+        },
+        byStableId
+      ),
+      null
+    );
+  });
+
+  test("runtime action sample trace summary reports matches and diagnostics", () => {
+    const summary = summarizeRuntimeActionSampleTrace(
+      {
+        version: 1,
+        events: [
+          {
+            Insert: {
+              event_id: "evt_0",
+              effect_id: "effect@10:24",
+              table: "MAdd",
+              key_debug: ["a", "b"]
+            }
+          },
+          {
+            DynamicUnknown: {
+              event_id: "evt_1",
+              effect_id: "effect@30:44",
+              reason: "branch not sampled"
+            }
+          },
+          {
+            Union: {
+              event_id: "evt_2",
+              effect_id: "effect@999:1000",
+              lhs_debug: "lhs",
+              rhs_debug: "rhs"
+            }
+          }
+        ]
+      },
+      [
+        {
+          id: "effect_0",
+          effect_id: "effect@10:24",
+          bound_var: "tmp",
+          source_text: "ctx.insert_m_add(a, b)",
+          referenced_pat_vars: ["a", "b"],
+          referenced_action_vars: [],
+          range: { start: 10, end: 24 }
+        },
+        {
+          id: "effect_1",
+          effect_id: "effect@30:44",
+          bound_var: null,
+          source_text: "ctx.union(pat.x, tmp)",
+          referenced_pat_vars: ["x"],
+          referenced_action_vars: ["tmp"],
+          range: { start: 30, end: 44 }
+        }
+      ]
+    );
+
+    assert.ok(summary);
+    assert.equal(summary?.summary, "recovery=sample | events=3 | matched=2 | dynamic-unknown=1 | unresolved=1");
+    assert.equal(summary?.diagnostics.length, 2);
+    assert.match(summary?.diagnostics[0].message ?? "", /dynamic-unknown at evt_1: branch not sampled/);
+    assert.equal(summary?.diagnostics[0].source_range?.start, 30);
+    assert.match(summary?.diagnostics[1].message ?? "", /did not match any extracted action effect/);
+  });
+
+  test("trace source preview reorders action effects by trace events", () => {
+    const preview = buildTraceSourcePreview(
+      {
+        version: 1,
+        events: [
+          {
+            Union: {
+              event_id: "evt_1",
+              effect_id: "effect@30:44",
+              lhs_debug: "lhs",
+              rhs_debug: "rhs"
+            }
+          },
+          {
+            DynamicUnknown: {
+              event_id: "evt_2",
+              effect_id: "effect@10:24",
+              reason: "branch not sampled"
+            }
+          }
+        ]
+      },
+      [
+        {
+          id: "effect_0",
+          effect_id: "effect@10:24",
+          bound_var: "tmp",
+          source_text: "ctx.insert_m_add(a, b)",
+          referenced_pat_vars: ["a", "b"],
+          referenced_action_vars: [],
+          range: { start: 10, end: 24 }
+        },
+        {
+          id: "effect_1",
+          effect_id: "effect@30:44",
+          bound_var: null,
+          source_text: "ctx.union(pat.x, tmp)",
+          referenced_pat_vars: ["x"],
+          referenced_action_vars: ["tmp"],
+          range: { start: 30, end: 44 }
+        }
+      ]
+    );
+
+    assert.ok(preview);
+    assert.deepEqual(
+      preview?.actionEffects.map((effect) => effect.id),
+      ["trace:evt_1", "trace:evt_2"]
+    );
+    assert.equal(preview?.actionEffects[1].source_text, "dynamic-unknown: branch not sampled");
+    assert.match(preview?.summary ?? "", /source=trace/);
   });
 
   test("extractor emits JSON for add_rule closure scope", () => {
@@ -47,6 +260,10 @@ suite("eggplant pattern headless tests", () => {
     assert.equal(ir.constraints[0].source_text, "eq");
     assert.match(ir.constraints[0].resolved_text, /x1\.handle\(\)\.eq/);
     assert.equal(ir.action_effects.length, 2);
+    assert.equal(
+      ir.action_effects[1].effect_id,
+      `effect@${ir.action_effects[1].range.start}:${ir.action_effects[1].range.end}`
+    );
     assert.equal(ir.action_effects[1].source_text, "ctx.union(pat.p, op_value)");
     assert.deepEqual(ir.action_effects[1].referenced_pat_vars, ["p"]);
     assert.equal(ir.seed_facts.length, 1);
@@ -191,6 +408,19 @@ fn demo(use_mul: bool, recorder: ActionSampleRecorder) {
     assert.match(dot, /label="a \* b"/);
   });
 
+  test("metadata source matching detects relevant DSL enums and variants", () => {
+    const source = `
+#[eggplant::dsl]
+enum SharedMath {
+  #[eggplant::typst("integral {f} quad d {x}")]
+  SharedIntegral { f: SharedMath, x: SharedMath },
+}
+`;
+    assert.equal(metadataSourceMatchesIdentifiers(source, new Set(["SharedMath"])), true);
+    assert.equal(metadataSourceMatchesIdentifiers(source, new Set(["SharedIntegral"])), true);
+    assert.equal(metadataSourceMatchesIdentifiers(source, new Set(["OtherDsl"])), false);
+  });
+
   test("metadata cache matching requires both mtime and size", () => {
     assert.equal(metadataCacheMatches({ mtimeMs: 10, size: 20 }, { mtimeMs: 10, size: 20 }), true);
     assert.equal(metadataCacheMatches({ mtimeMs: 10, size: 20 }, { mtimeMs: 10, size: 21 }), false);
@@ -244,6 +474,42 @@ fn demo(use_mul: bool, recorder: ActionSampleRecorder) {
     );
     assert.ok(renderings["effect:effect_33"]);
     assert.ok(renderings["effect:effect_41"]);
+  });
+
+  test("typst sources quote multi-letter pattern leaves so root formulas still render", async () => {
+    const ir: PatternIr = {
+      scope: {
+        kind: "pattern_function",
+        text_range: { start: 0, end: 10 },
+        pattern_range: { start: 0, end: 10 },
+        action_range: null
+      },
+      nodes: [
+        { id: "x", kind: "query_leaf", dsl_type: "Math", label: "x: Math", range: { start: 0, end: 1 }, inputs: [] },
+        { id: "one", kind: "query", dsl_type: "MConst", label: "one: MConst", range: { start: 2, end: 5 }, inputs: [] },
+        { id: "integ", kind: "query", dsl_type: "MIntegral", label: "integ: MIntegral", range: { start: 6, end: 11 }, inputs: ["one", "x"] }
+      ],
+      edges: [
+        { from: "integ", to: "one", kind: "operand", index: 0 },
+        { from: "integ", to: "x", kind: "operand", index: 1 }
+      ],
+      roots: ["integ"],
+      constraints: [],
+      action_effects: [],
+      seed_facts: [],
+      display_templates: [],
+      typst_templates: [
+        { variant_name: "MIntegral", template: "integral {f} quad d {x}", fields: ["f", "x"] }
+      ],
+      precedence_templates: [{ variant_name: "MIntegral", precedence: 90 }],
+      diagnostics: []
+    };
+
+    const typstSources = collectTypstReplacementSources(ir, "pattern", "compact");
+    assert.deepEqual(typstSources, [{ targetId: "integ", source: 'integral "one" quad d x' }]);
+
+    const renderings = await renderTypstSnippets(typstSources);
+    assert.ok(renderings.integ);
   });
 
   test("extractor keeps inline assertions and unique ids", () => {
@@ -343,6 +609,7 @@ fn demo() {
       action_effects: [
         {
           id: "effect_0",
+          effect_id: "effect@8:9",
           bound_var: null,
           source_text: "ctx.union(pat.q, folded)",
           referenced_pat_vars: ["q"],
@@ -371,10 +638,8 @@ fn demo() {
     assert.match(dot, /"q" -> "lhs" \[label="0"\]/);
     assert.match(dot, /"q" -> "rhs" \[label="1"\]/);
     assert.match(dot, /penwidth=2/);
-    assert.match(dot, /lhs\.handle\(\)\.eq/);
-    assert.match(dot, /"constraint:constraint_0" -> "lhs"/);
-    assert.match(dot, /"constraint:constraint_0" -> "rhs"/);
-    assert.equal(/"constraint:constraint_0" -> "q"/.test(dot), false);
+    assert.equal(/lhs\.handle\(\)\.eq/.test(dot), false);
+    assert.equal(/constraint:constraint_0/.test(dot), false);
     assert.match(dot, /cluster_actions/);
     assert.match(dot, /ctx\.union\(pat\.q, folded\)/);
     assert.match(dot, /cluster_seed_facts/);
@@ -396,6 +661,7 @@ fn demo() {
       action_effects: [
         {
           id: "effect_0",
+          effect_id: "effect@0:1",
           bound_var: "x",
           source_text: "ctx.insert_m_var(\"x\".to_owned())",
           referenced_pat_vars: [],
@@ -404,6 +670,7 @@ fn demo() {
         },
         {
           id: "effect_1",
+          effect_id: "effect@2:3",
           bound_var: "ln_x",
           source_text: "ctx.insert_m_ln(x.clone())",
           referenced_pat_vars: [],
@@ -412,6 +679,7 @@ fn demo() {
         },
         {
           id: "effect_2",
+          effect_id: "effect@4:5",
           bound_var: null,
           source_text: "ctx.insert_m_integral(ln_x, x.clone())",
           referenced_pat_vars: [],
@@ -470,6 +738,7 @@ fn demo() {
       action_effects: [
         {
           id: "effect_0",
+          effect_id: "effect@10:12",
           bound_var: null,
           source_text: "ctx.insert_m_mul(pat.a, pat.a)",
           referenced_pat_vars: ["a"],
@@ -527,6 +796,7 @@ fn demo() {
       action_effects: [
         {
           id: "effect_0",
+          effect_id: "effect@4:5",
           bound_var: null,
           source_text: "ctx.union(pat.lhs, rhs.clone())",
           referenced_pat_vars: ["lhs"],
@@ -559,12 +829,11 @@ fn demo() {
     const fullDot = patternIrToDotWithMode(ir, "combined", "full");
 
     assert.match(compactDot, /label="DisplayMath"/);
-    assert.match(compactDot, /label="lhs == rhs"/);
     assert.match(compactDot, /label="union\(lhs, rhs\)"/);
     assert.match(compactDot, /label="expr\.commit\(\)"/);
+    assert.equal(compactConstraintLabel("lhs_eq_rhs", "lhs.handle().eq(&rhs.handle())"), "lhs == rhs");
 
     assert.match(fullDot, /label="lhs: DisplayMath"/);
-    assert.match(fullDot, /lhs\.handle\(\)\.eq/);
     assert.match(fullDot, /ctx\.union\(pat\.lhs, rhs\.clone\(\)\)/);
   });
 
@@ -623,8 +892,7 @@ fn demo() {
     ];
 
     for (const [resolvedText, expectedLabel] of cases) {
-      const dot = patternIrToDotWithMode(makeIr(resolvedText), "pattern", "compact");
-      assert.match(dot, new RegExp(`label=\"${expectedLabel.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}\"`));
+      assert.equal(compactConstraintLabel("constraint_alias", resolvedText), expectedLabel);
     }
   });
 
@@ -665,8 +933,10 @@ fn demo() {
       diagnostics: []
     };
 
-    const dot = patternIrToDotWithMode(ir, "pattern", "compact");
-    assert.match(dot, /label="lhs\.custom_constraint\(rhs\) \[raw\]"/);
+    assert.equal(
+      compactConstraintLabel("lhs.custom_constraint(rhs)", "lhs.handle().custom_constraint(&rhs.handle())"),
+      "lhs.custom_constraint(rhs) [raw]"
+    );
   });
 
   test("compact labels prefer display templates when available", () => {
@@ -684,6 +954,7 @@ fn demo() {
       action_effects: [
         {
           id: "effect_0",
+          effect_id: "effect@1:2",
           bound_var: null,
           source_text: "ctx.insert_m_integral(lhs.clone(), rhs.clone())",
           referenced_pat_vars: [],
