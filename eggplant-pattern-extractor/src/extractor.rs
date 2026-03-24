@@ -222,6 +222,7 @@ fn extract_from_block(
     let mut seed_facts = Vec::new();
     let mut diagnostics = Vec::new();
     let mut local_bindings = HashMap::new();
+    let mut query_vec_bindings: HashMap<String, Vec<String>> = HashMap::new();
     let mut next_constraint_id = 0usize;
 
     for stmt in block.statements() {
@@ -233,7 +234,16 @@ fn extract_from_block(
                 {
                     local_bindings.insert(name, init);
                 }
-                if let Some(node) = extract_let_node(&let_stmt, &local_bindings) {
+                if let Some(pat) = let_stmt.pat()
+                    && let Some(name) = ident_pat_name(pat)
+                    && let Some(init) = let_stmt.initializer()
+                {
+                    let inputs = collect_query_inputs_from_expr(&init, &query_vec_bindings);
+                    if !inputs.is_empty() {
+                        query_vec_bindings.insert(name, inputs);
+                    }
+                }
+                if let Some(node) = extract_let_node(&let_stmt, &query_vec_bindings) {
                     for (index, input) in node.inputs.iter().enumerate() {
                         edges.push(PatternEdge {
                             from: node.id.clone(),
@@ -247,6 +257,7 @@ fn extract_from_block(
             }
             ast::Stmt::ExprStmt(expr_stmt) => {
                 if let Some(expr) = expr_stmt.expr() {
+                    extend_query_vec_binding(&expr, &mut query_vec_bindings);
                     collect_roots_and_constraints(
                         &expr,
                         &local_bindings,
@@ -409,11 +420,11 @@ fn extract_templates(source: &str, attr_name: &str) -> Vec<RawTemplate> {
 
 fn extract_let_node(
     let_stmt: &ast::LetStmt,
-    local_bindings: &HashMap<String, ast::Expr>,
+    query_vec_bindings: &HashMap<String, Vec<String>>,
 ) -> Option<PatternNode> {
     let name = ident_pat_name(let_stmt.pat()?)?;
     let init = let_stmt.initializer()?;
-    let query = query_spec(&init, local_bindings)?;
+    let query = query_spec(&init, query_vec_bindings)?;
     Some(PatternNode {
         id: name.clone(),
         kind: query.kind,
@@ -431,26 +442,24 @@ struct QuerySpec {
     inputs: Vec<String>,
 }
 
-fn query_spec(expr: &ast::Expr, local_bindings: &HashMap<String, ast::Expr>) -> Option<QuerySpec> {
+fn query_spec(expr: &ast::Expr, query_vec_bindings: &HashMap<String, Vec<String>>) -> Option<QuerySpec> {
     let call = ast::CallExpr::cast(expr.syntax().clone())?;
     let callee = call_path(&call)?;
-    let kind = if callee.ends_with("::query_leaf") {
-        crate::ir::NodeKind::QueryLeaf
+    let (kind, suffix) = if callee.ends_with("::query_leaf") {
+        (crate::ir::NodeKind::QueryLeaf, "::query_leaf")
+    } else if callee.ends_with("::query_fields") {
+        (crate::ir::NodeKind::Query, "::query_fields")
     } else if callee.ends_with("::query") {
-        crate::ir::NodeKind::Query
+        (crate::ir::NodeKind::Query, "::query")
     } else {
         return None;
-    };
-    let suffix = match kind {
-        crate::ir::NodeKind::QueryLeaf => "::query_leaf",
-        crate::ir::NodeKind::Query => "::query",
     };
     let dsl_type = callee.trim_end_matches(suffix).to_string();
     let inputs = call
         .arg_list()
         .into_iter()
         .flat_map(|args| args.args())
-        .flat_map(|arg| collect_query_inputs_from_expr(&arg, local_bindings, &mut BTreeSet::new()))
+        .flat_map(|arg| collect_query_inputs_from_expr(&arg, query_vec_bindings))
         .collect();
     Some(QuerySpec {
         kind,
@@ -461,35 +470,51 @@ fn query_spec(expr: &ast::Expr, local_bindings: &HashMap<String, ast::Expr>) -> 
 
 fn collect_query_inputs_from_expr(
     expr: &ast::Expr,
-    local_bindings: &HashMap<String, ast::Expr>,
-    resolving_vars: &mut BTreeSet<String>,
+    query_vec_bindings: &HashMap<String, Vec<String>>,
 ) -> Vec<String> {
     match expr {
         ast::Expr::RefExpr(ref_expr) => ref_expr
             .expr()
-            .map(|inner| collect_query_inputs_from_expr(&inner, local_bindings, resolving_vars))
+            .map(|inner| collect_query_inputs_from_expr(&inner, query_vec_bindings))
             .unwrap_or_default(),
         ast::Expr::ParenExpr(paren_expr) => paren_expr
             .expr()
-            .map(|inner| collect_query_inputs_from_expr(&inner, local_bindings, resolving_vars))
+            .map(|inner| collect_query_inputs_from_expr(&inner, query_vec_bindings))
             .unwrap_or_default(),
         ast::Expr::ArrayExpr(array_expr) => array_expr
             .exprs()
-            .flat_map(|item| collect_query_inputs_from_expr(&item, local_bindings, resolving_vars))
+            .flat_map(|item| collect_query_inputs_from_expr(&item, query_vec_bindings))
+            .collect(),
+        ast::Expr::FieldExpr(field_expr) => field_expr
+            .expr()
+            .map(|receiver| collect_query_inputs_from_expr(&receiver, query_vec_bindings))
+            .unwrap_or_default(),
+        ast::Expr::MethodCallExpr(method_call) => {
+            let mut inputs = method_call
+                .receiver()
+                .map(|receiver| collect_query_inputs_from_expr(&receiver, query_vec_bindings))
+                .unwrap_or_default();
+            if let Some(args) = method_call.arg_list() {
+                for arg in args.args() {
+                    inputs.extend(collect_query_inputs_from_expr(&arg, query_vec_bindings));
+                }
+            }
+            if inputs.is_empty() {
+                expr_variable_name(expr.clone()).into_iter().collect()
+            } else {
+                inputs
+            }
+        }
+        ast::Expr::CallExpr(call_expr) => call_expr
+            .arg_list()
+            .into_iter()
+            .flat_map(|args| args.args())
+            .flat_map(|arg| collect_query_inputs_from_expr(&arg, query_vec_bindings))
             .collect(),
         ast::Expr::PathExpr(path_expr) => {
             let name = path_expr.syntax().text().to_string();
-            if resolving_vars.insert(name.clone()) {
-                if let Some(bound_expr) = local_bindings.get(&name) {
-                    let resolved =
-                        collect_query_inputs_from_expr(bound_expr, local_bindings, resolving_vars);
-                    resolving_vars.remove(&name);
-                    if !resolved.is_empty() {
-                        return resolved;
-                    }
-                } else {
-                    resolving_vars.remove(&name);
-                }
+            if let Some(inputs) = query_vec_bindings.get(&name) {
+                return inputs.clone();
             }
             vec![name]
         }
@@ -497,27 +522,35 @@ fn collect_query_inputs_from_expr(
             collect_vec_macro_items(&macro_expr.syntax().text().to_string())
                 .into_iter()
                 .filter_map(|item| parse_simple_ident_expr(&item))
-                .flat_map(|name| {
-                    if resolving_vars.insert(name.clone()) {
-                        if let Some(bound_expr) = local_bindings.get(&name) {
-                            let resolved = collect_query_inputs_from_expr(
-                                bound_expr,
-                                local_bindings,
-                                resolving_vars,
-                            );
-                            resolving_vars.remove(&name);
-                            if !resolved.is_empty() {
-                                return resolved;
-                            }
-                        } else {
-                            resolving_vars.remove(&name);
-                        }
-                    }
-                    vec![name]
-                })
+                .flat_map(|name| query_vec_bindings.get(&name).cloned().unwrap_or_else(|| vec![name]))
                 .collect()
         }
         _ => expr_variable_name(expr.clone()).into_iter().collect(),
+    }
+}
+
+fn extend_query_vec_binding(expr: &ast::Expr, query_vec_bindings: &mut HashMap<String, Vec<String>>) {
+    let Some(method_call) = expr_as_method_call(expr) else {
+        return;
+    };
+    if method_call.name_ref().map(|name| name.syntax().text().to_string()) != Some("push".into()) {
+        return;
+    }
+    let Some(receiver_name) = method_call.receiver().and_then(expr_variable_name) else {
+        return;
+    };
+    let Some(new_input) = method_call
+        .arg_list()
+        .and_then(|args| args.args().next())
+        .map(|arg| collect_query_inputs_from_expr(&arg, query_vec_bindings))
+    else {
+        return;
+    };
+    if new_input.is_empty() {
+        return;
+    }
+    if let Some(existing_inputs) = query_vec_bindings.get_mut(&receiver_name) {
+        existing_inputs.extend(new_input);
     }
 }
 
@@ -580,6 +613,11 @@ fn parse_simple_ident_expr(input: &str) -> Option<String> {
             continue;
         }
         break;
+    }
+    if let Some((receiver, _)) = text.split_once('.')
+        && is_plain_ident(receiver)
+    {
+        return Some(receiver.to_string());
     }
     if text.is_empty()
         || !text
@@ -760,12 +798,22 @@ fn expr_as_method_call(expr: &ast::Expr) -> Option<ast::MethodCallExpr> {
     }
 }
 
+fn is_action_effect_method(method_name: &str) -> bool {
+    method_name == "union" || method_name.starts_with("insert_") || method_name.starts_with("set_")
+}
+
 fn extract_action_effects(
     block: &ast::BlockExpr,
     bindings: &ActionClosureBindings,
     known_pattern_vars: &BTreeSet<String>,
 ) -> Vec<ActionEffect> {
     let action_bindings = collect_action_local_bindings(block, &bindings.ctx_name);
+    let devalue_pat_bindings = collect_devalue_pat_bindings(
+        block,
+        &bindings.ctx_name,
+        bindings.pat_name.as_deref(),
+        known_pattern_vars,
+    );
     let action_method_calls = block
         .syntax()
         .descendants()
@@ -789,7 +837,7 @@ fn extract_action_effects(
                 .name_ref()
                 .map(|name_ref| {
                     let method_name = name_ref.syntax().text().to_string();
-                    method_name == "union" || method_name.starts_with("insert_")
+                    is_action_effect_method(&method_name)
                 })
                 .unwrap_or(false)
         })
@@ -815,11 +863,11 @@ fn extract_action_effects(
     let mut effects = Vec::new();
     let mut next_effect_id = 0usize;
     for method_call in action_method_calls {
-        let referenced_pat_vars =
+        let mut referenced_pat_vars =
             collect_pat_field_references(method_call.syntax(), bindings.pat_name.as_deref())
                 .into_iter()
                 .filter(|name| known_pattern_vars.contains(name))
-                .collect::<Vec<_>>();
+                .collect::<BTreeSet<_>>();
         let mut referenced_action_vars = method_call
             .arg_list()
             .into_iter()
@@ -827,6 +875,11 @@ fn extract_action_effects(
             .flat_map(|arg| collect_variable_references(&arg))
             .filter(|name| action_bindings.contains(name))
             .collect::<BTreeSet<_>>();
+        for action_var in &referenced_action_vars {
+            if let Some(pat_var) = devalue_pat_bindings.get(action_var) {
+                referenced_pat_vars.insert(pat_var.clone());
+            }
+        }
         for inline_binding in collect_nested_action_bindings(
             &method_call,
             &bindings.ctx_name,
@@ -843,7 +896,7 @@ fn extract_action_effects(
                     .cloned()
             }),
             source_text: method_call.syntax().text().to_string(),
-            referenced_pat_vars,
+            referenced_pat_vars: referenced_pat_vars.into_iter().collect(),
             referenced_action_vars: referenced_action_vars.into_iter().collect(),
             range: span_from_text_range(method_call.syntax().text_range()),
         });
@@ -878,6 +931,50 @@ fn collect_action_local_bindings(block: &ast::BlockExpr, ctx_name: &str) -> BTre
         .collect()
 }
 
+fn collect_devalue_pat_bindings(
+    block: &ast::BlockExpr,
+    ctx_name: &str,
+    pat_name: Option<&str>,
+    known_pattern_vars: &BTreeSet<String>,
+) -> HashMap<String, String> {
+    let Some(pat_name) = pat_name else {
+        return HashMap::new();
+    };
+
+    block
+        .statements()
+        .filter_map(|stmt| match stmt {
+            ast::Stmt::LetStmt(let_stmt) => Some(let_stmt),
+            _ => None,
+        })
+        .filter_map(|let_stmt| {
+            let bound_name = ident_pat_name(let_stmt.pat()?)?;
+            let init = let_stmt.initializer()?;
+            let method_call = expr_as_method_call(&init)?;
+            let method_name = method_call.name_ref()?.syntax().text().to_string();
+            if method_name != "devalue" {
+                return None;
+            }
+            if method_call
+                .receiver()
+                .and_then(expr_variable_name)
+                .is_some_and(|receiver| receiver != ctx_name)
+            {
+                return None;
+            }
+            let arg = method_call.arg_list()?.args().next()?;
+            let first_pat_field = arg
+                .syntax()
+                .descendants()
+                .filter_map(ast::FieldExpr::cast)
+                .find_map(|field_expr| first_pat_field_name(&field_expr, pat_name))?;
+            known_pattern_vars
+                .contains(&first_pat_field)
+                .then_some((bound_name, first_pat_field))
+        })
+        .collect()
+}
+
 fn has_enclosing_action_method_call(node: &SyntaxNode, ctx_name: &str) -> bool {
     node.ancestors()
         .skip(1)
@@ -891,7 +988,7 @@ fn has_enclosing_action_method_call(node: &SyntaxNode, ctx_name: &str) -> bool {
                     .name_ref()
                     .map(|name_ref| {
                         let method_name = name_ref.syntax().text().to_string();
-                        method_name == "union" || method_name.starts_with("insert_")
+                        is_action_effect_method(&method_name)
                     })
                     .unwrap_or(false)
         })
@@ -925,7 +1022,7 @@ fn collect_nested_action_bindings(
             .name_ref()
             .map(|name_ref| {
                 let method_name = name_ref.syntax().text().to_string();
-                method_name == "union" || method_name.starts_with("insert_")
+                is_action_effect_method(&method_name)
             })
             .unwrap_or(false)
         {
@@ -1120,7 +1217,11 @@ fn call_path(call: &ast::CallExpr) -> Option<String> {
 }
 
 fn is_query_call(call: &ast::CallExpr) -> bool {
-    call_path(call).is_some_and(|path| path.ends_with("::query") || path.ends_with("::query_leaf"))
+    call_path(call).is_some_and(|path| {
+        path.ends_with("::query")
+            || path.ends_with("::query_leaf")
+            || path.ends_with("::query_fields")
+    })
 }
 
 fn span_from_text_range(range: TextRange) -> TextSpan {
@@ -1299,6 +1400,112 @@ fn demo() {
     }
 
     #[test]
+    fn extracts_query_inputs_from_push_built_vec_binding() {
+        let src = r#"
+fn demo() {
+    MyTx::add_rule("demo", ruleset, || {
+        let a = Expr::query_leaf();
+        let b = Expr::query_leaf();
+        let mut items = vec![&a];
+        items.push(&b);
+        let pair = Pair::query(items);
+        DemoPat::new(a, b, pair)
+    }, |ctx, pat| {});
+}
+"#;
+        let ir = extract(src, "items.push");
+        let pair = ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "pair")
+            .expect("pair node should exist");
+        assert_eq!(pair.inputs, vec!["a", "b"]);
+        let pair_edges = ir
+            .edges
+            .iter()
+            .filter(|edge| edge.from == "pair")
+            .collect::<Vec<_>>();
+        assert_eq!(pair_edges.len(), 2);
+        assert_eq!(pair_edges[0].to, "a");
+        assert_eq!(pair_edges[1].to, "b");
+    }
+
+    #[test]
+    fn extracts_query_fields_inputs_from_relation_field_aliases() {
+        let src = r#"
+fn demo() {
+    MyTx::add_rule("demo", ruleset, || {
+        let edge = Edge::query();
+        let src = edge.src();
+        let dst = edge.handle_dst();
+        let reach = Reach::query_fields(&src, &dst);
+        DemoPat::new(edge, reach)
+    }, |ctx, pat| {});
+}
+"#;
+        let ir = extract(src, "Reach::query_fields");
+        let reach = ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "reach")
+            .expect("reach node should exist");
+        assert_eq!(reach.dsl_type, "Reach");
+        assert_eq!(reach.inputs, vec!["edge", "edge"]);
+        let reach_edges = ir
+            .edges
+            .iter()
+            .filter(|edge| edge.from == "reach")
+            .collect::<Vec<_>>();
+        assert_eq!(reach_edges.len(), 2);
+        assert_eq!(reach_edges[0].to, "edge");
+        assert_eq!(reach_edges[0].index, 0);
+        assert_eq!(reach_edges[1].to, "edge");
+        assert_eq!(reach_edges[1].index, 1);
+    }
+
+    #[test]
+    fn extracts_relation_field_inputs_from_vec_macro_alias_binding() {
+        let src = r#"
+fn demo() {
+    MyTx::add_rule("demo", ruleset, || {
+        let edge = Edge::query();
+        let fields = vec![&edge.src, &edge.handle_dst()];
+        let reach = Reach::query_fields(fields);
+        DemoPat::new(edge, reach)
+    }, |ctx, pat| {});
+}
+"#;
+        let ir = extract(src, "Reach::query_fields(fields)");
+        let reach = ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "reach")
+            .expect("reach node should exist");
+        assert_eq!(reach.inputs, vec!["edge", "edge"]);
+    }
+
+    #[test]
+    fn recognizes_query_fields_inside_plain_pattern_function_scope() {
+        let src = r#"
+fn relation_pattern() {
+    let src = Edge::src();
+    let dst = Edge::dst();
+    let reach = Reach::query_fields(&src, &dst);
+    DemoPat::new(src, dst, reach);
+}
+"#;
+        let ir = extract(src, "Reach::query_fields");
+        assert!(matches!(ir.scope.kind, ScopeKind::PatternFunction));
+        let reach = ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "reach")
+            .expect("reach node should exist");
+        assert_eq!(reach.dsl_type, "Reach");
+        assert_eq!(reach.inputs, vec!["src", "dst"]);
+    }
+
+    #[test]
     fn resolves_assertion_variables_and_targets() {
         let src = r#"
 fn demo() {
@@ -1459,6 +1666,32 @@ fn demo() {
         assert_eq!(ir.action_effects[0].referenced_pat_vars, vec!["l"]);
         assert_eq!(ir.action_effects[1].referenced_pat_vars, vec!["p"]);
         assert_eq!(ir.action_effects[1].referenced_action_vars, vec!["folded"]);
+    }
+
+    #[test]
+    fn captures_set_effects_and_devalue_back_references() {
+        let src = r#"
+fn demo() {
+    MyTx::add_rule("demo", ruleset, || {
+        let l = Const::query();
+        let r = Const::query();
+        let p = Add::query(&l, &r);
+        DemoPat::new(l, r, p)
+    }, |ctx, pat| {
+        let src = ctx.devalue(pat.l);
+        let dst = ctx.devalue(pat.r);
+        ctx.set_reach_flag(src, dst, true);
+    });
+}
+"#;
+        let ir = extract(src, "ctx.set_reach_flag");
+        assert_eq!(ir.action_effects.len(), 1);
+        assert_eq!(
+            ir.action_effects[0].source_text,
+            "ctx.set_reach_flag(src, dst, true)"
+        );
+        assert_eq!(ir.action_effects[0].referenced_pat_vars, vec!["l", "r"]);
+        assert_eq!(ir.action_effects[0].referenced_action_vars, vec!["dst", "src"]);
     }
 
     #[test]
@@ -1727,6 +1960,86 @@ fn demo() {
         let ir = extract(src, "DemoPat::new");
         assert_eq!(ir.seed_facts.len(), 1);
         assert_eq!(ir.seed_facts[0].committed_root, "before");
+    }
+
+    #[test]
+    fn typed_relation_query_fields_tracks_relation_projection_inputs() {
+        let src = r#"
+fn demo() {
+    MyTx::add_rule("typed_relation", ruleset, || {
+        let edge = Edge::query();
+        let src = edge.src();
+        let dst = edge.dst();
+        let reach = Reach::query_fields(&src, &dst);
+        ReachPat::new(edge, reach)
+    }, |ctx, pat| {
+        ctx.union(pat.reach, pat.edge);
+    });
+}
+"#;
+        let ir = extract(src, "Reach::query_fields");
+        let reach = ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "reach")
+            .expect("reach query node should be extracted");
+        assert_eq!(reach.dsl_type, "Reach");
+        assert_eq!(reach.inputs, vec!["edge", "edge"]);
+
+        let reach_inputs = ir
+            .edges
+            .iter()
+            .filter(|edge| edge.from == "reach")
+            .map(|edge| edge.to.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(reach_inputs, vec!["edge", "edge"]);
+    }
+
+    #[test]
+    fn typed_relation_query_fields_keeps_tuple_binding_inputs() {
+        let src = r#"
+fn demo() {
+    MyTx::add_rule("typed_relation_tuple", ruleset, || {
+        let src = Edge::src();
+        let dst = Edge::dst();
+        let edge = Edge::query_fields(&src, &dst);
+        ReachPat::new(src, dst, edge)
+    }, |ctx, pat| {
+        ctx.union(pat.edge, pat.edge);
+    });
+}
+"#;
+        let ir = extract(src, "Edge::query_fields");
+        let edge = ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "edge")
+            .expect("edge query node should be extracted");
+        assert_eq!(edge.dsl_type, "Edge");
+        assert_eq!(edge.inputs, vec!["src", "dst"]);
+        assert_eq!(ir.roots, vec!["src", "dst", "edge"]);
+    }
+
+    #[test]
+    fn typed_relation_handle_field_sugar_is_tracked_in_constraints() {
+        let src = r#"
+fn demo() {
+    MyTx::add_rule("typed_relation_handle", ruleset, || {
+        let edge = Edge::query();
+        let eq = edge.handle_src().eq(&edge.handle_dst());
+        ReachPat::new(edge).assert(eq)
+    }, |ctx, pat| {
+        ctx.union(pat.edge, pat.edge);
+    });
+}
+"#;
+        let ir = extract(src, "edge.handle_src()");
+        assert_eq!(ir.constraints.len(), 1);
+        assert_eq!(
+            ir.constraints[0].resolved_text,
+            "edge.handle_src().eq(&edge.handle_dst())"
+        );
+        assert_eq!(ir.constraints[0].referenced_vars, vec!["edge"]);
     }
 
     #[test]
