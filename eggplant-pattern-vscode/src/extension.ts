@@ -113,7 +113,7 @@ class PreviewController {
     onLabelStyleChange: (labelStyle: DotLabelStyle) => Promise<void>;
     onRecursiveStrategyChange: (strategy: RecursiveStrategy) => Promise<void>;
     onRecoveryModeChange: (mode: RecoveryUiMode) => Promise<void>;
-    onSelectTraceFile: (filePath?: string) => Promise<void>;
+    onSelectTraceFile: () => Promise<void>;
     onClearTraceFile: () => Promise<void>;
     onSelectMetadataSources: () => Promise<void>;
     onClearMetadataSources: () => Promise<void>;
@@ -140,8 +140,8 @@ class PreviewController {
       onRecoveryModeChange: async (mode) => {
         await this.showCurrentRecoveryMode(mode);
       },
-      onSelectTraceFile: async (filePath) => {
-        await this.selectActionSampleTraceFile(filePath);
+      onSelectTraceFile: async () => {
+        await this.selectActionSampleTraceFile();
       },
       onClearTraceFile: async () => {
         await this.clearActionSampleTraceFile();
@@ -380,30 +380,24 @@ class PreviewController {
     return this.currentModeOverride ?? PreviewPanel.current()?.snapshot()?.mode ?? "combined";
   }
 
-  private async selectActionSampleTraceFile(selectedPath?: string): Promise<void> {
-    let tracePath = selectedPath?.trim() ?? "";
-    if (tracePath.length === 0) {
-      const testDialog = (globalThis as { __eggplantPatternTraceSelectionDialog?: typeof vscode.window.showOpenDialog })
-        .__eggplantPatternTraceSelectionDialog;
-      const picked = await (testDialog ?? vscode.window.showOpenDialog)({
-        canSelectFiles: true,
-        canSelectFolders: false,
-        canSelectMany: false,
-        openLabel: "Select Action Trace",
-        filters: {
-          JSON: ["json"]
-        }
-      });
-      if (!picked || picked.length === 0) {
-        return;
+  private async selectActionSampleTraceFile(): Promise<void> {
+    const picked = await vscode.window.showOpenDialog({
+      canSelectFiles: true,
+      canSelectFolders: false,
+      canSelectMany: false,
+      openLabel: "Select Action Trace",
+      filters: {
+        JSON: ["json"]
       }
-      tracePath = picked[0].fsPath;
+    });
+    if (!picked || picked.length === 0) {
+      return;
     }
 
     const nextRecoveryMode = this.nextTraceEnabledRecoveryMode();
     this.currentRecoveryEnabled = true;
     this.currentRecoveryMode = nextRecoveryMode;
-    this.actionSampleTracePath = tracePath;
+    this.actionSampleTracePath = picked[0].fsPath;
     await vscode.workspace.getConfiguration().update(
       "eggplantPattern.actionSampleTracePath",
       this.actionSampleTracePath,
