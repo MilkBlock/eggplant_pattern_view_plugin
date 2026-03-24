@@ -113,7 +113,7 @@ class PreviewController {
     onLabelStyleChange: (labelStyle: DotLabelStyle) => Promise<void>;
     onRecursiveStrategyChange: (strategy: RecursiveStrategy) => Promise<void>;
     onRecoveryModeChange: (mode: RecoveryUiMode) => Promise<void>;
-    onSelectTraceFile: () => Promise<void>;
+    onSelectTraceFile: (filePath?: string) => Promise<void>;
     onClearTraceFile: () => Promise<void>;
     onSelectMetadataSources: () => Promise<void>;
     onClearMetadataSources: () => Promise<void>;
@@ -140,8 +140,8 @@ class PreviewController {
       onRecoveryModeChange: async (mode) => {
         await this.showCurrentRecoveryMode(mode);
       },
-      onSelectTraceFile: async () => {
-        await this.selectActionSampleTraceFile();
+      onSelectTraceFile: async (filePath) => {
+        await this.selectActionSampleTraceFile(filePath);
       },
       onClearTraceFile: async () => {
         await this.clearActionSampleTraceFile();
@@ -380,30 +380,51 @@ class PreviewController {
     return this.currentModeOverride ?? PreviewPanel.current()?.snapshot()?.mode ?? "combined";
   }
 
-  private async selectActionSampleTraceFile(): Promise<void> {
-    const picked = await vscode.window.showOpenDialog({
-      canSelectFiles: true,
-      canSelectFolders: false,
-      canSelectMany: false,
-      openLabel: "Select Action Trace",
-      filters: {
-        JSON: ["json"]
+  private async selectActionSampleTraceFile(selectedPath?: string): Promise<void> {
+    let tracePath = selectedPath?.trim() ?? "";
+    if (tracePath.length === 0) {
+      const testDialog = (globalThis as { __eggplantPatternTraceSelectionDialog?: typeof vscode.window.showOpenDialog })
+        .__eggplantPatternTraceSelectionDialog;
+      const picked = await (testDialog ?? vscode.window.showOpenDialog)({
+        canSelectFiles: true,
+        canSelectFolders: false,
+        canSelectMany: false,
+        openLabel: "Select Action Trace",
+        filters: {
+          JSON: ["json"]
+        }
+      });
+      if (!picked || picked.length === 0) {
+        return;
       }
-    });
-    if (!picked || picked.length === 0) {
-      return;
+      tracePath = picked[0].fsPath;
     }
 
-    this.actionSampleTracePath = picked[0].fsPath;
+    const nextRecoveryMode = this.nextTraceEnabledRecoveryMode();
+    this.currentRecoveryEnabled = true;
+    this.currentRecoveryMode = nextRecoveryMode;
+    this.actionSampleTracePath = tracePath;
     await vscode.workspace.getConfiguration().update(
       "eggplantPattern.actionSampleTracePath",
       this.actionSampleTracePath,
       vscode.ConfigurationTarget.Workspace
     );
+    await vscode.workspace.getConfiguration().update(
+      "eggplantPattern.experimentalDynamicActionRecovery",
+      true,
+      vscode.ConfigurationTarget.Workspace
+    );
+    await vscode.workspace.getConfiguration().update(
+      "eggplantPattern.dynamicActionRecoveryMode",
+      nextRecoveryMode,
+      vscode.ConfigurationTarget.Workspace
+    );
 
-    if (this.lastPreview) {
-      await this.requestPreview(this.lastPreview.editor, true, true);
-    }
+    await this.refreshRecoveryPreview();
+  }
+
+  private nextTraceEnabledRecoveryMode(): ActionRecoveryMode {
+    return "sample";
   }
 
   private async clearActionSampleTraceFile(): Promise<void> {
@@ -414,8 +435,13 @@ class PreviewController {
       vscode.ConfigurationTarget.Workspace
     );
 
-    if (this.lastPreview) {
-      await this.requestPreview(this.lastPreview.editor, true, true);
+    await this.refreshRecoveryPreview();
+  }
+
+  private async refreshRecoveryPreview(): Promise<void> {
+    const editor = this.lastPreview?.editor ?? vscode.window.activeTextEditor;
+    if (editor?.document.languageId === "rust") {
+      await this.requestPreview(editor, true, true);
     }
   }
 

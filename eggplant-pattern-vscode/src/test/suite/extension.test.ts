@@ -1,5 +1,6 @@
 import * as assert from "assert";
 import * as fs from "fs";
+import * as os from "os";
 import * as path from "path";
 import * as vscode from "vscode";
 import { setup, suite, suiteSetup, suiteTeardown, test } from "mocha";
@@ -10,6 +11,7 @@ const EXTENSION_ID = "MilkBlock.eggplant-pattern-vscode";
 const FIXTURE_DIR = path.resolve(__dirname, "../../../test-fixtures/workspace");
 const RUST_FIXTURE = path.join(FIXTURE_DIR, "pattern_samples.rs");
 const TEXT_FIXTURE = path.join(FIXTURE_DIR, "notes.txt");
+const TRACE_FIXTURE = path.join(os.tmpdir(), `eggplant-pattern-action-trace-${process.pid}.json`);
 const MATH_MICROBENCHMARK_FIXTURE = "/Users/mineralsteins/Repos/egg_related/eggplant_backup/benches/runners/eggplant_rewrite/math_microbenchmark.rs";
 const EXTRACTOR_PATH = path.resolve(__dirname, "../../../../", "eggplant-pattern-extractor", "target", "debug", process.platform === "win32" ? "eggplant-pattern-extractor.exe" : "eggplant-pattern-extractor");
 const BUNDLED_EXTRACTOR_PATH = path.resolve(__dirname, "../../../bin", `${process.platform}-${process.arch}`, process.platform === "win32" ? "eggplant-pattern-extractor.exe" : "eggplant-pattern-extractor");
@@ -24,6 +26,9 @@ suite("eggplant pattern extension", () => {
       warningMessages.push(message);
       return Promise.resolve(undefined);
     }) as typeof vscode.window.showWarningMessage;
+    (globalThis as { __eggplantPatternTraceSelectionDialog?: typeof vscode.window.showOpenDialog })
+      .__eggplantPatternTraceSelectionDialog = async () => [vscode.Uri.file(TRACE_FIXTURE)];
+    fs.writeFileSync(TRACE_FIXTURE, JSON.stringify({ version: 1, events: [] }, null, 2));
 
     await vscode.workspace.getConfiguration().update("eggplantPattern.extractorPath", EXTRACTOR_PATH, vscode.ConfigurationTarget.Global);
     await vscode.workspace.getConfiguration().update("eggplantPattern.debounceMs", 10, vscode.ConfigurationTarget.Global);
@@ -32,6 +37,9 @@ suite("eggplant pattern extension", () => {
 
   suiteTeardown(async () => {
     (vscode.window.showWarningMessage as typeof vscode.window.showWarningMessage) = originalWarning;
+    delete (globalThis as { __eggplantPatternTraceSelectionDialog?: typeof vscode.window.showOpenDialog })
+      .__eggplantPatternTraceSelectionDialog;
+    fs.rmSync(TRACE_FIXTURE, { force: true });
     await vscode.workspace.getConfiguration().update("eggplantPattern.extractorPath", undefined, vscode.ConfigurationTarget.Global);
     await vscode.workspace.getConfiguration().update("eggplantPattern.debounceMs", undefined, vscode.ConfigurationTarget.Global);
     await vscode.workspace.getConfiguration().update("eggplantPattern.defaultDotView", undefined, vscode.ConfigurationTarget.Global);
@@ -49,6 +57,9 @@ suite("eggplant pattern extension", () => {
     await vscode.workspace.getConfiguration().update("eggplantPattern.defaultLabelStyle", "recursive", vscode.ConfigurationTarget.Workspace);
     await vscode.workspace.getConfiguration().update("eggplantPattern.defaultRecursiveStrategy", "dag-expand", vscode.ConfigurationTarget.Global);
     await vscode.workspace.getConfiguration().update("eggplantPattern.defaultRecursiveStrategy", "dag-expand", vscode.ConfigurationTarget.Workspace);
+    await vscode.workspace.getConfiguration().update("eggplantPattern.experimentalDynamicActionRecovery", false, vscode.ConfigurationTarget.Workspace);
+    await vscode.workspace.getConfiguration().update("eggplantPattern.dynamicActionRecoveryMode", "static", vscode.ConfigurationTarget.Workspace);
+    await vscode.workspace.getConfiguration().update("eggplantPattern.actionSampleTracePath", "", vscode.ConfigurationTarget.Workspace);
   });
 
   test("manual preview renders add_rule closure scope", async () => {
@@ -269,6 +280,38 @@ suite("eggplant pattern extension", () => {
     assert.match(preview.title, /recursive, dag-expand/);
   });
 
+  test("select trace file auto-enables sampled recovery and refreshes preview", async () => {
+    const editor = await openEditor(RUST_FIXTURE);
+    placeCursor(editor, "ctx.union(pat.p, op_value)");
+
+    await vscode.commands.executeCommand("eggplant-pattern.preview");
+    await dispatchPreviewPanelTestMessage({ type: "selectTraceFile" });
+
+    await waitFor(
+      () =>
+        vscode.workspace.getConfiguration().get("eggplantPattern.experimentalDynamicActionRecovery") === true &&
+        vscode.workspace.getConfiguration().get("eggplantPattern.dynamicActionRecoveryMode") === "sample" &&
+        vscode.workspace.getConfiguration().get("eggplantPattern.actionSampleTracePath") === TRACE_FIXTURE
+    );
+    await dispatchPreviewPanelTestMessage({ type: "refresh" });
+    const preview = await waitForPreviewState(
+      (state) => state.recoveryMode === "sample" && state.tracePath === TRACE_FIXTURE
+    );
+    assert.equal(preview.tracePath, TRACE_FIXTURE);
+    assert.equal(
+      vscode.workspace.getConfiguration().get("eggplantPattern.experimentalDynamicActionRecovery"),
+      true
+    );
+    assert.equal(
+      vscode.workspace.getConfiguration().get("eggplantPattern.dynamicActionRecoveryMode"),
+      "sample"
+    );
+    assert.equal(
+      vscode.workspace.getConfiguration().get("eggplantPattern.actionSampleTracePath"),
+      TRACE_FIXTURE
+    );
+  });
+
   test("auto preview keeps detail and recursive strategy across scope changes", async () => {
     const editor = await openEditor(RUST_FIXTURE);
     await vscode.workspace.getConfiguration().update("eggplantPattern.autoPreview", true, vscode.ConfigurationTarget.Global);
@@ -323,13 +366,18 @@ async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<voi
 }
 
 async function waitForPreviewState(predicate?: (state: NonNullable<ReturnType<typeof getPreviewPanelTestState>>) => boolean) {
-  await waitFor(() => {
+  try {
+    await waitFor(() => {
+      const state = getPreviewPanelTestState();
+      if (!state) {
+        return false;
+      }
+      return predicate ? predicate(state) : true;
+    });
+  } catch (error) {
     const state = getPreviewPanelTestState();
-    if (!state) {
-      return false;
-    }
-    return predicate ? predicate(state) : true;
-  });
+    throw new Error(`Timed out waiting for preview state. Last state: ${JSON.stringify(state)}`);
+  }
   const state = getPreviewPanelTestState();
   assert.ok(state, "Expected preview panel state");
   return state;
