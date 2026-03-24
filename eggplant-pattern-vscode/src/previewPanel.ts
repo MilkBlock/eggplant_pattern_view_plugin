@@ -278,8 +278,8 @@ export class PreviewPanel implements vscode.Disposable {
         height: 100vh;
       }
       .content {
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) 320px;
+        display: flex;
+        align-items: stretch;
         min-height: 0;
       }
       .toolbar {
@@ -316,6 +316,9 @@ export class PreviewPanel implements vscode.Disposable {
         overflow: auto;
         padding: 12px;
         min-width: 0;
+        flex: 0 1 auto;
+        width: max-content;
+        max-width: 100%;
       }
       .graph[data-draggable="true"] {
         cursor: grab;
@@ -398,8 +401,27 @@ export class PreviewPanel implements vscode.Disposable {
         border-left: 1px solid var(--border);
         background: color-mix(in srgb, var(--panel) 78%, var(--bg) 22%);
         min-width: 0;
+        flex: 0 0 320px;
+        width: 320px;
         display: grid;
         grid-template-rows: auto minmax(0, 1fr) auto;
+      }
+      @media (max-width: 980px) {
+        .content {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr);
+        }
+        .graph {
+          width: auto;
+          max-width: none;
+          flex: none;
+        }
+        .constraints-panel {
+          flex: none;
+          width: auto;
+          border-left: none;
+          border-top: 1px solid var(--border);
+        }
       }
       .constraints-header {
         padding: 10px 12px 8px;
