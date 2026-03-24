@@ -239,6 +239,62 @@ suite("eggplant pattern headless tests", () => {
     assert.match(preview?.summary ?? "", /source=trace/);
   });
 
+  test("trace source preview falls back to source ranges for nested inline calls", () => {
+    const effects = [
+      {
+        id: "effect_0",
+        effect_id: "effect@337:400",
+        bound_var: null,
+        source_text: "ctx.union(pat.bop, ctx.insert_bop(\"Add\", pat.y.val, pat.x.val))",
+        referenced_pat_vars: ["bop", "x", "y"],
+        referenced_action_vars: ["tmp_0"],
+        range: { start: 337, end: 400 }
+      },
+      {
+        id: "effect_1",
+        effect_id: "effect@356:399",
+        bound_var: "tmp_0",
+        source_text: "ctx.insert_bop(\"Add\", pat.y.val, pat.x.val)",
+        referenced_pat_vars: ["x", "y"],
+        referenced_action_vars: [],
+        range: { start: 356, end: 399 }
+      }
+    ] satisfies PatternIr["action_effects"];
+
+    const preview = buildTraceSourcePreview(
+      {
+        version: 1,
+        events: [
+          {
+            Insert: {
+              event_id: "evt_insert",
+              effect_id: "effect@line:12",
+              source_range: { start: 356, end: 399 }
+            }
+          },
+          {
+            Union: {
+              event_id: "evt_union",
+              effect_id: "effect@line:13",
+              source_range: { start: 337, end: 400 }
+            }
+          }
+        ]
+      },
+      effects
+    );
+
+    assert.ok(preview);
+    assert.deepEqual(
+      preview?.actionEffects.map((effect) => effect.source_text),
+      [
+        "ctx.insert_bop(\"Add\", pat.y.val, pat.x.val)",
+        "ctx.union(pat.bop, ctx.insert_bop(\"Add\", pat.y.val, pat.x.val))"
+      ]
+    );
+    assert.match(preview?.summary ?? "", /matched=2/);
+  });
+
   test("extractor emits JSON for add_rule closure scope", () => {
     const source = fs.readFileSync(FIXTURE_PATH, "utf8");
     const offset = source.indexOf("let p = Add::query");
@@ -323,6 +379,48 @@ fn demo(use_mul: bool, recorder: ActionSampleRecorder) {
     assert.ok(ir.scope.action_range);
     assert.ok(ir.scope.pattern_range);
     assert.ok(ir.action_effects.length >= 2);
+  });
+
+  test("inline nested action calls get synthetic tmp bindings and separate graph nodes", () => {
+    const source = `
+fn demo() {
+  MyTx::add_rule("demo", ruleset, || {
+    let x = Expr::query_leaf();
+    let y = Expr::query_leaf();
+    let bop = Bop::query(&x, &y);
+    DemoPat::new(x, y, bop)
+  }, |ctx, pat| {
+    ctx.union(pat.bop, ctx.insert_bop("Add", pat.y.val, pat.x.val));
+  });
+}
+`;
+    const offset = source.indexOf("ctx.union(pat.bop, ctx.insert_bop(");
+    assert.notEqual(offset, -1);
+
+    const result = spawnSync(EXTRACTOR_PATH, ["--offset", String(offset)], {
+      cwd: WORKSPACE_ROOT,
+      input: source,
+      encoding: "utf8"
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const ir = JSON.parse(result.stdout) as PatternIr;
+    const inlineInsert = ir.action_effects.find(
+      (effect) => effect.source_text === `ctx.insert_bop("Add", pat.y.val, pat.x.val)`
+    );
+    const union = ir.action_effects.find(
+      (effect) => effect.source_text === `ctx.union(pat.bop, ctx.insert_bop("Add", pat.y.val, pat.x.val))`
+    );
+
+    assert.ok(inlineInsert);
+    assert.equal(inlineInsert?.bound_var, "tmp_0");
+    assert.ok(union);
+    assert.deepEqual(union?.referenced_action_vars, ["tmp_0"]);
+
+    const dot = patternIrToDotWithMode(ir, "action", "full");
+    assert.match(dot, /Bop\(\\"Add\\", pat\.y\.val, pat\.x\.val\)/);
+    assert.match(dot, /ctx\.union\(pat\.bop, ctx\.insert_bop\(\\\"Add\\\", pat\.y\.val, pat\.x\.val\)\)/);
+    assert.match(dot, /"effect:effect_[0-9]+" -> "effect:effect_[0-9]+"/);
   });
 
   test("extractor resolves assertion references for block host patterns", () => {

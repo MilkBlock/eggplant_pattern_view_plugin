@@ -90,11 +90,11 @@ interface RuntimeActionSampleTrace {
 }
 
 type RuntimeActionSampleEvent =
-  | { kind: "insert"; id: string; effect_id: string | null }
-  | { kind: "union"; id: string; effect_id: string | null }
-  | { kind: "subsume"; id: string; effect_id: string | null }
-  | { kind: "remove"; id: string; effect_id: string | null }
-  | { kind: "dynamic-unknown"; id: string; effect_id: string | null; reason: string };
+  | { kind: "insert"; id: string; effect_id: string | null; source_range: TextSpan | null }
+  | { kind: "union"; id: string; effect_id: string | null; source_range: TextSpan | null }
+  | { kind: "subsume"; id: string; effect_id: string | null; source_range: TextSpan | null }
+  | { kind: "remove"; id: string; effect_id: string | null; source_range: TextSpan | null }
+  | { kind: "dynamic-unknown"; id: string; effect_id: string | null; source_range: TextSpan | null; reason: string };
 
 export const DEFAULT_DYNAMIC_ACTION_RECOVERY_POLICY: DynamicActionRecoveryPolicy = {
   enabled: false,
@@ -134,12 +134,22 @@ export function indexActionEffectsByStableId(
 
 export function resolveTraceEventEffect(
   event: ActionSampleEvent,
-  byStableId: Map<string, ActionEffect>
+  byStableId: Map<string, ActionEffect>,
+  byRange?: Map<string, ActionEffect>
 ): ActionEffect | null {
-  if (event.effect_id === null) {
+  const effectById = event.effect_id === null ? null : byStableId.get(event.effect_id) ?? null;
+  if (effectById && eventKindMatchesEffect(event.kind, effectById)) {
+    return effectById;
+  }
+
+  if (!event.source_range || !byRange) {
     return null;
   }
-  return byStableId.get(event.effect_id) ?? null;
+  const effectBySpan = byRange.get(textSpanKey(event.source_range)) ?? null;
+  if (!effectBySpan) {
+    return null;
+  }
+  return eventKindMatchesEffect(event.kind, effectBySpan) ? effectBySpan : null;
 }
 
 export function summarizeRuntimeActionSampleTrace(
@@ -152,13 +162,14 @@ export function summarizeRuntimeActionSampleTrace(
   }
 
   const effectsByStableId = indexActionEffectsByStableId(actionEffects);
+  const effectsByRange = indexActionEffectsByRange(actionEffects);
   let matchedCount = 0;
   let unresolvedCount = 0;
   let dynamicUnknownCount = 0;
   const diagnostics: ActionSampleDiagnostic[] = [];
 
   for (const event of trace.events) {
-    const effect = event.effect_id === null ? null : effectsByStableId.get(event.effect_id) ?? null;
+    const effect = resolveRuntimeTraceEventEffect(event, effectsByStableId, effectsByRange);
     if (effect) {
       matchedCount += 1;
     } else {
@@ -214,6 +225,7 @@ export function buildTraceSourcePreview(
   }
 
   const effectsByStableId = indexActionEffectsByStableId(actionEffects);
+  const effectsByRange = indexActionEffectsByRange(actionEffects);
   let matchedCount = 0;
   let unresolvedCount = 0;
   let dynamicUnknownCount = 0;
@@ -221,7 +233,7 @@ export function buildTraceSourcePreview(
   const traceActionEffects: ActionEffect[] = [];
 
   for (const event of trace.events) {
-    const effect = event.effect_id === null ? null : effectsByStableId.get(event.effect_id) ?? null;
+    const effect = resolveRuntimeTraceEventEffect(event, effectsByStableId, effectsByRange);
     if (effect) {
       matchedCount += 1;
       traceActionEffects.push({
@@ -317,24 +329,26 @@ function parseRuntimeActionSampleEvent(payload: unknown): RuntimeActionSampleEve
   const record = body as Record<string, unknown>;
   const eventId = typeof record.event_id === "string" ? record.event_id : null;
   const effectId = typeof record.effect_id === "string" ? record.effect_id : null;
+  const sourceRange = parseTextSpan(record.source_range);
   if (!eventId) {
     return null;
   }
 
   switch (variant) {
     case "Insert":
-      return { kind: "insert", id: eventId, effect_id: effectId };
+      return { kind: "insert", id: eventId, effect_id: effectId, source_range: sourceRange };
     case "Union":
-      return { kind: "union", id: eventId, effect_id: effectId };
+      return { kind: "union", id: eventId, effect_id: effectId, source_range: sourceRange };
     case "Subsume":
-      return { kind: "subsume", id: eventId, effect_id: effectId };
+      return { kind: "subsume", id: eventId, effect_id: effectId, source_range: sourceRange };
     case "Remove":
-      return { kind: "remove", id: eventId, effect_id: effectId };
+      return { kind: "remove", id: eventId, effect_id: effectId, source_range: sourceRange };
     case "DynamicUnknown":
       return {
         kind: "dynamic-unknown",
         id: eventId,
         effect_id: effectId,
+        source_range: sourceRange,
         reason: typeof record.reason === "string" ? record.reason : "unknown"
       };
     default:
@@ -347,6 +361,7 @@ function parseAlreadyNormalizedRuntimeEvent(
 ): RuntimeActionSampleEvent | null {
   const id = typeof candidate.id === "string" ? candidate.id : null;
   const effectId = typeof candidate.effect_id === "string" ? candidate.effect_id : null;
+  const sourceRange = parseTextSpan(candidate.source_range);
   if (!id) {
     return null;
   }
@@ -359,16 +374,84 @@ function parseAlreadyNormalizedRuntimeEvent(
       return {
         kind: candidate.kind,
         id,
-        effect_id: effectId
+        effect_id: effectId,
+        source_range: sourceRange
       };
     case "dynamic-unknown":
       return {
         kind: "dynamic-unknown",
         id,
         effect_id: effectId,
+        source_range: sourceRange,
         reason: typeof candidate.reason === "string" ? candidate.reason : "unknown"
       };
     default:
       return null;
   }
+}
+
+function parseTextSpan(value: unknown): TextSpan | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const span = value as Record<string, unknown>;
+  return typeof span.start === "number" && typeof span.end === "number"
+    ? { start: span.start, end: span.end }
+    : null;
+}
+
+function indexActionEffectsByRange(actionEffects: ActionEffect[]): Map<string, ActionEffect> {
+  return new Map(actionEffects.map((effect) => [textSpanKey(effect.range), effect]));
+}
+
+function textSpanKey(range: TextSpan): string {
+  return `${range.start}:${range.end}`;
+}
+
+function resolveRuntimeTraceEventEffect(
+  event: RuntimeActionSampleEvent,
+  byStableId: Map<string, ActionEffect>,
+  byRange: Map<string, ActionEffect>
+): ActionEffect | null {
+  const effectById = event.effect_id === null ? null : byStableId.get(event.effect_id) ?? null;
+  if (effectById && runtimeEventKindMatchesEffect(event.kind, effectById)) {
+    return effectById;
+  }
+
+  if (!event.source_range) {
+    return null;
+  }
+  const effectByRange = byRange.get(textSpanKey(event.source_range)) ?? null;
+  if (!effectByRange) {
+    return null;
+  }
+  return runtimeEventKindMatchesEffect(event.kind, effectByRange) ? effectByRange : null;
+}
+
+function eventKindMatchesEffect(kind: ActionSampleEvent["kind"], effect: ActionEffect): boolean {
+  if (kind === "insert") {
+    return isInsertEffect(effect.source_text);
+  }
+  if (kind === "union") {
+    return isUnionEffect(effect.source_text);
+  }
+  return true;
+}
+
+function runtimeEventKindMatchesEffect(kind: RuntimeActionSampleEvent["kind"], effect: ActionEffect): boolean {
+  if (kind === "insert") {
+    return isInsertEffect(effect.source_text);
+  }
+  if (kind === "union") {
+    return isUnionEffect(effect.source_text);
+  }
+  return true;
+}
+
+function isInsertEffect(sourceText: string): boolean {
+  return /\.insert_[A-Za-z0-9_]+\(/.test(sourceText);
+}
+
+function isUnionEffect(sourceText: string): boolean {
+  return /\.union\(/.test(sourceText);
 }
