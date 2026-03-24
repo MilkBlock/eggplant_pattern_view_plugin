@@ -183,6 +183,10 @@ export class PreviewPanel implements vscode.Disposable {
     await this.handleMessage(message);
   }
 
+  closeForTest(): void {
+    this.panel.dispose();
+  }
+
   dispose(): void {
     while (this.disposables.length > 0) {
       this.disposables.pop()?.dispose();
@@ -1247,11 +1251,26 @@ export function getPreviewPanelTestState(): PreviewPanelState | undefined {
   return currentPanel?.snapshot();
 }
 
+export function hasPreviewPanelForTest(): boolean {
+  return currentPanel !== undefined;
+}
+
 export async function clearPreviewPanelTestState(): Promise<void> {
   if (!currentPanel) {
     return;
   }
   currentPanel.clearSnapshot();
+}
+
+export function hasPreviewPanelTestInstance(): boolean {
+  return currentPanel !== undefined;
+}
+
+export async function closePreviewPanelTestInstance(): Promise<void> {
+  if (!currentPanel) {
+    return;
+  }
+  currentPanel.closeForTest();
 }
 
 export async function dispatchPreviewPanelTestMessage(

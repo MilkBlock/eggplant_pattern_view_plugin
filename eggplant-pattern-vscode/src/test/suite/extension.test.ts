@@ -5,8 +5,10 @@ import * as vscode from "vscode";
 import { setup, suite, suiteSetup, suiteTeardown, test } from "mocha";
 import { resolveExtractorPath } from "../../extractor";
 import {
+  closePreviewPanelTestInstance,
   clearPreviewPanelTestState,
   dispatchPreviewPanelTestMessage,
+  hasPreviewPanelTestInstance,
   getPreviewPanelTestState,
 } from "../../previewPanel";
 
@@ -144,6 +146,9 @@ suite("eggplant pattern extension", () => {
   });
 
   test("manual preview on non-pattern rust scope is silent fail-open", async () => {
+    await closePreviewPanelTestInstance();
+    assert.equal(hasPreviewPanelTestInstance(), false);
+
     const editor = await openEditor(RUST_FIXTURE);
     placeCursor(editor, "println!(\"not a pattern");
 
@@ -151,8 +156,30 @@ suite("eggplant pattern extension", () => {
     await vscode.commands.executeCommand("eggplant-pattern.preview");
     await new Promise((resolve) => setTimeout(resolve, 150));
 
+    assert.equal(hasPreviewPanelTestInstance(), false);
     assert.equal(currentPreviewRenderNonce(), baselineRenderNonce);
     assert.equal(getPreviewPanelTestState(), undefined);
+    assert.equal(warningMessages.length, 0);
+  });
+
+  test("manual preview on non-pattern rust scope keeps existing panel unchanged", async () => {
+    const editor = await openEditor(RUST_FIXTURE);
+    placeCursor(editor, "let p = Add::query");
+    await vscode.commands.executeCommand("eggplant-pattern.preview");
+    const rendered = await waitForPreviewState();
+    assert.ok(rendered);
+    assert.equal(hasPreviewPanelTestInstance(), true);
+    const baselineRenderNonce = rendered.renderNonce ?? 0;
+    const baselineDot = rendered.dot;
+
+    placeCursor(editor, "println!(\"not a pattern");
+    await vscode.commands.executeCommand("eggplant-pattern.preview");
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    const after = getPreviewPanelTestState();
+    assert.ok(after);
+    assert.equal(after?.renderNonce ?? 0, baselineRenderNonce);
+    assert.equal(after?.dot, baselineDot);
     assert.equal(warningMessages.length, 0);
   });
 

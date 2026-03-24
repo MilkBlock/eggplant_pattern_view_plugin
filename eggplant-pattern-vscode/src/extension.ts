@@ -215,7 +215,6 @@ class PreviewController {
     if (!preserveModeOverride) {
       this.currentModeOverride = undefined;
     }
-    this.panel(!manual);
     this.pending = {
       editor,
       manual,
