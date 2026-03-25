@@ -238,8 +238,9 @@ fn extract_from_block(
                     && let Some(name) = ident_pat_name(pat)
                     && let Some(init) = let_stmt.initializer()
                 {
-                    let inputs = collect_query_inputs_from_expr(&init, &query_vec_bindings);
-                    if !inputs.is_empty() {
+                    if let Some(inputs) = collect_query_vec_binding_inputs(&init, &query_vec_bindings)
+                        && !inputs.is_empty()
+                    {
                         query_vec_bindings.insert(name, inputs);
                     }
                 }
@@ -526,6 +527,60 @@ fn collect_query_inputs_from_expr(
                 .collect()
         }
         _ => expr_variable_name(expr.clone()).into_iter().collect(),
+    }
+}
+
+fn collect_query_vec_binding_inputs(
+    expr: &ast::Expr,
+    query_vec_bindings: &HashMap<String, Vec<String>>,
+) -> Option<Vec<String>> {
+    if query_spec(expr, query_vec_bindings).is_some() {
+        return None;
+    }
+
+    match expr {
+        ast::Expr::RefExpr(ref_expr) => ref_expr
+            .expr()
+            .and_then(|inner| collect_query_vec_binding_inputs(&inner, query_vec_bindings)),
+        ast::Expr::ParenExpr(paren_expr) => paren_expr
+            .expr()
+            .and_then(|inner| collect_query_vec_binding_inputs(&inner, query_vec_bindings)),
+        ast::Expr::ArrayExpr(array_expr) => Some(
+            array_expr
+                .exprs()
+                .flat_map(|item| collect_query_inputs_from_expr(&item, query_vec_bindings))
+                .collect(),
+        ),
+        ast::Expr::MacroExpr(_macro_expr) => {
+            let inputs = collect_query_inputs_from_expr(expr, query_vec_bindings);
+            if inputs.is_empty() { None } else { Some(inputs) }
+        }
+        ast::Expr::PathExpr(path_expr) => {
+            let name = path_expr.syntax().text().to_string();
+            query_vec_bindings.get(&name).cloned()
+        }
+        ast::Expr::MethodCallExpr(method_call) => {
+            let mut inputs = method_call
+                .receiver()
+                .and_then(|receiver| collect_query_vec_binding_inputs(&receiver, query_vec_bindings))
+                .unwrap_or_default();
+            if let Some(args) = method_call.arg_list() {
+                for arg in args.args() {
+                    inputs.extend(collect_query_inputs_from_expr(&arg, query_vec_bindings));
+                }
+            }
+            if inputs.is_empty() { None } else { Some(inputs) }
+        }
+        ast::Expr::CallExpr(call_expr) => {
+            let inputs = call_expr
+                .arg_list()
+                .into_iter()
+                .flat_map(|args| args.args())
+                .flat_map(|arg| collect_query_inputs_from_expr(&arg, query_vec_bindings))
+                .collect::<Vec<_>>();
+            if inputs.is_empty() { None } else { Some(inputs) }
+        }
+        _ => None,
     }
 }
 
@@ -1428,6 +1483,38 @@ fn demo() {
         assert_eq!(pair_edges.len(), 2);
         assert_eq!(pair_edges[0].to, "a");
         assert_eq!(pair_edges[1].to, "b");
+    }
+
+    #[test]
+    fn does_not_flatten_nested_query_bindings_into_parent_query_inputs() {
+        let src = r#"
+fn mul_pow_combine_pat<PR: PatRecSgl>() -> MulPowCombinePat<PR> {
+    let a = Math::query_leaf();
+    let b = Math::query_leaf();
+    let c = Math::query_leaf();
+    let p1 = MPow::query(&a, &b);
+    let p2 = MPow::query(&a, &c);
+    let mul = MMul::query(&p1, &p2);
+    MulPowCombinePat::new(a, b, c, mul)
+}
+"#;
+        let ir = extract(src, "MMul::query");
+        let mul = ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "mul")
+            .expect("mul node should exist");
+        assert_eq!(mul.inputs, vec!["p1", "p2"]);
+        let mul_edges = ir
+            .edges
+            .iter()
+            .filter(|edge| edge.from == "mul")
+            .collect::<Vec<_>>();
+        assert_eq!(mul_edges.len(), 2);
+        assert_eq!(mul_edges[0].to, "p1");
+        assert_eq!(mul_edges[0].index, 0);
+        assert_eq!(mul_edges[1].to, "p2");
+        assert_eq!(mul_edges[1].index, 1);
     }
 
     #[test]
