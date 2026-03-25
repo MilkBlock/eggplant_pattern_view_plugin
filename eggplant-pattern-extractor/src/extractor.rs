@@ -1604,16 +1604,16 @@ fn demo() {
             .find(|node| node.id == "reach")
             .expect("reach node should exist");
         assert_eq!(reach.dsl_type, "Reach");
-        assert_eq!(reach.inputs, vec!["edge", "edge"]);
+        assert_eq!(reach.inputs, vec!["src", "dst"]);
         let reach_edges = ir
             .edges
             .iter()
             .filter(|edge| edge.from == "reach")
             .collect::<Vec<_>>();
         assert_eq!(reach_edges.len(), 2);
-        assert_eq!(reach_edges[0].to, "edge");
+        assert_eq!(reach_edges[0].to, "src");
         assert_eq!(reach_edges[0].index, 0);
-        assert_eq!(reach_edges[1].to, "edge");
+        assert_eq!(reach_edges[1].to, "dst");
         assert_eq!(reach_edges[1].index, 1);
     }
 
@@ -2138,7 +2138,7 @@ fn demo() {
             .find(|node| node.id == "reach")
             .expect("reach query node should be extracted");
         assert_eq!(reach.dsl_type, "Reach");
-        assert_eq!(reach.inputs, vec!["edge", "edge"]);
+        assert_eq!(reach.inputs, vec!["src", "dst"]);
 
         let reach_inputs = ir
             .edges
@@ -2146,7 +2146,7 @@ fn demo() {
             .filter(|edge| edge.from == "reach")
             .map(|edge| edge.to.clone())
             .collect::<Vec<_>>();
-        assert_eq!(reach_inputs, vec!["edge", "edge"]);
+        assert_eq!(reach_inputs, vec!["src", "dst"]);
     }
 
     #[test]
