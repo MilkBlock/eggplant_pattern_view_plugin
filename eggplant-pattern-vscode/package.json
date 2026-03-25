@@ -137,6 +137,7 @@
   "scripts": {
     "build:extractor": "cargo build --manifest-path ../eggplant-pattern-extractor/Cargo.toml",
     "bundle:extractor": "node ./scripts/bundle-extractor.js",
+    "check:rust-project-rules": "node ./scripts/check-rust-project-rules.js",
     "stage:release-binaries": "node ./scripts/stage-release-binaries.js",
     "compile": "tsc -p .",
     "watch": "tsc -w -p .",

@@ -55,6 +55,26 @@ npm run test:extension-host
 - `npm test` runs the headless-safe suite.
 - `npm run test:extension-host` runs extension-host validation for the built-in preview panel, including mode switching through the panel message path.
 
+## Rule Parse Detector
+
+Use this command to check whether all eggplant rules in a Rust project can be parsed by the plugin extractor:
+
+```bash
+npm run check:rust-project-rules -- --project /path/to/rust/project
+```
+
+Useful flags:
+
+- `--extractor /abs/path/to/eggplant-pattern-extractor` to force a specific binary
+- `--json` to emit machine-readable output
+- `--fail-on-warnings` to make warnings fail CI
+
+Detection scope:
+
+- scans all `.rs` files under the target project
+- finds `add_rule(...)` and `add_rule_with_hook(...)` call sites
+- runs extractor on each rule call offset and reports `PASS/WARN/FAIL`
+
 For one-shot local packaging, use:
 
 ```bash
