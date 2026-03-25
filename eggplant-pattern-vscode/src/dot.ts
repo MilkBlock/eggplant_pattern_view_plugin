@@ -1,4 +1,4 @@
-import { DisplayTemplate, PatternIr, PatternNode, TypstTemplate } from "./ir";
+import { DisplayTemplate, PatternConstraint, PatternIr, PatternNode, TypstTemplate } from "./ir";
 
 export type DotViewMode = "pattern" | "action" | "combined";
 export type DotLabelStyle = "compact" | "full" | "recursive";
@@ -17,6 +17,14 @@ export interface TypstSizingInfo {
 export interface ActionRenderOverrides {
   effectLabels?: Record<string, string>;
   visibleEffectIds?: Set<string> | null;
+}
+
+export interface InlineConstraintAnnotation {
+  nodeId: string;
+  fieldName: string | null;
+  valueText: string;
+  displayText: string;
+  hideInSidebar: boolean;
 }
 
 interface RenderedTemplateField {
@@ -61,6 +69,118 @@ function compactExpression(value: string): string {
     .replace(/"([^"]+)"\.to_owned\(\)/g, "\"$1\"")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function stripOuterParens(value: string): string {
+  let current = value.trim();
+  while (current.startsWith("(") && current.endsWith(")")) {
+    let depth = 0;
+    let balanced = true;
+    for (let index = 0; index < current.length; index += 1) {
+      const ch = current[index];
+      if (ch === "(") {
+        depth += 1;
+      } else if (ch === ")") {
+        depth -= 1;
+        if (depth === 0 && index !== current.length - 1) {
+          balanced = false;
+          break;
+        }
+      }
+    }
+    if (!balanced || depth !== 0) {
+      break;
+    }
+    current = current.slice(1, -1).trim();
+  }
+  return current;
+}
+
+function parseSimpleComparable(value: string): string | null {
+  let current = stripOuterParens(value);
+  while (current.startsWith("&")) {
+    current = stripOuterParens(current.slice(1));
+  }
+  if (current.endsWith(".as_handle()")) {
+    current = stripOuterParens(current.slice(0, -".as_handle()".length));
+    while (current.startsWith("&")) {
+      current = stripOuterParens(current.slice(1));
+    }
+  }
+  const compacted = compactExpression(current);
+  if (
+    /^-?\d[\w]*/.test(compacted) ||
+    /^"(?:\\.|[^"])*"$/.test(compacted) ||
+    /^(?:true|false)$/.test(compacted) ||
+    /^[A-Z][A-Za-z0-9_:<>]*$/.test(compacted)
+  ) {
+    return compacted;
+  }
+  return null;
+}
+
+function parseHandleComparable(value: string): { valueText: string } | null {
+  const simple = parseSimpleComparable(value);
+  if (simple) {
+    return {
+      valueText: simple
+    };
+  }
+
+  let current = stripOuterParens(value);
+  while (current.startsWith("&")) {
+    current = stripOuterParens(current.slice(1));
+  }
+  const handleMatch = current.match(
+    /^([A-Za-z_][A-Za-z0-9_]*)\.handle(?:_([A-Za-z_][A-Za-z0-9_]*))?\(\)$/
+  );
+  if (!handleMatch) {
+    return null;
+  }
+  const nodeId = handleMatch[1];
+  const fieldName = handleMatch[2] ?? null;
+  return {
+    valueText: fieldName ? `${nodeId}.${fieldName}` : nodeId
+  };
+}
+
+export function inlineConstraintAnnotation(constraint: PatternConstraint): InlineConstraintAnnotation | null {
+  const match = constraint.resolved_text.match(
+    /^([A-Za-z_][A-Za-z0-9_]*)\.handle(?:_([A-Za-z_][A-Za-z0-9_]*))?\(\)\.eq\(&(.+)\)$/
+  );
+  if (!match) {
+    return null;
+  }
+  const nodeId = match[1];
+  if (!constraint.referenced_vars.includes(nodeId)) {
+    return null;
+  }
+  const comparable = parseHandleComparable(match[3]);
+  if (!comparable) {
+    return null;
+  }
+  const fieldName = match[2] ?? null;
+  return {
+    nodeId,
+    fieldName,
+    valueText: comparable.valueText,
+    displayText: fieldName ? `${fieldName} = ${comparable.valueText}` : `= ${comparable.valueText}`,
+    hideInSidebar: true
+  };
+}
+
+function inlineConstraintAnnotationsByNode(ir: PatternIr): Map<string, InlineConstraintAnnotation[]> {
+  const annotations = new Map<string, InlineConstraintAnnotation[]>();
+  for (const constraint of ir.constraints) {
+    const annotation = inlineConstraintAnnotation(constraint);
+    if (!annotation) {
+      continue;
+    }
+    const entries = annotations.get(annotation.nodeId) ?? [];
+    entries.push(annotation);
+    annotations.set(annotation.nodeId, entries);
+  }
+  return annotations;
 }
 
 function displayAtomicExpression(value: string): string {
@@ -397,7 +517,8 @@ function typstPatternSource(
     strategy,
     node.id,
     nodeById,
-    incomingCounts
+    incomingCounts,
+    inlineConstraintAnnotationsByNode(ir)
   );
 }
 
@@ -634,23 +755,31 @@ function nodeLabel(
   strategy: RecursiveStrategy,
   nodeId: string,
   nodeById: Map<string, PatternNode>,
-  incomingCounts: Map<string, number>
+  incomingCounts: Map<string, number>,
+  inlineAnnotations: Map<string, InlineConstraintAnnotation[]>
 ): string {
+  const annotationSuffix = (() => {
+    const annotations = inlineAnnotations.get(nodeId) ?? [];
+    if (annotations.length === 0) {
+      return "";
+    }
+    return `\n${annotations.map((entry) => entry.displayText).join("\n")}`;
+  })();
   if (labelStyle === "full") {
-    return label;
+    return `${label}${annotationSuffix}`;
   }
   if (labelStyle === "recursive") {
     const rendered = recursivePatternLabel(ir, nodeById, incomingCounts, nodeId, strategy, new Set(), displayAtomicExpression);
     if (rendered) {
-      return rendered.text;
+      return `${rendered.text}${annotationSuffix}`;
     }
   }
   const template = findPreferredTemplate(ir, dslType);
   const rendered = template ? applyDisplayTemplate(template, inputs.map((input) => compactExpression(input)), variantPrecedence(ir, dslType)) : null;
   if (rendered) {
-    return rendered;
+    return `${rendered}${annotationSuffix}`;
   }
-  return dslType;
+  return `${dslType}${annotationSuffix}`;
 }
 
 export function constraintLabel(sourceText: string, resolvedText: string, labelStyle: DotLabelStyle): string {
@@ -690,6 +819,7 @@ export function patternIrToDotWithMode(
   const rootSet = new Set(ir.roots);
   const nodeSet = new Set(ir.nodes.map((node) => node.id));
   const nodeById = new Map(ir.nodes.map((node) => [node.id, node]));
+  const inlineAnnotations = inlineConstraintAnnotationsByNode(ir);
   const incomingCounts = new Map<string, number>();
   for (const edge of ir.edges) {
     incomingCounts.set(edge.to, (incomingCounts.get(edge.to) ?? 0) + 1);
@@ -703,7 +833,7 @@ export function patternIrToDotWithMode(
   if (showPattern) {
     for (const node of ir.nodes) {
       const attrs: string[] = [
-        `label=${quote(nodeLabel(ir, node.label, node.dsl_type, node.inputs, labelStyle, recursiveStrategy, node.id, nodeById, incomingCounts))}`,
+        `label=${quote(nodeLabel(ir, node.label, node.dsl_type, node.inputs, labelStyle, recursiveStrategy, node.id, nodeById, incomingCounts, inlineAnnotations))}`,
         `shape=${node.kind === "query_leaf" ? "ellipse" : "box"}`
       ];
       applyTypstSizing(attrs, node.id, typstSizing);
@@ -712,6 +842,16 @@ export function patternIrToDotWithMode(
         attrs.push(`color=${quote("#c26d00")}`);
       }
       lines.push(`  ${quote(node.id)} [${attrs.join(", ")}];`);
+    }
+
+    // Keep relation/base roots visible as first-class graph nodes even when no explicit PatternNode exists.
+    for (const root of ir.roots) {
+      if (nodeSet.has(root)) {
+        continue;
+      }
+      lines.push(
+        `  ${quote(root)} [label=${quote(root)}, shape=ellipse, style="dashed,filled", fillcolor="#f3f0ea", color="#8d8477", penwidth=2, fontname="Helvetica"];`
+      );
     }
   }
 

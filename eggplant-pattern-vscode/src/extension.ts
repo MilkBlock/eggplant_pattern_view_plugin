@@ -1,8 +1,9 @@
 import * as vscode from "vscode";
+import { spawnSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 import { buildTraceSourcePreview, resolveDynamicActionRecoveryPolicy, summarizeRuntimeActionSampleTrace } from "./actionRecovery";
-import { collectTypstReplacementSources, compactConstraintLabel, DotLabelStyle, DotViewMode, patternIrToDotWithMode, RecursiveStrategy } from "./dot";
+import { collectTypstReplacementSources, compactConstraintLabel, DotLabelStyle, DotViewMode, inlineConstraintAnnotation, patternIrToDotWithMode, RecursiveStrategy } from "./dot";
 import { configureExtractorResolution, ExtractorError, runExtractor } from "./extractor";
 import { PatternIr } from "./ir";
 import { clearMetadataSourceCache, discoverWorkspaceMetadataSourceFiles, loadMetadataSources, mergeExternalMetadata, pickMetadataSourceFiles } from "./metadataSources";
@@ -18,13 +19,18 @@ import {
 import { dotToSvg } from "./svg";
 import { renderTypstSnippets } from "./typst";
 
+interface GitDotMetadata {
+  branch: string;
+  commit: string;
+}
+
 export function activate(context: vscode.ExtensionContext): void {
   configureExtractorResolution(context.extensionPath);
   const controller = new PreviewController(context);
 
   context.subscriptions.push(
     vscode.commands.registerCommand("eggplant-pattern.preview", async () => {
-      const editor = vscode.window.activeTextEditor;
+      const editor = controller.previewEditor();
       if (!editor) {
         void vscode.window.showWarningMessage("Open a Rust editor to preview an eggplant pattern.");
         return;
@@ -133,6 +139,7 @@ class PreviewController {
     onConstraintOpen: (constraintId: string) => Promise<void>;
     onSelectMetadataSources: () => Promise<void>;
     onClearMetadataSources: () => Promise<void>;
+    onCopyDot: (dot: string) => Promise<void>;
     onRefresh: () => Promise<void>;
   };
 
@@ -183,6 +190,13 @@ class PreviewController {
       onClearMetadataSources: async () => {
         await this.clearMetadataSources();
       },
+      onCopyDot: async (dot: string) => {
+        if (!dot) {
+          return;
+        }
+        await vscode.env.clipboard.writeText(dot);
+        void vscode.window.setStatusBarMessage("Eggplant Pattern: copied DOT", 1500);
+      },
       onRefresh: async () => {
         const editor = this.lastPreview?.editor ?? vscode.window.activeTextEditor;
         if (editor) {
@@ -209,6 +223,17 @@ class PreviewController {
     this.refreshTimer = setTimeout(() => {
       void this.requestPreview(activeEditor, false, true);
     }, debounceMs);
+  }
+
+  previewEditor(): vscode.TextEditor | undefined {
+    const activeEditor = vscode.window.activeTextEditor;
+    if (activeEditor) {
+      return activeEditor;
+    }
+    if (this.lastPreview?.editor.document.languageId === "rust") {
+      return this.lastPreview.editor;
+    }
+    return vscode.window.visibleTextEditors.find((editor) => editor.document.languageId === "rust");
   }
 
   async requestPreview(editor: vscode.TextEditor, manual: boolean, preserveModeOverride: boolean): Promise<void> {
@@ -244,7 +269,7 @@ class PreviewController {
       return;
     }
 
-    const editor = vscode.window.activeTextEditor;
+    const editor = this.previewEditor();
     if (!editor) {
       void vscode.window.showWarningMessage("Open a Rust editor to preview an eggplant pattern.");
       return;
@@ -742,6 +767,44 @@ function collectMetadataIdentifiers(ir: PatternIr): Set<string> {
   return identifiers;
 }
 
+function withGitDotMetadata(dot: string, filePath: string): string {
+  const git = resolveGitDotMetadata(filePath);
+  const header = [
+    `// git.branch: ${git.branch}`,
+    `// git.commit: ${git.commit}`
+  ].join("\n");
+  return `${header}\n${dot}`;
+}
+
+function resolveGitDotMetadata(filePath: string): GitDotMetadata {
+  const repoRoot = resolveGitRepoRoot(filePath);
+  if (!repoRoot) {
+    return {
+      branch: "unknown",
+      commit: "unknown"
+    };
+  }
+  const branch = runGit(repoRoot, ["rev-parse", "--abbrev-ref", "HEAD"]) ?? "unknown";
+  const commit = runGit(repoRoot, ["rev-parse", "--short", "HEAD"]) ?? "unknown";
+  return { branch, commit };
+}
+
+function resolveGitRepoRoot(filePath: string): string | null {
+  const candidatePath = fs.existsSync(filePath) && fs.statSync(filePath).isDirectory()
+    ? filePath
+    : path.dirname(filePath);
+  return runGit(candidatePath, ["rev-parse", "--show-toplevel"]);
+}
+
+function runGit(cwd: string, args: string[]): string | null {
+  const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8" });
+  if (result.status !== 0) {
+    return null;
+  }
+  const text = result.stdout.trim();
+  return text.length > 0 ? text : null;
+}
+
 function containsOffset(range: { start: number; end: number } | null, offset: number): boolean {
   return range !== null && offset >= range.start && offset <= range.end;
 }
@@ -829,7 +892,10 @@ async function renderDot(
   const typstRenderings = await renderTypstSnippets(
     collectTypstReplacementSources(ir, mode, labelStyle, recursiveStrategy)
   );
-  const dot = patternIrToDotWithMode(ir, mode, labelStyle, recursiveStrategy, typstRenderings);
+  const dot = withGitDotMetadata(
+    patternIrToDotWithMode(ir, mode, labelStyle, recursiveStrategy, typstRenderings),
+    editor.document.fileName
+  );
   const svg = await dotToSvg(dot);
   const strategySuffix = labelStyle === "recursive" ? `, ${recursiveStrategy}` : "";
   const visibleConstraints = filterConstraintEntries(constraints, constraintFilterMode, constraintFilterNodeId);
@@ -864,13 +930,13 @@ async function renderDot(
 }
 
 async function renderNotice(panel: PreviewPanel, editor: vscode.TextEditor, message: string): Promise<void> {
-  const dot = [
+  const dot = withGitDotMetadata([
     "digraph EggplantPatternStatus {",
     "  graph [pad=0.3];",
     "  node [shape=note, style=\"rounded,filled\", fillcolor=\"#fff4de\", color=\"#b26a00\", fontname=\"Helvetica\"];",
     `  status [label=${JSON.stringify(message)}];`,
     "}"
-  ].join("\n");
+  ].join("\n"), editor.document.fileName);
   const svg = await dotToSvg(dot);
   await panel.render({
     title: `Eggplant Pattern (${modeLabel("combined")}, ${configuredDefaultLabelStyle()}): ${editor.document.fileName.split("/").pop() ?? "Preview"}`,
@@ -919,13 +985,13 @@ async function renderTraceUnavailableNotice(
   metadataSourcesView: PreviewMetadataSourcesView,
   message: string
 ): Promise<void> {
-  const dot = [
+  const dot = withGitDotMetadata([
     "digraph EggplantPatternStatus {",
     "  graph [pad=0.3];",
     "  node [shape=note, style=\"rounded,filled\", fillcolor=\"#fff4de\", color=\"#b26a00\", fontname=\"Helvetica\"];",
     `  status [label=${JSON.stringify(message)}];`,
     "}"
-  ].join("\n");
+  ].join("\n"), editor.document.fileName);
   const svg = await dotToSvg(dot);
   await panel.render({
     title: `Eggplant Pattern (${modeLabel(mode)}, ${sourceMode}, ${labelStyle}${labelStyle === "recursive" ? `, ${recursiveStrategy}` : ""}): ${editor.document.fileName.split("/").pop() ?? "Preview"}`,
@@ -1017,15 +1083,17 @@ function collectSourceTargetIds(ir: PatternIr, mode: DotViewMode): string[] {
 function buildConstraintEntries(ir: PatternIr): Array<{ id: string; compactText: string; fullText: string; referencedNodeIds: string[] }> {
   const nodeIds = new Set(ir.nodes.map((node) => node.id));
   const rootIds = new Set(ir.roots);
-  return ir.constraints.map((constraint) => ({
-    id: constraint.id,
-    compactText: compactConstraintLabel(constraint.source_text, constraint.resolved_text),
-    fullText: constraint.resolved_text,
-    referencedNodeIds: (() => {
-      const referenced = constraint.referenced_vars.filter((name) => nodeIds.has(name) || rootIds.has(name));
-      return referenced.length > 0 ? referenced : [...ir.roots];
-    })()
-  }));
+  return ir.constraints
+    .filter((constraint) => inlineConstraintAnnotation(constraint)?.hideInSidebar !== true)
+    .map((constraint) => ({
+      id: constraint.id,
+      compactText: compactConstraintLabel(constraint.source_text, constraint.resolved_text),
+      fullText: constraint.resolved_text,
+      referencedNodeIds: (() => {
+        const referenced = constraint.referenced_vars.filter((name) => nodeIds.has(name) || rootIds.has(name));
+        return referenced.length > 0 ? referenced : [...ir.roots];
+      })()
+    }));
 }
 
 function filterConstraintEntries(

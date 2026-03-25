@@ -258,17 +258,116 @@ function maskCommentsAndStrings(source) {
   return out.join("");
 }
 
+function findMatchingDelimiter(source, startIndex, openChar, closeChar) {
+  let depth = 0;
+  for (let i = startIndex; i < source.length; i += 1) {
+    const ch = source[i];
+    if (ch === openChar) {
+      depth += 1;
+    } else if (ch === closeChar) {
+      depth -= 1;
+      if (depth === 0) {
+        return i;
+      }
+    }
+  }
+  return -1;
+}
+
+function findMacroRulesRanges(maskedSource) {
+  const ranges = [];
+  const macroRegex = /\bmacro_rules!\s*[A-Za-z_][A-Za-z0-9_]*\s*\{/g;
+  let match;
+  while ((match = macroRegex.exec(maskedSource)) !== null) {
+    const openBrace = maskedSource.indexOf("{", match.index);
+    if (openBrace < 0) {
+      continue;
+    }
+    const closeBrace = findMatchingDelimiter(maskedSource, openBrace, "{", "}");
+    if (closeBrace < 0) {
+      continue;
+    }
+    ranges.push({ start: match.index, end: closeBrace + 1 });
+    macroRegex.lastIndex = closeBrace + 1;
+  }
+  return ranges;
+}
+
+function isInsideRanges(index, ranges) {
+  return ranges.some((range) => index >= range.start && index < range.end);
+}
+
+function firstNonWhitespaceIndex(source, start, end) {
+  for (let i = start; i < end; i += 1) {
+    if (!/\s/.test(source[i])) {
+      return i;
+    }
+  }
+  return start;
+}
+
+function splitCallArgRanges(maskedSource, openParenIndex) {
+  const closeParenIndex = findMatchingDelimiter(maskedSource, openParenIndex, "(", ")");
+  if (closeParenIndex < 0) {
+    return [];
+  }
+
+  const ranges = [];
+  let start = openParenIndex + 1;
+  let paren = 0;
+  let bracket = 0;
+  let brace = 0;
+  let angle = 0;
+
+  for (let i = openParenIndex + 1; i < closeParenIndex; i += 1) {
+    const ch = maskedSource[i];
+    if (ch === "(") {
+      paren += 1;
+    } else if (ch === ")") {
+      paren = Math.max(paren - 1, 0);
+    } else if (ch === "[") {
+      bracket += 1;
+    } else if (ch === "]") {
+      bracket = Math.max(bracket - 1, 0);
+    } else if (ch === "{") {
+      brace += 1;
+    } else if (ch === "}") {
+      brace = Math.max(brace - 1, 0);
+    } else if (ch === "<") {
+      angle += 1;
+    } else if (ch === ">") {
+      angle = Math.max(angle - 1, 0);
+    } else if (ch === "," && paren === 0 && bracket === 0 && brace === 0 && angle === 0) {
+      ranges.push({ start, end: i });
+      start = i + 1;
+    }
+  }
+  ranges.push({ start, end: closeParenIndex });
+  return ranges;
+}
+
 function findRuleOffsets(source) {
   const masked = maskCommentsAndStrings(source);
+  const macroRanges = findMacroRulesRanges(masked);
   const regex = /(?:::|\.)\s*(add_rule(?:_with_hook)?)\s*\(/g;
   const results = [];
   let match;
   while ((match = regex.exec(masked)) !== null) {
+    if (isInsideRanges(match.index, macroRanges)) {
+      continue;
+    }
+
     const raw = match[0];
     const methodName = match[1];
     const localIndex = raw.indexOf(methodName);
-    const offset = match.index + (localIndex >= 0 ? localIndex : 0);
-    const ruleName = inferRuleName(source, offset, methodName);
+    const methodOffset = match.index + (localIndex >= 0 ? localIndex : 0);
+    const openParenIndex = masked.indexOf("(", methodOffset);
+    const argRanges = openParenIndex >= 0 ? splitCallArgRanges(masked, openParenIndex) : [];
+    const preferredArg = argRanges[3] ?? argRanges[2] ?? argRanges[0] ?? null;
+    const offset = preferredArg
+      ? firstNonWhitespaceIndex(source, preferredArg.start, preferredArg.end)
+      : methodOffset;
+    const ruleName = inferRuleName(source, methodOffset, methodName);
     results.push({
       methodName,
       offset,

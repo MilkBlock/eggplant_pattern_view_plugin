@@ -95,11 +95,17 @@ Marketplace publishing is wired for CI, but still requires repository configurat
 - a real Marketplace publisher identity instead of the development placeholder `publisher: \"local\"`
 - the repo now includes a proprietary `LICENSE`; replace it only if you later want a different distribution model
 
-For a repo-local validation target, use `samples/pattern_samples.rs`, which includes:
+For repo-local validation targets, use:
 
-- an `add_rule(..., || { ... })` pattern closure
-- a standalone pattern builder function
-- a non-pattern Rust scope
+- `samples/pattern_samples.rs`
+  - an `add_rule(..., || { ... })` pattern closure
+  - a standalone pattern builder function
+  - a non-pattern Rust scope
+- `samples/relation.rs`
+  - upstream typed relation API shape
+  - `Edge::query()` aggregate relation binding
+  - `Edge::<Tx>::insert(...)` seed facts
+  - `handle_src()/handle_dst()` join constraint
 
 ## Supported Pattern Shapes
 

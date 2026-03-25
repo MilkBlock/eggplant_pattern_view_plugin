@@ -1,5 +1,6 @@
 pub mod extractor;
 pub mod ir;
+pub mod project_detector;
 
 pub use extractor::{ExtractOptions, extract_pattern};
 pub use ir::{

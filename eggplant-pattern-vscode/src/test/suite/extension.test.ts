@@ -1,4 +1,5 @@
 import * as assert from "assert";
+import { spawnSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
@@ -15,6 +16,7 @@ import {
 const EXTENSION_ID = "MilkBlock.eggplant-pattern-vscode";
 const FIXTURE_DIR = path.resolve(__dirname, "../../../test-fixtures/workspace");
 const RUST_FIXTURE = path.join(FIXTURE_DIR, "pattern_samples.rs");
+const RELATION_FIXTURE = path.join(FIXTURE_DIR, "relation.rs");
 const CROSS_FILE_METADATA_FIXTURE = path.join(FIXTURE_DIR, "cross_file_metadata_usage.rs");
 const ROOT_TYPST_FIXTURE = path.join(FIXTURE_DIR, "pattern_typst_root_failure.rs");
 const TEXT_FIXTURE = path.join(FIXTURE_DIR, "notes.txt");
@@ -89,6 +91,30 @@ suite("eggplant pattern extension", () => {
     assert.match(preview.svg, /<svg/);
   });
 
+  test("copy dot message copies full dot to clipboard", async () => {
+    const editor = await openEditor(RUST_FIXTURE);
+    placeCursor(editor, "let p = Add::query");
+
+    await vscode.commands.executeCommand("eggplant-pattern.preview");
+    const preview = await waitForPreviewState((state) => state.mode === "pattern");
+    await vscode.env.clipboard.writeText("");
+    await dispatchPreviewPanelTestMessage({ type: "copyDot", dot: preview.dot });
+    const copied = await vscode.env.clipboard.readText();
+    assert.equal(copied, preview.dot);
+  });
+
+  test("preview dot includes git branch and commit metadata", async () => {
+    const editor = await openEditor(RUST_FIXTURE);
+    placeCursor(editor, "let p = Add::query");
+
+    await vscode.commands.executeCommand("eggplant-pattern.preview");
+    const preview = await waitForPreviewState((state) => state.mode === "pattern");
+    const gitMeta = readGitMetadata(editor.document.fileName);
+
+    assert.match(preview.dot, new RegExp("^// git.branch: " + escapeRegex(gitMeta.branch) + "$", "m"));
+    assert.match(preview.dot, new RegExp("^// git.commit: " + escapeRegex(gitMeta.commit) + "$", "m"));
+  });
+
   test("manual preview from action code defaults to action.dot", async () => {
     const editor = await openEditor(RUST_FIXTURE);
     placeCursor(editor, "ctx.union(pat.p, op_value)");
@@ -143,6 +169,23 @@ suite("eggplant pattern extension", () => {
     const preview = await waitForPreviewState(undefined, { minRenderNonce: baselineRenderNonce + 1 });
     assert.match(preview.dot, /"q" -> "lhs"/);
     assert.match(preview.dot, /"q" -> "rhs"/);
+  });
+
+  test("manual preview renders typed relation example fixture", async () => {
+    const editor = await openEditor(RELATION_FIXTURE);
+    placeCursor(editor, "RelTx::add_rule(");
+
+    const baselineRenderNonce = currentPreviewRenderNonce();
+    await vscode.commands.executeCommand("eggplant-pattern.preview");
+
+    const preview = await waitForPreviewState((state) => state.mode === "combined", {
+      minRenderNonce: baselineRenderNonce + 1,
+    });
+    assert.match(preview.title, /action \+ pattern\.dot/);
+    assert.match(preview.dot, /cluster_seed_facts/);
+    assert.match(preview.dot, /"seed:seed_0"/);
+    assert.match(preview.dot, /Edge::<RelTx>::insert\(1, 2\)/);
+    assert.match(preview.dot, /cluster_actions/);
   });
 
   test("manual preview on non-pattern rust scope is silent fail-open", async () => {
@@ -466,12 +509,12 @@ suite("eggplant pattern extension", () => {
 
   test("constraint list click highlights referenced nodes and double click reveals source range", async () => {
     const editor = await openEditor(RUST_FIXTURE);
-    placeCursor(editor, "demo_assert_block");
+    placeCursor(editor, "demo_constraints_panel");
 
     await vscode.commands.executeCommand("eggplant-pattern.preview");
     let preview = await waitForPreviewState((state) => state.mode === "combined" && state.constraints.length > 0);
     assert.equal(preview.activeConstraintId, null);
-    assert.equal(preview.constraints[0].compactText, "l == r");
+    assert.match(preview.constraints[0].compactText, /^l == /);
     assert.deepEqual(preview.constraintCountByNodeId, { l: 1, r: 1 });
 
     await dispatchPreviewPanelTestMessage({ type: "clickConstraint", constraintId: "constraint_0" });
@@ -483,12 +526,12 @@ suite("eggplant pattern extension", () => {
     );
 
     await dispatchPreviewPanelTestMessage({ type: "openConstraint", constraintId: "constraint_0" });
-    assert.equal(selectedText(editor), "l_r_eq");
+    assert.equal(selectedText(editor), "l_r_plus1_eq");
   });
 
   test("node drilldown switches the constraints panel into node-specific mode", async () => {
     const editor = await openEditor(RUST_FIXTURE);
-    placeCursor(editor, "demo_assert_block");
+    placeCursor(editor, "demo_constraints_panel");
 
     await vscode.commands.executeCommand("eggplant-pattern.preview");
     let preview = await waitForPreviewState((state) => state.mode === "combined" && state.constraints.length > 0);
@@ -510,7 +553,7 @@ suite("eggplant pattern extension", () => {
 
   test("node-specific filter stays selected with an empty state before a node is chosen", async () => {
     const editor = await openEditor(RUST_FIXTURE);
-    placeCursor(editor, "demo_assert_block");
+    placeCursor(editor, "demo_constraints_panel");
 
     await vscode.commands.executeCommand("eggplant-pattern.preview");
     let preview = await waitForPreviewState((state) => state.mode === "combined" && state.constraints.length > 0);
@@ -661,4 +704,24 @@ function currentPreviewRenderNonce(): number {
 async function updateSettingAndWait<T>(key: string, value: T): Promise<void> {
   await vscode.workspace.getConfiguration().update(key, value, vscode.ConfigurationTarget.Global);
   await waitFor(() => vscode.workspace.getConfiguration().get<T>(key) === value);
+}
+
+function readGitMetadata(filePath: string): { branch: string; commit: string } {
+  const cwd = path.dirname(filePath);
+  const branch = runGit(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]) ?? "unknown";
+  const commit = runGit(cwd, ["rev-parse", "--short", "HEAD"]) ?? "unknown";
+  return { branch, commit };
+}
+
+function runGit(cwd: string, args: string[]): string | null {
+  const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8" });
+  if (result.status !== 0) {
+    return null;
+  }
+  const text = result.stdout.trim();
+  return text.length > 0 ? text : null;
+}
+
+function escapeRegex(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

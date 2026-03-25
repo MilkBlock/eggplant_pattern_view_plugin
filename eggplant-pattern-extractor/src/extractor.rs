@@ -178,7 +178,6 @@ fn resolve_rule_pattern_block(
             function
                 .name()
                 .is_some_and(|name| name.syntax().text().to_string() == pattern_fn_name)
-                && function_looks_like_pattern(function)
         })
         .ok_or_else(|| anyhow!("referenced pattern function not found: {pattern_fn_name}"))?;
     pattern_fn
@@ -269,7 +268,13 @@ fn extract_from_block(
                     );
                 }
             }
-            ast::Stmt::Item(_) => {}
+            ast::Stmt::Item(item) => {
+                if let ast::Item::Struct(strukt) = item
+                    && struct_has_pat_attr(&strukt)
+                {
+                    roots.extend(struct_pat_roots(&strukt));
+                }
+            }
         }
     }
 
@@ -450,6 +455,8 @@ fn query_spec(expr: &ast::Expr, query_vec_bindings: &HashMap<String, Vec<String>
         (crate::ir::NodeKind::QueryLeaf, "::query_leaf")
     } else if callee.ends_with("::query_fields") {
         (crate::ir::NodeKind::Query, "::query_fields")
+    } else if callee.ends_with("::query_named") {
+        (crate::ir::NodeKind::Query, "::query_named")
     } else if callee.ends_with("::query") {
         (crate::ir::NodeKind::Query, "::query")
     } else {
@@ -1127,14 +1134,13 @@ fn collect_pat_field_references(node: &SyntaxNode, pat_name: Option<&str>) -> Ve
 }
 
 fn extract_seed_facts(function_body: &ast::BlockExpr, rule_call: &ast::CallExpr) -> Vec<SeedFact> {
-    let mut facts = Vec::new();
-    let mut next_fact_id = 0usize;
     let rule_range = rule_call.syntax().text_range();
     let enclosing_item_range = function_body
         .syntax()
         .ancestors()
         .find_map(ast::Item::cast)
         .map(|item| item.syntax().text_range());
+    let mut raw_facts = Vec::new();
     for method_call in function_body
         .syntax()
         .descendants()
@@ -1176,16 +1182,72 @@ fn extract_seed_facts(function_body: &ast::BlockExpr, rule_call: &ast::CallExpr)
         let referenced_vars = collect_variable_references(&receiver)
             .into_iter()
             .collect::<Vec<_>>();
-        facts.push(SeedFact {
-            id: format!("seed_{next_fact_id}"),
+        raw_facts.push(SeedFact {
+            id: String::new(),
             source_text: method_call.syntax().text().to_string(),
             committed_root: receiver.syntax().text().to_string(),
             referenced_vars,
             range: span_from_text_range(method_call.syntax().text_range()),
         });
-        next_fact_id += 1;
     }
-    facts
+
+    for call in function_body
+        .syntax()
+        .descendants()
+        .filter_map(ast::CallExpr::cast)
+    {
+        let Some(callee) = call_path(&call) else {
+            continue;
+        };
+        if !callee.ends_with("::insert") {
+            continue;
+        }
+        if call
+            .syntax()
+            .ancestors()
+            .skip(1)
+            .any(|ancestor| ast::ClosureExpr::can_cast(ancestor.kind()))
+        {
+            continue;
+        }
+        let nearest_item_range = call
+            .syntax()
+            .ancestors()
+            .skip(1)
+            .find_map(ast::Item::cast)
+            .map(|item| item.syntax().text_range());
+        if nearest_item_range != enclosing_item_range {
+            continue;
+        }
+        let call_range = call.syntax().text_range();
+        if call_range.start() >= rule_range.start() {
+            continue;
+        }
+        if rule_range.contains_range(call_range) {
+            continue;
+        }
+        let referenced_vars = call
+            .arg_list()
+            .into_iter()
+            .flat_map(|args| args.args())
+            .flat_map(|arg| collect_variable_references(&arg))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        raw_facts.push(SeedFact {
+            id: String::new(),
+            source_text: call.syntax().text().to_string(),
+            committed_root: callee.trim_end_matches("::insert").to_string(),
+            referenced_vars,
+            range: span_from_text_range(call_range),
+        });
+    }
+
+    raw_facts.sort_by_key(|fact| fact.range.start);
+    for (index, fact) in raw_facts.iter_mut().enumerate() {
+        fact.id = format!("seed_{index}");
+    }
+    raw_facts
 }
 
 fn first_pat_field_name(field_expr: &ast::FieldExpr, pat_name: &str) -> Option<String> {
@@ -1230,14 +1292,18 @@ fn block_pat_roots(block: &ast::BlockExpr) -> Vec<String> {
         if !struct_has_pat_attr(&strukt) {
             continue;
         }
-        return strukt
-            .syntax()
-            .descendants()
-            .filter_map(ast::RecordField::cast)
-            .filter_map(|field| field.name().map(|name| name.syntax().text().to_string()))
-            .collect();
+        return struct_pat_roots(&strukt);
     }
     Vec::new()
+}
+
+fn struct_pat_roots(strukt: &ast::Struct) -> Vec<String> {
+    strukt
+        .syntax()
+        .descendants()
+        .filter_map(ast::RecordField::cast)
+        .filter_map(|field| field.name().map(|name| name.syntax().text().to_string()))
+        .collect()
 }
 
 fn struct_has_pat_attr(strukt: &ast::Struct) -> bool {
@@ -1276,6 +1342,7 @@ fn is_query_call(call: &ast::CallExpr) -> bool {
         path.ends_with("::query")
             || path.ends_with("::query_leaf")
             || path.ends_with("::query_fields")
+            || path.ends_with("::query_named")
     })
 }
 
@@ -2127,6 +2194,85 @@ fn demo() {
             "edge.handle_src().eq(&edge.handle_dst())"
         );
         assert_eq!(ir.constraints[0].referenced_vars, vec!["edge"]);
+    }
+
+    #[test]
+    fn typed_relation_seed_inserts_are_exported_as_seed_facts() {
+        let src = r#"
+fn demo() {
+    RelEdge::<RelTx>::insert(1, 2);
+    RelEdge::<RelTx>::insert(2, 3);
+    MyTx::add_rule("typed_relation_seed", ruleset, || {
+        let edge = RelEdge::query();
+        #[eggplant::pat_vars_catch]
+        struct Pat {
+            edge: RelEdge,
+        }
+    }, |ctx, pat| {
+        let src = ctx.devalue(pat.edge.src);
+        let dst = ctx.devalue(pat.edge.dst);
+        ctx.insert_rel_path(src, dst);
+        ctx.set_rel_path_mark(src, dst, true);
+    });
+}
+"#;
+        let ir = extract(src, "RelEdge::query");
+        assert_eq!(ir.seed_facts.len(), 2);
+        assert_eq!(
+            ir.seed_facts
+                .iter()
+                .map(|fact| fact.source_text.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "RelEdge::<RelTx>::insert(1, 2)",
+                "RelEdge::<RelTx>::insert(2, 3)"
+            ]
+        );
+        assert_eq!(ir.seed_facts[0].committed_root, "RelEdge::<RelTx>");
+        assert_eq!(ir.roots, vec!["edge"]);
+        assert_eq!(ir.action_effects.len(), 2);
+        assert_eq!(ir.action_effects[0].referenced_pat_vars, vec!["edge"]);
+        assert_eq!(ir.action_effects[1].referenced_pat_vars, vec!["edge"]);
+    }
+
+    #[test]
+    fn resolves_add_rule_pattern_function_with_query_named() {
+        let src = r#"
+fn pat_vec_check_vec_of<PR: PatRecSgl>() -> CheckIVecPat<PR> {
+    let v = BaseVar::<IVec, PR>::query_named("v");
+    CheckIVecPat::new(v)
+}
+
+fn demo() {
+    MyTx::add_rule("vec_check_vec_of", ruleset, pat_vec_check_vec_of, |_ctx, _pat| {});
+}
+"#;
+        let ir = extract(src, "pat_vec_check_vec_of, |_ctx");
+        assert!(matches!(ir.scope.kind, ScopeKind::AddRuleCall));
+        assert_eq!(ir.roots, vec!["v"]);
+        assert_eq!(ir.nodes.len(), 1);
+        assert_eq!(ir.nodes[0].id, "v");
+    }
+
+    #[test]
+    fn resolves_add_rule_pattern_function_without_query_calls() {
+        let src = r#"
+fn pat_no_query<PR: PatRecSgl>() -> CheckUnitPat<PR> {
+    let e = true;
+    CheckUnitPat::new().assert(e)
+}
+
+fn demo() {
+    MyTx::add_rule("no_query", ruleset, pat_no_query, |_ctx, _pat| {});
+}
+"#;
+        let ir = extract(src, "pat_no_query, |_ctx");
+        assert!(matches!(ir.scope.kind, ScopeKind::AddRuleCall));
+        assert!(
+            ir.diagnostics
+                .iter()
+                .any(|diag| diag.message.contains("no supported pattern roots found in scope"))
+        );
     }
 
     #[test]

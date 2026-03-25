@@ -29,3 +29,9 @@ Read source from a file:
 ```bash
 cargo run -- --file sample.rs --offset 123 --pretty
 ```
+
+Check an entire Rust project and report which `add_rule` / `add_rule_with_hook` calls can be parsed by the extractor:
+
+```bash
+cargo run --bin project_detector -- --root /path/to/rust-project --fail-on-error
+```

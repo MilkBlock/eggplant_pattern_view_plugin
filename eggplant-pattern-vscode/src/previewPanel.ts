@@ -78,6 +78,7 @@ interface PreviewPanelCallbacks {
   onConstraintOpen(constraintId: string): Promise<void>;
   onSelectMetadataSources(): Promise<void>;
   onClearMetadataSources(): Promise<void>;
+  onCopyDot(dot: string): Promise<void>;
   onRefresh(): Promise<void>;
 }
 
@@ -96,6 +97,7 @@ type IncomingMessage =
   | { type: "openConstraint"; constraintId: string }
   | { type: "selectMetadataSources" }
   | { type: "clearMetadataSources" }
+  | { type: "copyDot"; dot: string }
   | { type: "refresh" };
 
 let currentPanel: PreviewPanel | undefined;
@@ -236,6 +238,9 @@ export class PreviewPanel implements vscode.Disposable {
         return;
       case "clearMetadataSources":
         await this.callbacks.onClearMetadataSources();
+        return;
+      case "copyDot":
+        await this.callbacks.onCopyDot(message.dot);
         return;
       case "refresh":
         await this.callbacks.onRefresh();
@@ -540,6 +545,37 @@ export class PreviewPanel implements vscode.Disposable {
         overflow: hidden;
         text-overflow: ellipsis;
       }
+      .graph-context-menu {
+        position: fixed;
+        z-index: 1000;
+        min-width: 140px;
+        padding: 6px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--panel);
+        box-shadow: 0 6px 18px color-mix(in srgb, var(--bg) 65%, #000 35%);
+      }
+      .graph-context-menu[hidden] {
+        display: none;
+      }
+      .graph-context-menu button {
+        display: block;
+        width: 100%;
+        margin: 0;
+        text-align: left;
+        background: transparent;
+        color: var(--fg);
+        border: none;
+        border-radius: 4px;
+        padding: 6px 8px;
+      }
+      .graph-context-menu button:hover:not(:disabled) {
+        background: color-mix(in srgb, var(--button) 22%, transparent);
+      }
+      .graph-context-menu button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
     </style>
   </head>
   <body>
@@ -663,8 +699,17 @@ export class PreviewPanel implements vscode.Disposable {
       let pendingSourceClickTimeout = null;
       const sourceClickDelayMs = 400;
       let lastRenderedSvgMarkup = "";
+      let currentDot = "";
       graph.dataset.draggable = "false";
       graph.dataset.dragging = "false";
+      const graphContextMenu = document.createElement("div");
+      graphContextMenu.className = "graph-context-menu";
+      graphContextMenu.hidden = true;
+      const copyDotButton = document.createElement("button");
+      copyDotButton.type = "button";
+      copyDotButton.textContent = "Copy DOT";
+      graphContextMenu.appendChild(copyDotButton);
+      document.body.appendChild(graphContextMenu);
 
       const syncRecursiveStrategyState = () => {
         recursiveStrategy.disabled = labelStyle.value !== "recursive";
@@ -830,31 +875,73 @@ export class PreviewPanel implements vscode.Disposable {
             continue;
           }
 
-          for (const textNode of Array.from(nodeGroup.querySelectorAll("text"))) {
-            textNode.remove();
-          }
+          const textNodes = Array.from(nodeGroup.querySelectorAll("text"));
+          const textLines = textNodes
+            .map((node) => node.textContent?.trim() || "")
+            .filter((line) => line.length > 0);
+          const annotationLines = textLines.slice(1);
 
           const bbox = shape.getBBox();
           const formulaWidth = rendered.width || parseSvgDimension(rendered.svg, "width");
           const formulaHeight = rendered.height || parseSvgDimension(rendered.svg, "height");
           if (!formulaWidth || !formulaHeight) {
+            // fallback: keep the original text label untouched
             continue;
           }
 
+          const annotationLineHeight = 12;
+          const annotationGap = annotationLines.length > 0 ? 4 : 0;
+          const annotationBlockHeight = annotationLines.length * annotationLineHeight + annotationGap;
           const maxWidth = bbox.width * 0.92;
-          const maxHeight = bbox.height * 0.86;
+          const maxHeight = bbox.height * 0.86 - annotationBlockHeight;
+          if (maxWidth <= 0 || maxHeight <= 0) {
+            // fallback: insufficient room for overlay, keep plain text label
+            continue;
+          }
+
           const scale = Math.min(maxWidth / formulaWidth, maxHeight / formulaHeight);
+          if (!Number.isFinite(scale) || scale <= 0) {
+            continue;
+          }
+
           const width = formulaWidth * scale;
           const height = formulaHeight * scale;
+          const contentTop = bbox.y + (bbox.height - (height + annotationBlockHeight)) / 2;
           const image = document.createElementNS("http://www.w3.org/2000/svg", "image");
           image.setAttribute("href", encodeSvgDataUri(rendered.svg));
           image.setAttribute("x", String(bbox.x + (bbox.width - width) / 2));
-          image.setAttribute("y", String(bbox.y + (bbox.height - height) / 2));
+          image.setAttribute("y", String(contentTop));
           image.setAttribute("width", String(width));
           image.setAttribute("height", String(height));
           image.setAttribute("data-typst-rendering", "true");
           image.setAttribute("pointer-events", "none");
+
+          const annotationOverlay = document.createElementNS("http://www.w3.org/2000/svg", "g");
+          annotationOverlay.setAttribute("data-typst-annotation-overlay", "true");
+          annotationOverlay.setAttribute("pointer-events", "none");
+          for (let index = 0; index < annotationLines.length; index += 1) {
+            const line = annotationLines[index];
+            const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+            text.setAttribute("x", String(bbox.x + bbox.width / 2));
+            text.setAttribute("y", String(contentTop + height + annotationGap + (index + 1) * annotationLineHeight - 2));
+            text.setAttribute("text-anchor", "middle");
+            text.setAttribute("font-size", "10");
+            text.setAttribute("fill", "var(--vscode-editor-foreground)");
+            text.setAttribute("stroke", "var(--vscode-editor-background)");
+            text.setAttribute("stroke-width", "0.8");
+            text.setAttribute("paint-order", "stroke");
+            text.textContent = line;
+            annotationOverlay.appendChild(text);
+          }
+
+          // Typst overlay succeeded: replace label text with image+annotation overlay.
+          for (const textNode of textNodes) {
+            textNode.remove();
+          }
           nodeGroup.appendChild(image);
+          if (annotationLines.length > 0) {
+            nodeGroup.appendChild(annotationOverlay);
+          }
         }
       };
 
@@ -1114,6 +1201,26 @@ export class PreviewPanel implements vscode.Disposable {
         }
       };
 
+      const hideGraphContextMenu = () => {
+        graphContextMenu.hidden = true;
+      };
+
+      const showGraphContextMenu = (clientX, clientY) => {
+        copyDotButton.disabled = !currentDot;
+        graphContextMenu.hidden = false;
+        const maxLeft = Math.max(0, window.innerWidth - graphContextMenu.offsetWidth - 8);
+        const maxTop = Math.max(0, window.innerHeight - graphContextMenu.offsetHeight - 8);
+        graphContextMenu.style.left = Math.min(clientX, maxLeft) + "px";
+        graphContextMenu.style.top = Math.min(clientY, maxTop) + "px";
+      };
+
+      const isGraphBackgroundEvent = (event) => {
+        if (!(event.target instanceof Element)) {
+          return true;
+        }
+        return !event.target.closest("g.node") && !event.target.closest("g.edge");
+      };
+
       mode.addEventListener("change", () => {
         vscode.postMessage({ type: "changeMode", mode: mode.value });
       });
@@ -1163,6 +1270,46 @@ export class PreviewPanel implements vscode.Disposable {
         vscode.postMessage({ type: "clearMetadataSources" });
       });
 
+      graph.addEventListener("contextmenu", (event) => {
+        if (!isGraphBackgroundEvent(event)) {
+          hideGraphContextMenu();
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        showGraphContextMenu(event.clientX, event.clientY);
+      });
+
+      graph.addEventListener("pointerdown", () => {
+        hideGraphContextMenu();
+      }, true);
+
+      window.addEventListener("scroll", () => {
+        hideGraphContextMenu();
+      }, true);
+
+      window.addEventListener("resize", () => {
+        hideGraphContextMenu();
+      });
+
+      window.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") {
+          hideGraphContextMenu();
+        }
+      });
+
+      document.addEventListener("click", () => {
+        hideGraphContextMenu();
+      });
+
+      copyDotButton.addEventListener("click", () => {
+        if (!currentDot) {
+          return;
+        }
+        vscode.postMessage({ type: "copyDot", dot: currentDot });
+        hideGraphContextMenu();
+      });
+
       switchToAst.addEventListener("click", () => {
         vscode.postMessage({ type: "changeSourceMode", sourceMode: "ast" });
       });
@@ -1174,6 +1321,7 @@ export class PreviewPanel implements vscode.Disposable {
         }
 
         const payload = message.payload;
+        currentDot = typeof payload.dot === "string" ? payload.dot : "";
         mode.value = payload.mode;
         labelStyle.value = payload.labelStyle;
         sourceMode.value = payload.sourceMode;
@@ -1247,6 +1395,7 @@ export class PreviewPanel implements vscode.Disposable {
           applyConstraintCountBadges(rootSvg, payload.constraintCountByNodeId || {});
           applyConstraintHighlights(rootSvg, payload.activeConstraintNodeIds || []);
         }
+        hideGraphContextMenu();
       });
 
       syncRecursiveStrategyState();
@@ -1299,6 +1448,7 @@ export async function dispatchPreviewPanelTestMessage(
     | { type: "openConstraint"; constraintId: string }
     | { type: "selectMetadataSources" }
     | { type: "clearMetadataSources" }
+    | { type: "copyDot"; dot: string }
     | { type: "refresh" }
 ): Promise<void> {
   await currentPanel?.dispatchTestMessage(message);

@@ -3,7 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { spawnSync } from "child_process";
 import { suite, test } from "mocha";
-import { collectTypstReplacementSources, compactConstraintLabel, patternIrToDot, patternIrToDotWithMode } from "../../dot";
+import { collectTypstReplacementSources, compactConstraintLabel, inlineConstraintAnnotation, patternIrToDot, patternIrToDotWithMode } from "../../dot";
 import { PatternIr } from "../../ir";
 import { mergeExternalMetadata, metadataCacheMatches, metadataSourceMatchesIdentifiers } from "../../metadataSources";
 import {
@@ -18,6 +18,7 @@ import { normalizeTypstMathSource, renderTypstSnippets } from "../../typst";
 
 const WORKSPACE_ROOT = path.resolve(__dirname, "../../../../");
 const FIXTURE_PATH = path.resolve(WORKSPACE_ROOT, "samples", "pattern_samples.rs");
+const RELATION_FIXTURE_PATH = path.resolve(WORKSPACE_ROOT, "samples", "relation.rs");
 const MATH_METADATA_FIXTURE = "/Users/mineralsteins/Repos/egg_related/eggplant_backup/benches/runners/eggplant_rewrite/math_microbenchmark.rs";
 const EXTRACTOR_PATH = path.resolve(
   WORKSPACE_ROOT,
@@ -444,6 +445,133 @@ fn demo() {
     assert.deepEqual(ir.constraints[0].referenced_vars, ["l", "r"]);
     assert.equal(ir.action_effects.length, 2);
     assert.equal(ir.seed_facts.length, 1);
+  });
+
+  test("copied relation sample stays covered by headless extraction flow", () => {
+    const source = fs.readFileSync(RELATION_FIXTURE_PATH, "utf8");
+    const offset = source.indexOf("let edge = Edge::query();");
+    assert.notEqual(offset, -1);
+
+    const result = spawnSync(EXTRACTOR_PATH, ["--offset", String(offset)], {
+      cwd: WORKSPACE_ROOT,
+      input: source,
+      encoding: "utf8"
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const ir = JSON.parse(result.stdout) as PatternIr;
+
+    assert.deepEqual(ir.roots, ["edge"]);
+    assert.equal(ir.nodes.length, 1);
+    assert.equal(ir.nodes[0].dsl_type, "Edge");
+    assert.equal(ir.seed_facts.length, 2);
+    assert.deepEqual(
+      ir.seed_facts.map((fact) => fact.source_text),
+      ["Edge::<RelTx>::insert(1, 2)", "Edge::<RelTx>::insert(2, 3)"]
+    );
+  });
+
+  test("extractor supports typed relation query surface", () => {
+    const source = `
+fn demo() {
+  MyTx::add_rule("typed_relation", ruleset, || {
+    let edge = Edge::query();
+    let reach = Reach::query_fields(&edge.src, &edge.dst);
+    let eq = edge.handle_src().eq(&edge.handle_dst());
+    ReachPat::new(edge, reach).assert(eq)
+  }, |ctx, pat| {
+    let src = ctx.devalue(pat.edge.src);
+    let dst = ctx.devalue(pat.edge.dst);
+    ctx.insert_reach(src, dst);
+  });
+}
+`;
+    const offset = source.indexOf("Reach::query_fields");
+    assert.notEqual(offset, -1);
+
+    const result = spawnSync(EXTRACTOR_PATH, ["--offset", String(offset)], {
+      cwd: WORKSPACE_ROOT,
+      input: source,
+      encoding: "utf8"
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const ir = JSON.parse(result.stdout) as PatternIr;
+
+    assert.deepEqual(ir.roots, ["edge", "reach"]);
+    assert.equal(ir.nodes.length, 2);
+    assert.deepEqual(
+      ir.nodes.map((node) => ({ id: node.id, dsl_type: node.dsl_type, inputs: node.inputs })),
+      [
+        { id: "edge", dsl_type: "Edge", inputs: [] },
+        { id: "reach", dsl_type: "Reach", inputs: ["edge", "edge"] }
+      ]
+    );
+    assert.equal(ir.constraints.length, 1);
+    assert.equal(ir.constraints[0].resolved_text, "edge.handle_src().eq(&edge.handle_dst())");
+    assert.deepEqual(ir.constraints[0].referenced_vars, ["edge"]);
+    assert.equal(ir.action_effects.length, 1);
+    assert.deepEqual(ir.action_effects[0].referenced_pat_vars, ["edge"]);
+  });
+
+  test("dot renders typed relation aggregate nodes and projected query-field edges", () => {
+    const ir: PatternIr = {
+      scope: {
+        kind: "pattern_function",
+        text_range: { start: 0, end: 20 },
+        pattern_range: { start: 0, end: 20 },
+        action_range: null
+      },
+      nodes: [
+        { id: "edge", kind: "query", dsl_type: "Edge", label: "edge: Edge", range: { start: 0, end: 4 }, inputs: [] },
+        { id: "reach", kind: "query", dsl_type: "Reach", label: "reach: Reach", range: { start: 5, end: 10 }, inputs: ["edge", "edge"] }
+      ],
+      edges: [
+        { from: "reach", to: "edge", kind: "input", index: 0 },
+        { from: "reach", to: "edge", kind: "input", index: 1 }
+      ],
+      roots: ["edge", "reach"],
+      constraints: [],
+      action_effects: [],
+      seed_facts: [],
+      display_templates: [],
+      typst_templates: [],
+      precedence_templates: [],
+      diagnostics: []
+    };
+
+    const dot = patternIrToDotWithMode(ir, "pattern", "compact");
+    assert.match(dot, /"edge" \[label="Edge"/);
+    assert.match(dot, /"reach" \[label="Reach"/);
+    assert.match(dot, /"reach" -> "edge" \[label="0"\];/);
+    assert.match(dot, /"reach" -> "edge" \[label="1"\];/);
+  });
+
+  test("extractor exports typed relation seed inserts and dot renders them as seed facts", () => {
+    const source = fs.readFileSync(RELATION_FIXTURE_PATH, "utf8");
+    const offset = source.indexOf("let edge = Edge::query();");
+    assert.notEqual(offset, -1);
+
+    const result = spawnSync(EXTRACTOR_PATH, ["--offset", String(offset)], {
+      cwd: WORKSPACE_ROOT,
+      input: source,
+      encoding: "utf8"
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const ir = JSON.parse(result.stdout) as PatternIr;
+
+    assert.deepEqual(ir.roots, ["edge"]);
+    assert.equal(ir.seed_facts.length, 2);
+    assert.deepEqual(
+      ir.seed_facts.map((fact) => fact.source_text),
+      ["Edge::<RelTx>::insert(1, 2)", "Edge::<RelTx>::insert(2, 3)"]
+    );
+
+    const dot = patternIrToDotWithMode(ir, "combined", "full");
+    assert.match(dot, /label="Seed Facts"/);
+    assert.match(dot, /Edge::<RelTx>::insert\(1, 2\)/);
+    assert.match(dot, /Edge::<RelTx>::insert\(2, 3\)/);
   });
 
   test("external metadata sources merge typst templates into the preview ir", () => {
@@ -926,12 +1054,12 @@ fn demo() {
     const compactDot = patternIrToDotWithMode(ir, "combined", "compact");
     const fullDot = patternIrToDotWithMode(ir, "combined", "full");
 
-    assert.match(compactDot, /label="DisplayMath"/);
+    assert.match(compactDot, /label="DisplayMath\\n= rhs"/);
     assert.match(compactDot, /label="union\(lhs, rhs\)"/);
     assert.match(compactDot, /label="expr\.commit\(\)"/);
     assert.equal(compactConstraintLabel("lhs_eq_rhs", "lhs.handle().eq(&rhs.handle())"), "lhs == rhs");
 
-    assert.match(fullDot, /label="lhs: DisplayMath"/);
+    assert.match(fullDot, /label="lhs: DisplayMath\\n= rhs"/);
     assert.match(fullDot, /ctx\.union\(pat\.lhs, rhs\.clone\(\)\)/);
   });
 
@@ -1035,6 +1163,161 @@ fn demo() {
       compactConstraintLabel("lhs.custom_constraint(rhs)", "lhs.handle().custom_constraint(&rhs.handle())"),
       "lhs.custom_constraint(rhs) [raw]"
     );
+  });
+
+  test("simple handle equality constraints become node annotations", () => {
+    const annotation = inlineConstraintAnnotation({
+      id: "constraint_0",
+      source_text: "else1_is_second",
+      resolved_text: "else1.handle_index().eq(&(&1_i64).as_handle())",
+      referenced_vars: ["else1"],
+      range: { start: 0, end: 10 }
+    });
+    assert.deepEqual(annotation, {
+      nodeId: "else1",
+      fieldName: "index",
+      valueText: "1_i64",
+      displayText: "index = 1_i64",
+      hideInSidebar: true
+    });
+  });
+
+  test("simple direct constant equality constraints become node annotations", () => {
+    const annotation = inlineConstraintAnnotation({
+      id: "constraint_0",
+      source_text: "edge_src_is_one",
+      resolved_text: "edge.handle_src().eq(&1_i64)",
+      referenced_vars: ["edge"],
+      range: { start: 0, end: 10 }
+    });
+    assert.deepEqual(annotation, {
+      nodeId: "edge",
+      fieldName: "src",
+      valueText: "1_i64",
+      displayText: "src = 1_i64",
+      hideInSidebar: true
+    });
+  });
+
+  test("simple handle-to-handle equality constraints become node annotations", () => {
+    const annotation = inlineConstraintAnnotation({
+      id: "constraint_0",
+      source_text: "l_r_eq",
+      resolved_text: "l.handle().eq(&r.handle())",
+      referenced_vars: ["l", "r"],
+      range: { start: 0, end: 10 }
+    });
+    assert.deepEqual(annotation, {
+      nodeId: "l",
+      fieldName: null,
+      valueText: "r",
+      displayText: "= r",
+      hideInSidebar: true
+    });
+  });
+
+  test("dot labels inline simple constant constraints onto nodes", () => {
+    const ir: PatternIr = {
+      scope: {
+        kind: "pattern_function",
+        text_range: { start: 0, end: 10 },
+        pattern_range: { start: 0, end: 10 },
+        action_range: null
+      },
+      nodes: [
+        { id: "else1", kind: "query", dsl_type: "ElseBranch", label: "else1: ElseBranch", range: { start: 0, end: 1 }, inputs: [] }
+      ],
+      edges: [],
+      roots: ["else1"],
+      constraints: [
+        {
+          id: "constraint_0",
+          source_text: "else1_is_second",
+          resolved_text: "else1.handle_index().eq(&(&1_i64).as_handle())",
+          referenced_vars: ["else1"],
+          range: { start: 2, end: 8 }
+        }
+      ],
+      action_effects: [],
+      seed_facts: [],
+      display_templates: [],
+      typst_templates: [],
+      precedence_templates: [],
+      diagnostics: []
+    };
+
+    const dot = patternIrToDotWithMode(ir, "pattern", "compact");
+    assert.match(dot, /"else1" \[label="ElseBranch\\nindex = 1_i64"/);
+  });
+
+  test("dot labels inline handle-to-handle equality constraints onto nodes", () => {
+    const ir: PatternIr = {
+      scope: {
+        kind: "pattern_function",
+        text_range: { start: 0, end: 10 },
+        pattern_range: { start: 0, end: 10 },
+        action_range: null
+      },
+      nodes: [
+        { id: "l", kind: "query", dsl_type: "Const", label: "l: Const", range: { start: 0, end: 1 }, inputs: [] },
+        { id: "r", kind: "query", dsl_type: "Const", label: "r: Const", range: { start: 2, end: 3 }, inputs: [] }
+      ],
+      edges: [],
+      roots: ["l", "r"],
+      constraints: [
+        {
+          id: "constraint_0",
+          source_text: "l_r_eq",
+          resolved_text: "l.handle().eq(&r.handle())",
+          referenced_vars: ["l", "r"],
+          range: { start: 4, end: 8 }
+        }
+      ],
+      action_effects: [],
+      seed_facts: [],
+      display_templates: [],
+      typst_templates: [],
+      precedence_templates: [],
+      diagnostics: []
+    };
+
+    const dot = patternIrToDotWithMode(ir, "pattern", "compact");
+    assert.match(dot, /"l" \[label="Const\\n= r"/);
+  });
+
+  test("typst replacement keeps annotated nodes as overlay candidates", () => {
+    const ir: PatternIr = {
+      scope: {
+        kind: "pattern_function",
+        text_range: { start: 0, end: 10 },
+        pattern_range: { start: 0, end: 10 },
+        action_range: null
+      },
+      nodes: [
+        { id: "else1", kind: "query", dsl_type: "ElseBranch", label: "else1: ElseBranch", range: { start: 0, end: 1 }, inputs: [] }
+      ],
+      edges: [],
+      roots: ["else1"],
+      constraints: [
+        {
+          id: "constraint_0",
+          source_text: "else1_is_second",
+          resolved_text: "else1.handle_index().eq(&1_i64)",
+          referenced_vars: ["else1"],
+          range: { start: 2, end: 8 }
+        }
+      ],
+      action_effects: [],
+      seed_facts: [],
+      display_templates: [],
+      typst_templates: [{ variant_name: "ElseBranch", template: "ElseBranch", fields: [] }],
+      precedence_templates: [],
+      diagnostics: []
+    };
+
+    const replacements = collectTypstReplacementSources(ir, "pattern", "compact");
+    assert.equal(replacements.length, 1);
+    assert.equal(replacements[0].targetId, "else1");
   });
 
   test("compact labels prefer display templates when available", () => {

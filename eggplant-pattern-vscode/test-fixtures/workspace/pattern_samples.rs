@@ -67,6 +67,27 @@ fn add_rule_assert_block_demo() {
     });
 }
 
+fn add_rule_constraints_panel_demo() {
+    MyTx::add_rule("demo_constraints_panel", ruleset, || {
+        let l = Const::query();
+        let r = Const::query();
+        let p = Add::query(&l, &r);
+        let l_r_plus1_eq = l.handle().eq(&(r.handle() + (&1_i64).as_handle()));
+        {
+            #[eggplant::pat_vars_catch]
+            struct AddPat {
+                l: Const,
+                r: Const,
+                p: Add,
+            }
+        }
+        .assert(l_r_plus1_eq)
+    }, |ctx, pat| {
+        let folded = ctx.insert_const(6);
+        ctx.union(pat.p, folded);
+    });
+}
+
 fn step_pat<PR: PatRecSgl>() -> StepPat<PR> {
     let lhs = Const::query();
     let rhs = Const::query();
