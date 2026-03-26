@@ -19,6 +19,7 @@ tx_rx_vt_pr!(MyTx, MyPatRec);
 // - seed rule 用 `#[eggplant::pat_vars_catch] struct Unit {}`
 // - 这类 rule 适合用来回归 extractor 对 func table + Unit pattern 的支持
 
+#[eggplant::typst("fib({x})")]
 #[eggplant::func(output = i64, no_merge)]
 struct fib {
     x: i64,

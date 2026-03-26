@@ -29,7 +29,7 @@ export function metadataCacheMatches(
 
 function extractTemplates(source: string, attrName: "display" | "typst"): Array<DisplayTemplate | TypstTemplate> {
   const pattern = new RegExp(
-    String.raw`#\s*\[\s*(?:eggplant::)?${attrName}\("(?<template>(?:\\.|[^"])*)"\)\s*\]\s*(?:#\s*\[[^\]]+\]\s*)*(?<variant>[A-Za-z_][A-Za-z0-9_]*)\s*(?:\{(?<fields>[^}]*)\})?`,
+    String.raw`#\s*\[\s*(?:eggplant::)?${attrName}\("(?<template>(?:\\.|[^"])*)"\)\s*\]\s*(?:#\s*\[[^\]]+\]\s*)*(?:(?:struct|enum)\s+)?(?<variant>[A-Za-z_][A-Za-z0-9_]*)\s*(?:\{(?<fields>[^}]*)\})?`,
     "gs"
   );
   const templates: Array<DisplayTemplate | TypstTemplate> = [];
@@ -56,7 +56,7 @@ function extractTemplates(source: string, attrName: "display" | "typst"): Array<
 }
 
 function extractPrecedenceTemplates(source: string): PrecedenceTemplate[] {
-  const pattern = /#\s*\[\s*(?:eggplant::)?precedence\((?<precedence>\d+)\)\s*\]\s*(?:#\s*\[[^\]]+\]\s*)*(?<variant>[A-Za-z_][A-Za-z0-9_]*)/g;
+  const pattern = /#\s*\[\s*(?:eggplant::)?precedence\((?<precedence>\d+)\)\s*\]\s*(?:#\s*\[[^\]]+\]\s*)*(?:(?:struct|enum)\s+)?(?<variant>[A-Za-z_][A-Za-z0-9_]*)/g;
   const templates: PrecedenceTemplate[] = [];
   for (const match of source.matchAll(pattern)) {
     const variantName = match.groups?.variant?.trim();

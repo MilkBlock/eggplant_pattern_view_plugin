@@ -368,7 +368,7 @@ fn extract_typst_templates(source: &str) -> Vec<TypstTemplate> {
 
 fn extract_precedence_templates(source: &str) -> Vec<PrecedenceTemplate> {
     let attr_re = Regex::new(
-        r#"(?s)#\s*\[\s*(?:eggplant::)?precedence\((?P<precedence>\d+)\)\s*\]\s*(?:#\s*\[[^\]]+\]\s*)*(?P<variant>[A-Za-z_][A-Za-z0-9_]*)\s*(?:\{[^}]*\})?"#
+        r#"(?s)#\s*\[\s*(?:eggplant::)?precedence\((?P<precedence>\d+)\)\s*\]\s*(?:#\s*\[[^\]]+\]\s*)*(?:(?:struct|enum)\s+)?(?P<variant>[A-Za-z_][A-Za-z0-9_]*)\s*(?:\{[^}]*\})?"#
     )
     .expect("valid precedence regex");
 
@@ -395,7 +395,7 @@ struct RawTemplate {
 fn extract_templates(source: &str, attr_name: &str) -> Vec<RawTemplate> {
     let attr_re = Regex::new(
         &format!(
-            r#"(?s)#\s*\[\s*(?:eggplant::)?{attr_name}\("(?P<template>(?:\\.|[^"])*)"\)\s*\]\s*(?:#\s*\[[^\]]+\]\s*)*(?P<variant>[A-Za-z_][A-Za-z0-9_]*)\s*(?:\{{(?P<fields>[^}}]*)\}})?"#
+            r#"(?s)#\s*\[\s*(?:eggplant::)?{attr_name}\("(?P<template>(?:\\.|[^"])*)"\)\s*\]\s*(?:#\s*\[[^\]]+\]\s*)*(?:(?:struct|enum)\s+)?(?P<variant>[A-Za-z_][A-Za-z0-9_]*)\s*(?:\{{(?P<fields>[^}}]*)\}})?"#
         ),
     )
     .expect("valid template regex");
@@ -1490,6 +1490,46 @@ fn demo() {
         assert_eq!(ir.precedence_templates.len(), 1);
         assert_eq!(ir.precedence_templates[0].variant_name, "MDiff");
         assert_eq!(ir.precedence_templates[0].precedence, 5);
+    }
+
+    #[test]
+    fn extracts_typst_templates_from_func_struct() {
+        let src = r#"
+use eggplant::prelude::*;
+
+#[eggplant::typst("fib({x})")]
+#[eggplant::func(output = i64, no_merge)]
+struct fib {
+    x: i64,
+}
+
+fn demo(step_ruleset: Ruleset) {
+    MyTx::add_rule(
+        "fib_step",
+        step_ruleset,
+        || {
+            let x = fib::x();
+            let f0 = fib::query(&x);
+            FibStep::new(x, f0)
+        },
+        |ctx, pat| {
+            ctx.set_fib(ctx.devalue(pat.x), ctx.devalue(pat.f0));
+        },
+    );
+}
+"#;
+        let ir = extract(src, "ctx.set_fib");
+        assert_eq!(ir.typst_templates.len(), 1);
+        assert_eq!(ir.typst_templates[0].variant_name, "fib");
+        assert_eq!(ir.typst_templates[0].template, "fib({x})");
+        assert_eq!(ir.typst_templates[0].fields, vec!["x"]);
+        assert_eq!(
+            ir.nodes
+                .iter()
+                .map(|node| (node.id.as_str(), node.dsl_type.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("f0", "fib")]
+        );
     }
 
     #[test]
