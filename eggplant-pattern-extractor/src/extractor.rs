@@ -448,6 +448,10 @@ struct QuerySpec {
     inputs: Vec<String>,
 }
 
+fn normalize_query_dsl_type(path: &str) -> String {
+    path.split("::").last().unwrap_or(path).to_string()
+}
+
 fn query_spec(expr: &ast::Expr, query_vec_bindings: &HashMap<String, Vec<String>>) -> Option<QuerySpec> {
     let call = ast::CallExpr::cast(expr.syntax().clone())?;
     let callee = call_path(&call)?;
@@ -462,7 +466,7 @@ fn query_spec(expr: &ast::Expr, query_vec_bindings: &HashMap<String, Vec<String>
     } else {
         return None;
     };
-    let dsl_type = callee.trim_end_matches(suffix).to_string();
+    let dsl_type = normalize_query_dsl_type(callee.trim_end_matches(suffix));
     let inputs = call
         .arg_list()
         .into_iter()
@@ -1497,6 +1501,27 @@ fn demo() {
         assert_eq!(pair_edges[0].index, 0);
         assert_eq!(pair_edges[1].to, "b");
         assert_eq!(pair_edges[1].index, 1);
+    }
+
+    #[test]
+    fn normalizes_namespaced_query_leaf_types_to_variant_name() {
+        let src = r#"
+fn demo() {
+    MyTx::add_rule("demo", ruleset, || {
+        let perm = schema_dsl::Expr::query_leaf();
+        DemoPat::new(perm)
+    }, |ctx, pat| {});
+}
+"#;
+        let ir = extract(src, "schema_dsl::Expr::query_leaf");
+        let perm = ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "perm")
+            .expect("perm node should exist");
+        assert_eq!(perm.kind, crate::ir::NodeKind::QueryLeaf);
+        assert_eq!(perm.dsl_type, "Expr");
+        assert_eq!(perm.label, "perm: Expr");
     }
 
     #[test]
