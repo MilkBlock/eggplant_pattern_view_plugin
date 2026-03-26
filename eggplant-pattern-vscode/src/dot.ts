@@ -135,7 +135,7 @@ function parseHandleComparable(value: string): { valueText: string } | null {
     /^([A-Za-z_][A-Za-z0-9_]*)\.handle(?:_([A-Za-z_][A-Za-z0-9_]*))?\(\)$/
   );
   if (!handleMatch) {
-    return null;
+    return parseBinaryHandleComparable(current);
   }
   const nodeId = handleMatch[1];
   const fieldName = handleMatch[2] ?? null;
@@ -144,11 +144,41 @@ function parseHandleComparable(value: string): { valueText: string } | null {
   };
 }
 
+function parseBinaryHandleComparable(value: string): { valueText: string } | null {
+  let parenDepth = 0;
+  for (let i = value.length - 1; i >= 0; i -= 1) {
+    const ch = value[i];
+    if (ch === ")") {
+      parenDepth += 1;
+      continue;
+    }
+    if (ch === "(") {
+      parenDepth -= 1;
+      continue;
+    }
+    if (parenDepth !== 0 || (ch !== "+" && ch !== "-")) {
+      continue;
+    }
+    const left = parseHandleComparable(value.slice(0, i).trim());
+    const right = parseHandleComparable(value.slice(i + 1).trim());
+    if (!left || !right) {
+      return null;
+    }
+    return {
+      valueText: `${left.valueText} ${ch} ${right.valueText}`
+    };
+  }
+  return null;
+}
+
 export function inlineConstraintAnnotation(constraint: PatternConstraint): InlineConstraintAnnotation | null {
   const match = constraint.resolved_text.match(
     /^([A-Za-z_][A-Za-z0-9_]*)\.handle(?:_([A-Za-z_][A-Za-z0-9_]*))?\(\)\.eq\(&(.+)\)$/
   );
   if (!match) {
+    return null;
+  }
+  if (new Set(constraint.referenced_vars).size >= 3) {
     return null;
   }
   const nodeId = match[1];
