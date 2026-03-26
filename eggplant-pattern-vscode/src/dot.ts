@@ -199,6 +199,9 @@ function typstAtomicExpression(value: string): string {
     if (/^[A-Za-z]$/.test(compacted)) {
       return compacted;
     }
+    if (/^[A-Za-z][A-Za-z0-9]*$/.test(compacted) && /[0-9]/.test(compacted)) {
+      return compacted;
+    }
     if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(compacted)) {
       return JSON.stringify(compacted);
     }
@@ -244,6 +247,47 @@ function semanticInsertLabel(sourceText: string): string {
 
   const [, insertTarget, args] = insertMatch;
   return `${toVariantTypeName(insertTarget)}(${args})`;
+}
+
+function renderSetCall(
+  ir: PatternIr,
+  sourceText: string,
+  atomicRenderer: (value: string) => string,
+  templateLookup: (ir: PatternIr, variantName: string) => DisplayTemplate | TypstTemplate | undefined
+): string | null {
+  const trimmed = sourceText.trim();
+  const setMatch = trimmed.match(/^(?:[A-Za-z_][A-Za-z0-9_]*\.)?set_([A-Za-z0-9_]+)\((.*)\)$/);
+  if (!setMatch) {
+    return null;
+  }
+
+  const [, setTarget, rawArgs] = setMatch;
+  const args = parseArgsList(rawArgs).map((arg) => compactExpression(arg));
+  if (args.length < 2) {
+    return null;
+  }
+
+  const variantCandidates = [setTarget, toVariantTypeName(setTarget)];
+  const rhs = atomicRenderer(args[args.length - 1]);
+  for (const variantName of variantCandidates) {
+    const template = templateLookup(ir, variantName);
+    if (!template) {
+      continue;
+    }
+    if (template.fields.length !== args.length - 1) {
+      continue;
+    }
+    const lhs = applyDisplayTemplate(
+      template,
+      args.slice(0, -1).map((arg) => atomicRenderer(arg)),
+      variantPrecedence(ir, variantName)
+    );
+    if (lhs) {
+      return `${lhs} = ${rhs}`;
+    }
+  }
+
+  return `${setTarget}(${args.slice(0, -1).map((arg) => atomicRenderer(arg)).join(", ")}) = ${rhs}`;
 }
 
 function findDisplayTemplate(ir: PatternIr, variantName: string): DisplayTemplate | undefined {
@@ -682,6 +726,10 @@ function actionEffectLabel(
   if (overrideLabel) {
     return overrideLabel;
   }
+  const renderedSet = renderSetCall(ir, sourceText, displayAtomicExpression, findPreferredTemplate);
+  if (renderedSet) {
+    return renderedSet;
+  }
   const parsed = parseSemanticInsert(sourceText);
   const semantic = parsed?.semantic ?? semanticInsertLabel(sourceText);
   if (labelStyle === "full") {
@@ -719,6 +767,10 @@ function actionEffectTypstSource(
   incomingCounts: Map<string, number>,
   effectId: string
 ): string {
+  const renderedSet = renderSetCall(ir, sourceText, typstAtomicExpression, findTypstTemplate);
+  if (renderedSet) {
+    return renderedSet;
+  }
   const parsed = parseSemanticInsert(sourceText);
   if (!parsed) {
     return compactExpression(sourceText);
@@ -977,7 +1029,8 @@ export function collectTypstReplacementSources(
         continue;
       }
       const parsed = parseSemanticInsert(effect.source_text);
-      if (!parsed || !findTypstTemplate(ir, parsed.variantName)) {
+      const renderedSet = renderSetCall(ir, effect.source_text, typstAtomicExpression, findTypstTemplate);
+      if ((!parsed || !findTypstTemplate(ir, parsed.variantName)) && !renderedSet) {
         continue;
       }
       sources.push({
