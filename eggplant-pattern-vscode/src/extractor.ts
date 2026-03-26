@@ -73,10 +73,12 @@ export function resolveExtractorPath(): string {
 export async function runExtractor(document: vscode.TextDocument, offset: number): Promise<PatternIr> {
   const extractorPath = resolveExtractorPath();
   const source = document.getText();
+  // VS Code offsets are UTF-16 code units; extractor expects UTF-8 byte offsets.
+  const byteOffset = Buffer.byteLength(source.slice(0, offset), "utf8");
   await ensureExtractorAvailable(extractorPath);
 
   return new Promise<PatternIr>((resolve, reject) => {
-    const child = spawn(extractorPath, ["--offset", String(offset)], {
+    const child = spawn(extractorPath, ["--offset", String(byteOffset)], {
       cwd: repoRoot(),
       stdio: ["pipe", "pipe", "pipe"]
     });
