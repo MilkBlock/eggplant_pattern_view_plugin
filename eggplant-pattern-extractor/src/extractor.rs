@@ -79,6 +79,15 @@ fn find_scope(root: &SyntaxNode, offset: TextSize) -> Option<Scope> {
         return Some(Scope::RuleCall(call));
     }
 
+    if let Some(call) = root
+        .descendants()
+        .filter_map(ast::CallExpr::cast)
+        .filter(|call| call.syntax().text_range().contains(offset))
+        .find(is_add_rule_call)
+    {
+        return Some(Scope::RuleCall(call));
+    }
+
     if let Some(function) = algo::find_node_at_offset::<ast::Fn>(root, offset)
         && function_looks_like_pattern(&function)
     {
@@ -865,7 +874,11 @@ fn expr_as_method_call(expr: &ast::Expr) -> Option<ast::MethodCallExpr> {
 }
 
 fn is_action_effect_method(method_name: &str) -> bool {
-    method_name == "union" || method_name.starts_with("insert_") || method_name.starts_with("set_")
+    method_name == "union"
+        || method_name.starts_with("insert_")
+        || method_name.starts_with("set_")
+        || method_name.starts_with("read_")
+        || method_name.starts_with("try_read_")
 }
 
 fn extract_action_effects(
@@ -1302,12 +1315,19 @@ fn block_pat_roots(block: &ast::BlockExpr) -> Vec<String> {
 }
 
 fn struct_pat_roots(strukt: &ast::Struct) -> Vec<String> {
-    strukt
+    let roots = strukt
         .syntax()
         .descendants()
         .filter_map(ast::RecordField::cast)
         .filter_map(|field| field.name().map(|name| name.syntax().text().to_string()))
-        .collect()
+        .collect::<Vec<_>>();
+    if !roots.is_empty() {
+        return roots;
+    }
+    strukt
+        .name()
+        .map(|name| vec![name.syntax().text().to_string()])
+        .unwrap_or_default()
 }
 
 fn struct_has_pat_attr(strukt: &ast::Struct) -> bool {
@@ -1742,6 +1762,51 @@ fn demo() {
     }
 
     #[test]
+    fn extracts_empty_pat_vars_catch_struct_name_as_unit_root() {
+        let src = r#"
+fn demo() {
+    MyTx::add_rule("seed", ruleset, || {
+        #[eggplant::pat_vars_catch]
+        struct Unit {}
+    }, |ctx, _pat| {
+        ctx.set_fib(0, 0);
+        ctx.set_fib(1, 1);
+    });
+}
+"#;
+        let ir = extract(src, "#[eggplant::pat_vars_catch]");
+        assert!(matches!(ir.scope.kind, ScopeKind::AddRuleCall));
+        assert_eq!(ir.roots, vec!["Unit"]);
+        assert!(ir.nodes.is_empty());
+        assert_eq!(
+            ir.action_effects
+                .iter()
+                .map(|effect| effect.source_text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ctx.set_fib(0, 0)", "ctx.set_fib(1, 1)"]
+        );
+    }
+
+    #[test]
+    fn attribute_offset_inside_unit_pattern_still_resolves_add_rule_scope() {
+        let src = r#"
+fn demo() {
+    MyTx::add_rule("seed", ruleset, || {
+        #[eggplant::pat_vars_catch]
+        struct Unit {}
+    }, |ctx, _pat| {
+        ctx.set_fib(0, 0);
+    });
+}
+"#;
+        let ir = extract(src, "#[eggplant::pat_vars_catch]");
+        assert!(matches!(ir.scope.kind, ScopeKind::AddRuleCall));
+        assert_eq!(ir.roots, vec!["Unit"]);
+        assert_eq!(ir.action_effects.len(), 1);
+        assert_eq!(ir.action_effects[0].source_text, "ctx.set_fib(0, 0)");
+    }
+
+    #[test]
     fn keeps_inline_assertion_text() {
         let src = r#"
 fn demo() {
@@ -1871,6 +1936,38 @@ fn demo() {
         );
         assert_eq!(ir.action_effects[0].referenced_pat_vars, vec!["l", "r"]);
         assert_eq!(ir.action_effects[0].referenced_action_vars, vec!["dst", "src"]);
+    }
+
+    #[test]
+    fn captures_func_reads_as_action_nodes() {
+        let src = r#"
+fn demo() {
+    let add_1_2_key = Value::new(MyTx::canonical_raw(&add_1_2));
+    let add_1_3_key = Value::new(MyTx::canonical_raw(&add_1_3));
+    MyTx::add_rule("read_complex_output", ruleset, || {
+        #[eggplant::pat_vars_catch]
+        struct Unit {}
+    }, move |ctx, _pat| {
+        let out_v = ctx.read_lead_to(add_1_2_key);
+        let missing = ctx.try_read_lead_to(add_1_3_key);
+        println!("{:?} {:?}", out_v, missing);
+    });
+}
+"#;
+        let ir = extract(src, "ctx.read_lead_to");
+        assert_eq!(ir.action_effects.len(), 2);
+        assert_eq!(
+            ir.action_effects[0].source_text,
+            "ctx.read_lead_to(add_1_2_key)"
+        );
+        assert_eq!(ir.action_effects[0].bound_var.as_deref(), Some("out_v"));
+        assert!(ir.action_effects[0].referenced_pat_vars.is_empty());
+        assert!(ir.action_effects[0].referenced_action_vars.is_empty());
+        assert_eq!(
+            ir.action_effects[1].source_text,
+            "ctx.try_read_lead_to(add_1_3_key)"
+        );
+        assert_eq!(ir.action_effects[1].bound_var.as_deref(), Some("missing"));
     }
 
     #[test]
@@ -2039,6 +2136,67 @@ fn demo(rs: Ruleset, recorder: ActionSampleRecorder) {
             vec!["ab", "ac"]
         );
         assert_eq!(ir.action_effects[3].referenced_pat_vars, vec!["mul"]);
+    }
+
+    #[test]
+    fn extracts_function_table_rule_from_action_scope() {
+        let src = r#"
+use eggplant::prelude::*;
+use eggplant::tx_rx_vt_pr;
+
+tx_rx_vt_pr!(MyTx, MyPatRec);
+
+#[eggplant::func(output = i64, no_merge)]
+struct fib {
+    x: i64,
+}
+
+#[eggplant::pat_vars]
+struct FibStep<PR: PatRecSgl> {
+    x: i64,
+    x1: i64,
+    x2: i64,
+    f0: i64,
+    f1: i64,
+}
+
+fn demo(step_ruleset: Ruleset) {
+    MyTx::add_rule(
+        "fib_step",
+        step_ruleset,
+        || {
+            let (x, x1, x2) = (fib::x(), fib::x().named("x1"), fib::x().named("x2"));
+            let x1_constraint = x1.handle().eq(&(x.handle() + (&1_i64).as_handle()));
+            let x2_constraint = x2.handle().eq(&(x.handle() + (&2_i64).as_handle()));
+            let f0 = fib::query(&x);
+            let f1 = fib::query(&x1);
+            FibStep::new(x, x1, x2, f0, f1)
+                .assert(x1_constraint)
+                .assert(x2_constraint)
+        },
+        |ctx, pat| {
+            let x2 = ctx.devalue(pat.x2);
+            let f0 = ctx.devalue(pat.f0);
+            let f1 = ctx.devalue(pat.f1);
+            ctx.set_fib(x2, f0 + f1);
+        },
+    );
+}
+"#;
+        let ir = extract(src, "ctx.set_fib(x2, f0 + f1);");
+        assert!(matches!(ir.scope.kind, ScopeKind::AddRuleCall));
+        assert_eq!(ir.roots, vec!["x", "x1", "x2", "f0", "f1"]);
+        assert_eq!(
+            ir.nodes
+                .iter()
+                .map(|node| (node.id.as_str(), node.dsl_type.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("f0", "fib"), ("f1", "fib")]
+        );
+        assert_eq!(ir.constraints.len(), 2);
+        assert_eq!(ir.action_effects.len(), 1);
+        assert_eq!(ir.action_effects[0].source_text, "ctx.set_fib(x2, f0 + f1)");
+        assert_eq!(ir.action_effects[0].referenced_pat_vars, vec!["f0", "f1", "x2"]);
     }
 
     #[test]
