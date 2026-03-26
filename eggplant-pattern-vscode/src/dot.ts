@@ -270,7 +270,9 @@ export function compactConstraintLabel(sourceText: string, resolvedText: string)
 
 function semanticInsertLabel(sourceText: string): string {
   const trimmed = sourceText.trim();
-  const insertMatch = trimmed.match(/^(?:[A-Za-z_][A-Za-z0-9_]*\.)?insert_([A-Za-z0-9_]+)\((.*)\)$/);
+  const insertMatch = trimmed.match(
+    /^(?:[A-Za-z_][A-Za-z0-9_]*\.)?insert_([A-Za-z0-9_]+)\(([\s\S]*)\)\s*;?$/
+  );
   if (!insertMatch) {
     return trimmed;
   }
@@ -286,7 +288,9 @@ function renderSetCall(
   templateLookup: (ir: PatternIr, variantName: string) => DisplayTemplate | TypstTemplate | undefined
 ): string | null {
   const trimmed = sourceText.trim();
-  const setMatch = trimmed.match(/^(?:[A-Za-z_][A-Za-z0-9_]*\.)?set_([A-Za-z0-9_]+)\((.*)\)$/);
+  const setMatch = trimmed.match(
+    /^(?:[A-Za-z_][A-Za-z0-9_]*\.)?set_([A-Za-z0-9_]+)\(([\s\S]*)\)\s*;?$/
+  );
   if (!setMatch) {
     return null;
   }
@@ -463,7 +467,9 @@ function parseArgsList(rawArgs: string): string[] {
 
 function parseSemanticInsert(sourceText: string): { variantName: string; args: string[]; semantic: string } | null {
   const trimmed = sourceText.trim();
-  const insertMatch = trimmed.match(/^(?:[A-Za-z_][A-Za-z0-9_]*\.)?insert_([A-Za-z0-9_]+)\((.*)\)$/);
+  const insertMatch = trimmed.match(
+    /^(?:[A-Za-z_][A-Za-z0-9_]*\.)?insert_([A-Za-z0-9_]+)\(([\s\S]*)\)\s*;?$/
+  );
   if (!insertMatch) {
     return null;
   }
