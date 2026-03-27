@@ -20,6 +20,7 @@ const RELATION_FIXTURE = path.join(FIXTURE_DIR, "relation.rs");
 const UNICODE_OFFSET_FIXTURE = path.join(FIXTURE_DIR, "unicode_offset_scope.rs");
 const CROSS_FILE_METADATA_FIXTURE = path.join(FIXTURE_DIR, "cross_file_metadata_usage.rs");
 const ROOT_TYPST_FIXTURE = path.join(FIXTURE_DIR, "pattern_typst_root_failure.rs");
+const REDUNDANT_ACTION_INSERT_FIXTURE = path.join(FIXTURE_DIR, "redundant_action_insert.rs");
 const TEXT_FIXTURE = path.join(FIXTURE_DIR, "notes.txt");
 const TRACE_FIXTURE = path.join(FIXTURE_DIR, "tmp_action_sample_trace.json");
 const FIB_FUNC_FIXTURE = path.resolve(__dirname, "../../../../samples/fibonacci_func.rs");
@@ -651,6 +652,30 @@ suite("eggplant pattern extension", () => {
     assert.equal(preview.nodeConstraintsPopoverRows?.[0].id, "constraint_0");
     assert.match(preview.nodeConstraintsPopoverRows?.[0].compactText || "", /^l == /);
     assert.equal(preview.nodeConstraintsPopoverRows?.[0].sourceText, "l_r_plus1_eq");
+  });
+
+  test("check view surfaces redundant action inserts with highlight targets and suggestions", async () => {
+    const editor = await openEditor(REDUNDANT_ACTION_INSERT_FIXTURE);
+    placeCursor(editor, "MyTx::add_rule(");
+
+    await vscode.commands.executeCommand("eggplant-pattern.preview");
+    let preview = await waitForPreviewState((state) => state.mode === "combined" && state.ruleChecks.length > 0);
+    assert.equal(preview.ruleCheckViewVisible, false);
+    assert.equal(preview.activeRuleCheckId, null);
+
+    await dispatchPreviewPanelTestMessage({ type: "toggleRuleChecks" });
+    preview = await waitForPreviewState((state) => state.ruleCheckViewVisible === true);
+    assert.equal(preview.ruleChecks.length, 1);
+    assert.match(preview.ruleChecks[0].message, /duplicates an existing pattern sub-DAG/);
+    assert.match(preview.ruleChecks[0].suggestion, /Reuse matched pattern sub-DAG/);
+    assert.deepEqual(preview.highlightedPatternNodeIds, ["p"]);
+    assert.deepEqual(preview.highlightedActionEffectIds, ["effect:effect_0"]);
+
+    await dispatchPreviewPanelTestMessage({ type: "selectRuleCheck", checkId: preview.ruleChecks[0].id });
+    preview = await waitForPreviewState((state) => state.activeRuleCheckId === state.ruleChecks[0]?.id);
+    assert.equal(preview.activeRuleCheckId, preview.ruleChecks[0].id);
+    assert.deepEqual(preview.highlightedPatternNodeIds, ["p"]);
+    assert.deepEqual(preview.highlightedActionEffectIds, ["effect:effect_0"]);
   });
 
   test("node constraints popover omits constraints already inlined into node annotations", async () => {

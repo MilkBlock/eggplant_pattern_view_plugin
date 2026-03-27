@@ -16,6 +16,7 @@ import {
   PreviewSourceMode,
   RecoveryUiMode
 } from "./previewPanel";
+import { findRedundantActionInsertChecks } from "./ruleChecks";
 import { dotToSvg } from "./svg";
 import { renderTypstSnippets } from "./typst";
 
@@ -123,6 +124,8 @@ class PreviewController {
   private activeConstraintId: string | null = null;
   private constraintFilterMode: PreviewConstraintFilterMode = "all";
   private constraintFilterNodeId: string | null = null;
+  private ruleCheckViewVisible = false;
+  private activeRuleCheckId: string | null = null;
   private metadataWatchers: vscode.Disposable[] = [];
   private metadataRefreshTimer: NodeJS.Timeout | undefined;
   private typstOverridesByTargetId: Record<string, string> = {};
@@ -146,6 +149,8 @@ class PreviewController {
     onSaveTypstEdit: (targetId: string, source: string) => Promise<void>;
     onClearTypstEdit: (targetId: string) => Promise<void>;
     onTemporaryFullPreviewChange: (active: boolean) => Promise<void>;
+    onToggleRuleChecks: () => Promise<void>;
+    onSelectRuleCheck: (checkId: string) => Promise<void>;
     onRefresh: () => Promise<void>;
   };
 
@@ -245,6 +250,12 @@ class PreviewController {
       },
       onTemporaryFullPreviewChange: async (active: boolean) => {
         await this.setTemporaryFullPreview(active);
+      },
+      onToggleRuleChecks: async () => {
+        await this.toggleRuleChecks();
+      },
+      onSelectRuleCheck: async (checkId: string) => {
+        await this.selectRuleCheck(checkId);
       },
       onRefresh: async () => {
         const editor = this.lastPreview?.editor ?? vscode.window.activeTextEditor;
@@ -619,8 +630,12 @@ class PreviewController {
       ...this.metadataSourceFiles
     ]))
   ): Promise<void> {
-    const allConstraintEntries = buildConstraintEntries(baseIr);
+    const allConstraintEntries = buildConstraintEntries(baseIr, { includeInlineHidden: true });
     const constraintEntries = buildConstraintEntries(baseIr);
+    const ruleChecks = findRedundantActionInsertChecks(baseIr);
+    if (!ruleChecks.some((check) => check.id === this.activeRuleCheckId)) {
+      this.activeRuleCheckId = null;
+    }
     const constraintFilterNodeId = this.constraintFilterNodeId;
     if (
       this.constraintFilterMode === "node-specific"
@@ -673,6 +688,9 @@ class PreviewController {
       metadataSourcesView,
       allConstraintEntries,
       constraintEntries,
+      ruleChecks,
+      this.ruleCheckViewVisible,
+      this.activeRuleCheckId,
       this.constraintFilterMode,
       this.constraintFilterNodeId,
       this.activeConstraintId,
@@ -687,6 +705,40 @@ class PreviewController {
       return;
     }
     this.activeConstraintId = this.activeConstraintId === constraintId ? null : constraintId;
+    await this.renderLastPreview(
+      this.lastPreview.editor,
+      this.lastPreview.ir,
+      this.currentMode(),
+      this.labelStyle(),
+      this.currentRecursiveStrategy,
+      true
+    );
+  }
+
+  private async toggleRuleChecks(): Promise<void> {
+    this.ruleCheckViewVisible = !this.ruleCheckViewVisible;
+    if (!this.ruleCheckViewVisible) {
+      this.activeRuleCheckId = null;
+    }
+    if (!this.lastPreview) {
+      return;
+    }
+    await this.renderLastPreview(
+      this.lastPreview.editor,
+      this.lastPreview.ir,
+      this.currentMode(),
+      this.labelStyle(),
+      this.currentRecursiveStrategy,
+      true
+    );
+  }
+
+  private async selectRuleCheck(checkId: string): Promise<void> {
+    if (!this.lastPreview) {
+      return;
+    }
+    this.ruleCheckViewVisible = true;
+    this.activeRuleCheckId = this.activeRuleCheckId === checkId ? null : checkId;
     await this.renderLastPreview(
       this.lastPreview.editor,
       this.lastPreview.ir,
@@ -1035,6 +1087,9 @@ async function renderDot(
   metadataSourcesView: PreviewMetadataSourcesView,
   allConstraints: ReturnType<typeof buildConstraintEntries>,
   constraints: ReturnType<typeof buildConstraintEntries>,
+  ruleChecks: ReturnType<typeof findRedundantActionInsertChecks>,
+  ruleCheckViewVisible: boolean,
+  activeRuleCheckId: string | null,
   constraintFilterMode: PreviewConstraintFilterMode,
   constraintFilterNodeId: string | null,
   activeConstraintId: string | null,
@@ -1076,6 +1131,20 @@ async function renderDot(
   const strategySuffix = effectiveLabelStyle === "recursive" ? `, ${recursiveStrategy}` : "";
   const visibleConstraints = filterConstraintEntries(constraints, constraintFilterMode, constraintFilterNodeId);
   const activeConstraint = visibleConstraints.find((constraint) => constraint.id === activeConstraintId) ?? null;
+  const activeRuleCheck = ruleChecks.find((check) => check.id === activeRuleCheckId) ?? null;
+  const highlightedPatternNodeIds = new Set<string>();
+  const highlightedActionEffectIds = new Set<string>();
+  const checksToHighlight = ruleCheckViewVisible
+    ? (activeRuleCheck ? [activeRuleCheck] : ruleChecks)
+    : [];
+  for (const check of checksToHighlight) {
+    for (const nodeId of check.duplicatePatternNodeIds) {
+      highlightedPatternNodeIds.add(nodeId);
+    }
+    for (const effectId of check.duplicateActionEffectIds) {
+      highlightedActionEffectIds.add(effectId);
+    }
+  }
   await panel.render({
     title: `Eggplant Pattern (${modeLabel(mode)}, ${sourceMode}, ${effectiveLabelStyle}${strategySuffix}): ${editor.document.fileName.split("/").pop() ?? "Preview"}`,
     mode,
@@ -1094,6 +1163,11 @@ async function renderDot(
     sourceTargetIds: collectSourceTargetIds(ir, mode),
     allConstraints,
     constraints: visibleConstraints,
+    ruleChecks,
+    ruleCheckViewVisible,
+    activeRuleCheckId: activeRuleCheck?.id ?? null,
+    highlightedPatternNodeIds: Array.from(highlightedPatternNodeIds),
+    highlightedActionEffectIds: Array.from(highlightedActionEffectIds),
     constraintCountByNodeId: buildConstraintCountByNodeId(constraints),
     constraintFilterMode,
     constraintFilterNodeId,
@@ -1137,6 +1211,11 @@ async function renderNotice(panel: PreviewPanel, editor: vscode.TextEditor, mess
     sourceTargetIds: [],
     allConstraints: [],
     constraints: [],
+    ruleChecks: [],
+    ruleCheckViewVisible: false,
+    activeRuleCheckId: null,
+    highlightedPatternNodeIds: [],
+    highlightedActionEffectIds: [],
     constraintCountByNodeId: {},
     constraintFilterMode: "all",
     constraintFilterNodeId: null,
@@ -1197,6 +1276,11 @@ async function renderTraceUnavailableNotice(
     sourceTargetIds: [],
     allConstraints: [],
     constraints: buildConstraintEntries(irlessPatternIr()),
+    ruleChecks: [],
+    ruleCheckViewVisible: false,
+    activeRuleCheckId: null,
+    highlightedPatternNodeIds: [],
+    highlightedActionEffectIds: [],
     constraintCountByNodeId: {},
     constraintFilterMode: "all",
     constraintFilterNodeId: null,
