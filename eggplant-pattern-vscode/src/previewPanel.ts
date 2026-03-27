@@ -31,7 +31,23 @@ export interface PreviewConstraintEntry {
   id: string;
   compactText: string;
   fullText: string;
+  sourceText: string;
   referencedNodeIds: string[];
+}
+
+export function groupConstraintsByNodeId(
+  constraints: PreviewConstraintEntry[]
+): Record<string, PreviewConstraintEntry[]> {
+  const grouped: Record<string, PreviewConstraintEntry[]> = {};
+  for (const constraint of constraints) {
+    for (const nodeId of constraint.referencedNodeIds) {
+      if (!grouped[nodeId]) {
+        grouped[nodeId] = [];
+      }
+      grouped[nodeId].push(constraint);
+    }
+  }
+  return grouped;
 }
 
 export interface PreviewPanelState {
@@ -49,7 +65,10 @@ export interface PreviewPanelState {
   typstSources: Record<string, string>;
   typstStatusByTargetId: Record<string, string>;
   sourceTargetIds: string[];
+  allConstraints: PreviewConstraintEntry[];
   constraints: PreviewConstraintEntry[];
+  nodeConstraintsPopoverTargetId?: string | null;
+  nodeConstraintsPopoverRows?: PreviewConstraintEntry[];
   constraintCountByNodeId: Record<string, number>;
   constraintFilterMode: PreviewConstraintFilterMode;
   constraintFilterNodeId: string | null;
@@ -102,6 +121,7 @@ type IncomingMessage =
   | { type: "drilldownConstraintNode"; targetId: string }
   | { type: "clickConstraint"; constraintId: string }
   | { type: "openConstraint"; constraintId: string }
+  | { type: "showNodeConstraintsPopover"; targetId: string }
   | { type: "selectMetadataSources" }
   | { type: "clearMetadataSources" }
   | { type: "copyDot"; dot: string }
@@ -192,6 +212,19 @@ export class PreviewPanel implements vscode.Disposable {
     this.lastState = undefined;
   }
 
+  private updateTestNodeConstraintsPopover(targetId: string): void {
+    if (!this.lastState) {
+      return;
+    }
+    this.lastState = {
+      ...this.lastState,
+      nodeConstraintsPopoverTargetId: targetId,
+      nodeConstraintsPopoverRows: (this.lastState.allConstraints || []).filter((constraint) =>
+        constraint.referencedNodeIds.includes(targetId)
+      )
+    };
+  }
+
   async dispatchTestMessage(message: IncomingMessage): Promise<void> {
     await this.handleMessage(message);
   }
@@ -243,6 +276,9 @@ export class PreviewPanel implements vscode.Disposable {
         return;
       case "openConstraint":
         await this.callbacks.onConstraintOpen(message.constraintId);
+        return;
+      case "showNodeConstraintsPopover":
+        this.updateTestNodeConstraintsPopover(message.targetId);
         return;
       case "selectMetadataSources":
         await this.callbacks.onSelectMetadataSources();
@@ -619,6 +655,40 @@ export class PreviewPanel implements vscode.Disposable {
         font-size: 11px;
         color: var(--muted);
       }
+      .node-constraints-popover {
+        min-width: 420px;
+        max-width: min(720px, calc(100vw - 20px));
+        background: color-mix(in srgb, var(--bg) 48%, #8c8c8c 52%);
+        border-color: color-mix(in srgb, var(--border) 60%, #6f6f6f 40%);
+      }
+      .node-constraints-title {
+        margin: 0 0 8px;
+        font-size: 12px;
+        color: var(--fg);
+      }
+      .node-constraints-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12px;
+        background: color-mix(in srgb, var(--bg) 64%, #9a9a9a 36%);
+      }
+      .node-constraints-table th,
+      .node-constraints-table td {
+        padding: 8px 10px;
+        border: 1px solid color-mix(in srgb, var(--border) 62%, #696969 38%);
+        text-align: left;
+        vertical-align: top;
+      }
+      .node-constraints-table th {
+        background: color-mix(in srgb, var(--bg) 42%, #808080 58%);
+        color: var(--fg);
+        font-weight: 600;
+      }
+      .node-constraints-table td {
+        background: color-mix(in srgb, var(--bg) 70%, #a4a4a4 30%);
+        color: var(--fg);
+        word-break: break-word;
+      }
     </style>
   </head>
   <body>
@@ -747,9 +817,11 @@ export class PreviewPanel implements vscode.Disposable {
       let currentDot = "";
       const typstSourcesByTargetId = new Map();
       const typstStatusByTargetId = new Map();
+      const constraintsByNodeId = new Map();
       let currentContextTargetId = "";
       let currentContextTypstSource = "";
       let currentContextTypstStatus = "";
+      let currentContextConstraints = [];
       graph.dataset.draggable = "false";
       graph.dataset.dragging = "false";
       const graphContextMenu = document.createElement("div");
@@ -771,6 +843,10 @@ export class PreviewPanel implements vscode.Disposable {
       editTypstButton.type = "button";
       editTypstButton.textContent = "Edit Typst";
       graphContextMenu.appendChild(editTypstButton);
+      const showNodeConstraintsButton = document.createElement("button");
+      showNodeConstraintsButton.type = "button";
+      showNodeConstraintsButton.textContent = "Show Constraints";
+      graphContextMenu.appendChild(showNodeConstraintsButton);
       document.body.appendChild(graphContextMenu);
       const typstEditPopover = document.createElement("div");
       typstEditPopover.className = "graph-context-menu typst-edit-popover";
@@ -784,6 +860,16 @@ export class PreviewPanel implements vscode.Disposable {
       typstEditHint.textContent = "Enter: save  Shift+Enter: newline  Escape: cancel";
       typstEditPopover.appendChild(typstEditHint);
       document.body.appendChild(typstEditPopover);
+      const nodeConstraintsPopover = document.createElement("div");
+      nodeConstraintsPopover.className = "graph-context-menu node-constraints-popover";
+      nodeConstraintsPopover.hidden = true;
+      const nodeConstraintsTitle = document.createElement("div");
+      nodeConstraintsTitle.className = "node-constraints-title";
+      nodeConstraintsPopover.appendChild(nodeConstraintsTitle);
+      const nodeConstraintsTable = document.createElement("table");
+      nodeConstraintsTable.className = "node-constraints-table";
+      nodeConstraintsPopover.appendChild(nodeConstraintsTable);
+      document.body.appendChild(nodeConstraintsPopover);
 
       const syncRecursiveStrategyState = () => {
         recursiveStrategy.disabled = labelStyle.value !== "recursive";
@@ -845,6 +931,19 @@ export class PreviewPanel implements vscode.Disposable {
           li.appendChild(row);
           element.appendChild(li);
         }
+      };
+
+      const groupNodeConstraints = (constraints) => {
+        const grouped = new Map();
+        for (const constraint of constraints || []) {
+          for (const nodeId of constraint.referencedNodeIds || []) {
+            if (!grouped.has(nodeId)) {
+              grouped.set(nodeId, []);
+            }
+            grouped.get(nodeId).push(constraint);
+          }
+        }
+        return grouped;
       };
 
       const parseSvgDimension = (svgMarkup, attr) => {
@@ -1291,10 +1390,15 @@ export class PreviewPanel implements vscode.Disposable {
         typstEditPopover.hidden = true;
       };
 
-      const showGraphContextMenu = (clientX, clientY, targetId = "", typstSource = "", typstStatus = "") => {
+      const hideNodeConstraintsPopover = () => {
+        nodeConstraintsPopover.hidden = true;
+      };
+
+      const showGraphContextMenu = (clientX, clientY, targetId = "", typstSource = "", typstStatus = "", nodeConstraints = []) => {
         currentContextTargetId = targetId;
         currentContextTypstSource = typstSource;
         currentContextTypstStatus = typstStatus;
+        currentContextConstraints = nodeConstraints;
         typstStatusButton.hidden = !typstStatus;
         typstStatusButton.textContent = typstStatus || "Typst";
         copyDotButton.disabled = !currentDot;
@@ -1302,6 +1406,11 @@ export class PreviewPanel implements vscode.Disposable {
         copyTypstButton.disabled = !typstSource;
         editTypstButton.hidden = !typstSource;
         editTypstButton.disabled = !typstSource;
+        showNodeConstraintsButton.hidden = !targetId;
+        showNodeConstraintsButton.disabled = !targetId || nodeConstraints.length === 0;
+        showNodeConstraintsButton.textContent = targetId
+          ? "Show Constraints" + (nodeConstraints.length > 0 ? " (" + String(nodeConstraints.length) + ")" : "")
+          : "Show Constraints";
         graphContextMenu.hidden = false;
         const maxLeft = Math.max(0, window.innerWidth - graphContextMenu.offsetWidth - 8);
         const maxTop = Math.max(0, window.innerHeight - graphContextMenu.offsetHeight - 8);
@@ -1322,6 +1431,46 @@ export class PreviewPanel implements vscode.Disposable {
         typstEditPopover.style.top = Math.min(clientY, maxTop) + "px";
         typstEditInput.focus();
         typstEditInput.select();
+      };
+
+      const showNodeConstraintsPopover = (clientX, clientY) => {
+        if (!currentContextTargetId || currentContextConstraints.length === 0) {
+          return;
+        }
+        hideGraphContextMenu();
+        nodeConstraintsTitle.textContent = currentContextTargetId + " constraints";
+        nodeConstraintsTable.innerHTML = "";
+        const thead = document.createElement("thead");
+        const headerRow = document.createElement("tr");
+        for (const heading of ["Constraint ID", "Expression", "Source"]) {
+          const cell = document.createElement("th");
+          cell.textContent = heading;
+          headerRow.appendChild(cell);
+        }
+        thead.appendChild(headerRow);
+        nodeConstraintsTable.appendChild(thead);
+        const tbody = document.createElement("tbody");
+        for (const constraint of currentContextConstraints) {
+          const row = document.createElement("tr");
+          const idCell = document.createElement("td");
+          idCell.textContent = constraint.id;
+          const expressionCell = document.createElement("td");
+          expressionCell.textContent = constraint.compactText;
+          expressionCell.title = constraint.fullText;
+          const sourceCell = document.createElement("td");
+          sourceCell.textContent = constraint.sourceText;
+          sourceCell.title = constraint.fullText;
+          row.appendChild(idCell);
+          row.appendChild(expressionCell);
+          row.appendChild(sourceCell);
+          tbody.appendChild(row);
+        }
+        nodeConstraintsTable.appendChild(tbody);
+        nodeConstraintsPopover.hidden = false;
+        const maxLeft = Math.max(0, window.innerWidth - 620);
+        const maxTop = Math.max(0, window.innerHeight - 320);
+        nodeConstraintsPopover.style.left = Math.min(clientX, maxLeft) + "px";
+        nodeConstraintsPopover.style.top = Math.min(clientY, maxTop) + "px";
       };
 
       const isGraphBackgroundEvent = (event) => {
@@ -1386,28 +1535,32 @@ export class PreviewPanel implements vscode.Disposable {
         const targetId = nodeGroup?.querySelector("title")?.textContent || "";
         const typstSource = targetId ? (typstSourcesByTargetId.get(targetId) || "") : "";
         const typstStatus = targetId ? (typstStatusByTargetId.get(targetId) || "Typst: no source") : "";
+        const nodeConstraints = targetId ? (constraintsByNodeId.get(targetId) || []) : [];
         if (!isGraphBackgroundEvent(event) && !typstStatus) {
           hideGraphContextMenu();
           return;
         }
         event.preventDefault();
         event.stopPropagation();
-        showGraphContextMenu(event.clientX, event.clientY, targetId, typstSource, typstStatus);
+        showGraphContextMenu(event.clientX, event.clientY, targetId, typstSource, typstStatus, nodeConstraints);
       });
 
       graph.addEventListener("pointerdown", () => {
         hideGraphContextMenu();
         hideTypstEditPopover();
+        hideNodeConstraintsPopover();
       }, true);
 
       window.addEventListener("scroll", () => {
         hideGraphContextMenu();
         hideTypstEditPopover();
+        hideNodeConstraintsPopover();
       }, true);
 
       window.addEventListener("resize", () => {
         hideGraphContextMenu();
         hideTypstEditPopover();
+        hideNodeConstraintsPopover();
       });
 
       window.addEventListener("keydown", (event) => {
@@ -1417,6 +1570,7 @@ export class PreviewPanel implements vscode.Disposable {
         if (event.key === "Escape") {
           hideGraphContextMenu();
           hideTypstEditPopover();
+          hideNodeConstraintsPopover();
         }
       });
 
@@ -1439,6 +1593,7 @@ export class PreviewPanel implements vscode.Disposable {
       document.addEventListener("click", () => {
         hideGraphContextMenu();
         hideTypstEditPopover();
+        hideNodeConstraintsPopover();
       });
 
       copyDotButton.addEventListener("click", () => {
@@ -1462,7 +1617,16 @@ export class PreviewPanel implements vscode.Disposable {
         showTypstEditPopover(parseInt(graphContextMenu.style.left || "0", 10), parseInt(graphContextMenu.style.top || "0", 10));
       });
 
+      showNodeConstraintsButton.addEventListener("click", (event) => {
+        event.stopPropagation();
+        showNodeConstraintsPopover(parseInt(graphContextMenu.style.left || "0", 10), parseInt(graphContextMenu.style.top || "0", 10));
+      });
+
       typstEditPopover.addEventListener("click", (event) => {
+        event.stopPropagation();
+      });
+
+      nodeConstraintsPopover.addEventListener("click", (event) => {
         event.stopPropagation();
       });
 
@@ -1502,6 +1666,7 @@ export class PreviewPanel implements vscode.Disposable {
         currentDot = typeof payload.dot === "string" ? payload.dot : "";
         typstSourcesByTargetId.clear();
         typstStatusByTargetId.clear();
+        constraintsByNodeId.clear();
         for (const [targetId, source] of Object.entries(payload.typstSources || {})) {
           if (typeof source === "string" && source.length > 0) {
             typstSourcesByTargetId.set(targetId, source);
@@ -1511,6 +1676,9 @@ export class PreviewPanel implements vscode.Disposable {
           if (typeof status === "string" && status.length > 0) {
             typstStatusByTargetId.set(targetId, status);
           }
+        }
+        for (const [nodeId, constraints] of groupNodeConstraints(payload.allConstraints || []).entries()) {
+          constraintsByNodeId.set(nodeId, constraints);
         }
         mode.value = payload.mode;
         labelStyle.value = payload.labelStyle;
@@ -1591,6 +1759,7 @@ export class PreviewPanel implements vscode.Disposable {
           applyConstraintHighlights(rootSvg, payload.activeConstraintNodeIds || []);
         }
         hideGraphContextMenu();
+        hideNodeConstraintsPopover();
       });
 
       syncRecursiveStrategyState();
@@ -1641,6 +1810,7 @@ export async function dispatchPreviewPanelTestMessage(
     | { type: "drilldownConstraintNode"; targetId: string }
     | { type: "clickConstraint"; constraintId: string }
     | { type: "openConstraint"; constraintId: string }
+    | { type: "showNodeConstraintsPopover"; targetId: string }
     | { type: "selectMetadataSources" }
     | { type: "clearMetadataSources" }
     | { type: "copyDot"; dot: string }

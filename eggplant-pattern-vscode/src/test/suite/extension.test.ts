@@ -621,6 +621,9 @@ suite("eggplant pattern extension", () => {
     assert.equal(preview.activeConstraintId, null);
     assert.match(preview.constraints[0].compactText, /^l == /);
     assert.deepEqual(preview.constraintCountByNodeId, { l: 1, r: 1 });
+    assert.equal(preview.allConstraints.length, 1);
+    assert.equal(preview.allConstraints[0].sourceText, "l_r_plus1_eq");
+    assert.deepEqual(preview.allConstraints[0].referencedNodeIds, ["l", "r"]);
 
     await dispatchPreviewPanelTestMessage({ type: "clickConstraint", constraintId: "constraint_0" });
     preview = await waitForPreviewState((state) => state.activeConstraintId === "constraint_0");
@@ -632,6 +635,22 @@ suite("eggplant pattern extension", () => {
 
     await dispatchPreviewPanelTestMessage({ type: "openConstraint", constraintId: "constraint_0" });
     assert.equal(selectedText(editor), "l_r_plus1_eq");
+  });
+
+  test("show node constraints popover exposes table rows for the clicked node", async () => {
+    const editor = await openEditor(RUST_FIXTURE);
+    placeCursor(editor, "demo_constraints_panel");
+
+    await vscode.commands.executeCommand("eggplant-pattern.preview");
+    let preview = await waitForPreviewState((state) => state.mode === "combined" && state.allConstraints.length > 0);
+
+    await dispatchPreviewPanelTestMessage({ type: "showNodeConstraintsPopover", targetId: "l" });
+    preview = await waitForPreviewState((state) => state.nodeConstraintsPopoverTargetId === "l");
+
+    assert.equal(preview.nodeConstraintsPopoverRows?.length, 1);
+    assert.equal(preview.nodeConstraintsPopoverRows?.[0].id, "constraint_0");
+    assert.match(preview.nodeConstraintsPopoverRows?.[0].compactText || "", /^l == /);
+    assert.equal(preview.nodeConstraintsPopoverRows?.[0].sourceText, "l_r_plus1_eq");
   });
 
   test("node drilldown switches the constraints panel into node-specific mode", async () => {

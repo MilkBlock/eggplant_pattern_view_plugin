@@ -619,6 +619,7 @@ class PreviewController {
       ...this.metadataSourceFiles
     ]))
   ): Promise<void> {
+    const allConstraintEntries = buildConstraintEntries(baseIr, { includeInlineHidden: true });
     const constraintEntries = buildConstraintEntries(baseIr);
     const constraintFilterNodeId = this.constraintFilterNodeId;
     if (
@@ -670,6 +671,7 @@ class PreviewController {
       recursiveStrategy,
       metadataSourceFiles,
       metadataSourcesView,
+      allConstraintEntries,
       constraintEntries,
       this.constraintFilterMode,
       this.constraintFilterNodeId,
@@ -1031,6 +1033,7 @@ async function renderDot(
   recursiveStrategy: RecursiveStrategy,
   metadataSourceFiles: string[],
   metadataSourcesView: PreviewMetadataSourcesView,
+  allConstraints: ReturnType<typeof buildConstraintEntries>,
   constraints: ReturnType<typeof buildConstraintEntries>,
   constraintFilterMode: PreviewConstraintFilterMode,
   constraintFilterNodeId: string | null,
@@ -1089,6 +1092,7 @@ async function renderDot(
     typstSources,
     typstStatusByTargetId,
     sourceTargetIds: collectSourceTargetIds(ir, mode),
+    allConstraints,
     constraints: visibleConstraints,
     constraintCountByNodeId: buildConstraintCountByNodeId(constraints),
     constraintFilterMode,
@@ -1131,6 +1135,7 @@ async function renderNotice(panel: PreviewPanel, editor: vscode.TextEditor, mess
     typstSources: {},
     typstStatusByTargetId: {},
     sourceTargetIds: [],
+    allConstraints: [],
     constraints: [],
     constraintCountByNodeId: {},
     constraintFilterMode: "all",
@@ -1190,6 +1195,7 @@ async function renderTraceUnavailableNotice(
     typstSources: {},
     typstStatusByTargetId: {},
     sourceTargetIds: [],
+    allConstraints: [],
     constraints: buildConstraintEntries(irlessPatternIr()),
     constraintCountByNodeId: {},
     constraintFilterMode: "all",
@@ -1264,15 +1270,19 @@ function collectSourceTargetIds(ir: PatternIr, mode: DotViewMode): string[] {
   return targetIds;
 }
 
-function buildConstraintEntries(ir: PatternIr): Array<{ id: string; compactText: string; fullText: string; referencedNodeIds: string[] }> {
+function buildConstraintEntries(
+  ir: PatternIr,
+  options: { includeInlineHidden?: boolean } = {}
+): Array<{ id: string; compactText: string; fullText: string; sourceText: string; referencedNodeIds: string[] }> {
   const nodeIds = new Set(ir.nodes.map((node) => node.id));
   const rootIds = new Set(ir.roots);
   return ir.constraints
-    .filter((constraint) => inlineConstraintAnnotation(constraint)?.hideInSidebar !== true)
+    .filter((constraint) => options.includeInlineHidden || inlineConstraintAnnotation(constraint)?.hideInSidebar !== true)
     .map((constraint) => ({
       id: constraint.id,
       compactText: compactConstraintLabel(constraint.source_text, constraint.resolved_text),
       fullText: constraint.resolved_text,
+      sourceText: constraint.source_text,
       referencedNodeIds: (() => {
         const referenced = constraint.referenced_vars.filter((name) => nodeIds.has(name) || rootIds.has(name));
         return referenced.length > 0 ? referenced : [...ir.roots];
@@ -1281,10 +1291,10 @@ function buildConstraintEntries(ir: PatternIr): Array<{ id: string; compactText:
 }
 
 function filterConstraintEntries(
-  constraints: Array<{ id: string; compactText: string; fullText: string; referencedNodeIds: string[] }>,
+  constraints: Array<{ id: string; compactText: string; fullText: string; sourceText: string; referencedNodeIds: string[] }>,
   mode: PreviewConstraintFilterMode,
   nodeId: string | null
-): Array<{ id: string; compactText: string; fullText: string; referencedNodeIds: string[] }> {
+): Array<{ id: string; compactText: string; fullText: string; sourceText: string; referencedNodeIds: string[] }> {
   if (mode !== "node-specific") {
     return constraints;
   }
@@ -1295,7 +1305,7 @@ function filterConstraintEntries(
 }
 
 function buildConstraintCountByNodeId(
-  constraints: Array<{ id: string; compactText: string; fullText: string; referencedNodeIds: string[] }>
+  constraints: Array<{ id: string; compactText: string; fullText: string; sourceText: string; referencedNodeIds: string[] }>
 ): Record<string, number> {
   const counts: Record<string, number> = {};
   for (const constraint of constraints) {
