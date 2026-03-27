@@ -21,6 +21,7 @@ const FIXTURE_PATH = path.resolve(WORKSPACE_ROOT, "samples", "pattern_samples.rs
 const RELATION_FIXTURE_PATH = path.resolve(WORKSPACE_ROOT, "samples", "relation.rs");
 const FIBONACCI_FUNC_FIXTURE_PATH = path.resolve(WORKSPACE_ROOT, "samples", "fibonacci_func.rs");
 const MATH_METADATA_FIXTURE = "/Users/mineralsteins/Repos/egg_related/eggplant_backup/benches/runners/eggplant_rewrite/math_microbenchmark.rs";
+const PROJECT_RULE_CHECK_SCRIPT = path.resolve(WORKSPACE_ROOT, "eggplant-pattern-vscode", "scripts", "check-rust-project-rules.js");
 const EXTRACTOR_PATH = path.resolve(
   WORKSPACE_ROOT,
   "eggplant-pattern-extractor",
@@ -30,6 +31,51 @@ const EXTRACTOR_PATH = path.resolve(
 );
 
 suite("eggplant pattern headless tests", () => {
+  test("project rule detector warns when action insert duplicates a pattern sub-DAG", () => {
+    const { findRedundantActionInsertWarnings } = require(PROJECT_RULE_CHECK_SCRIPT) as {
+      findRedundantActionInsertWarnings: (ir: PatternIr) => Array<{ severity: string; message: string }>;
+    };
+
+    const ir: PatternIr = {
+      scope: {
+        kind: "add_rule_call",
+        text_range: { start: 0, end: 40 },
+        pattern_range: { start: 0, end: 20 },
+        action_range: { start: 21, end: 40 }
+      },
+      nodes: [
+        { id: "l", kind: "query_leaf", dsl_type: "Const", label: "l: Const", range: { start: 0, end: 1 }, inputs: [] },
+        { id: "r", kind: "query_leaf", dsl_type: "Const", label: "r: Const", range: { start: 2, end: 3 }, inputs: [] },
+        { id: "p", kind: "query", dsl_type: "Add", label: "p: Add", range: { start: 4, end: 8 }, inputs: ["l", "r"] }
+      ],
+      edges: [],
+      roots: ["l", "r", "p"],
+      constraints: [],
+      action_effects: [
+        {
+          id: "effect_0",
+          effect_id: "effect@21:35",
+          bound_var: "duplicate",
+          source_text: "ctx.insert_add(pat.l, pat.r)",
+          referenced_pat_vars: ["l", "r"],
+          referenced_action_vars: [],
+          range: { start: 21, end: 35 }
+        }
+      ],
+      seed_facts: [],
+      display_templates: [],
+      typst_templates: [],
+      precedence_templates: [],
+      diagnostics: []
+    };
+
+    const diagnostics = findRedundantActionInsertWarnings(ir);
+    assert.equal(diagnostics.length, 1);
+    assert.equal(diagnostics[0].severity, "warning");
+    assert.match(diagnostics[0].message, /duplicates pattern sub-DAG/);
+    assert.match(diagnostics[0].message, /matches pattern node\(s\) p/);
+  });
+
   test("typst math normalization strips both single and double dollar wrappers", () => {
     assert.equal(normalizeTypstMathSource("x + y"), "x + y");
     assert.equal(normalizeTypstMathSource("$x + y$"), "x + y");
