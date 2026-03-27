@@ -653,6 +653,19 @@ suite("eggplant pattern extension", () => {
     assert.equal(preview.nodeConstraintsPopoverRows?.[0].sourceText, "l_r_plus1_eq");
   });
 
+  test("node constraints popover omits constraints already inlined into node annotations", async () => {
+    const editor = await openEditor(FIB_FUNC_FIXTURE);
+    placeCursor(editor, "MyTx::add_rule(");
+
+    await vscode.commands.executeCommand("eggplant-pattern.preview");
+    let preview = await waitForPreviewState((state) => state.mode === "combined" && state.dot.includes("x1\\n= x + 1_i64"));
+    assert.deepEqual(preview.allConstraints, []);
+
+    await dispatchPreviewPanelTestMessage({ type: "showNodeConstraintsPopover", targetId: "x1" });
+    preview = await waitForPreviewState((state) => state.nodeConstraintsPopoverTargetId === "x1");
+    assert.deepEqual(preview.nodeConstraintsPopoverRows, []);
+  });
+
   test("node drilldown switches the constraints panel into node-specific mode", async () => {
     const editor = await openEditor(RUST_FIXTURE);
     placeCursor(editor, "demo_constraints_panel");

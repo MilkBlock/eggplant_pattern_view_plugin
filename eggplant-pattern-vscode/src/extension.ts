@@ -619,7 +619,7 @@ class PreviewController {
       ...this.metadataSourceFiles
     ]))
   ): Promise<void> {
-    const allConstraintEntries = buildConstraintEntries(baseIr, { includeInlineHidden: true });
+    const allConstraintEntries = buildConstraintEntries(baseIr);
     const constraintEntries = buildConstraintEntries(baseIr);
     const constraintFilterNodeId = this.constraintFilterNodeId;
     if (
