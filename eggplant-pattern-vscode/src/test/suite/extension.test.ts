@@ -17,10 +17,12 @@ const EXTENSION_ID = "MilkBlock.eggplant-pattern-vscode";
 const FIXTURE_DIR = path.resolve(__dirname, "../../../test-fixtures/workspace");
 const RUST_FIXTURE = path.join(FIXTURE_DIR, "pattern_samples.rs");
 const RELATION_FIXTURE = path.join(FIXTURE_DIR, "relation.rs");
+const UNICODE_OFFSET_FIXTURE = path.join(FIXTURE_DIR, "unicode_offset_scope.rs");
 const CROSS_FILE_METADATA_FIXTURE = path.join(FIXTURE_DIR, "cross_file_metadata_usage.rs");
 const ROOT_TYPST_FIXTURE = path.join(FIXTURE_DIR, "pattern_typst_root_failure.rs");
 const TEXT_FIXTURE = path.join(FIXTURE_DIR, "notes.txt");
 const TRACE_FIXTURE = path.join(FIXTURE_DIR, "tmp_action_sample_trace.json");
+const FIB_FUNC_FIXTURE = path.resolve(__dirname, "../../../../samples/fibonacci_func.rs");
 const MATH_MICROBENCHMARK_FIXTURE = "/Users/mineralsteins/Repos/egg_related/eggplant_backup/benches/runners/eggplant_rewrite/math_microbenchmark.rs";
 const EXTRACTOR_PATH = path.resolve(__dirname, "../../../../", "eggplant-pattern-extractor", "target", "debug", process.platform === "win32" ? "eggplant-pattern-extractor.exe" : "eggplant-pattern-extractor");
 const BUNDLED_EXTRACTOR_PATH = path.resolve(__dirname, "../../../bin", `${process.platform}-${process.arch}`, process.platform === "win32" ? "eggplant-pattern-extractor.exe" : "eggplant-pattern-extractor");
@@ -101,6 +103,47 @@ suite("eggplant pattern extension", () => {
     await dispatchPreviewPanelTestMessage({ type: "copyDot", dot: preview.dot });
     const copied = await vscode.env.clipboard.readText();
     assert.equal(copied, preview.dot);
+  });
+
+  test("copy typst message copies node typst source to clipboard", async () => {
+    const editor = await openEditor(RUST_FIXTURE);
+    placeCursor(editor, "ctx.insert_m_integral(pat.f, pat.x)");
+
+    await vscode.commands.executeCommand("eggplant-pattern.preview");
+    const preview = await waitForPreviewState((state) => state.mode === "action");
+    assert.ok(preview.typstSources["effect:effect_0"]);
+    await vscode.env.clipboard.writeText("");
+    await dispatchPreviewPanelTestMessage({ type: "copyTypst", source: preview.typstSources["effect:effect_0"] });
+    const copied = await vscode.env.clipboard.readText();
+    assert.equal(copied, preview.typstSources["effect:effect_0"]);
+  });
+
+  test("saving typst edit rerenders the current node with overridden typst source", async () => {
+    const editor = await openEditor(RUST_FIXTURE);
+    placeCursor(editor, "ctx.insert_m_integral(pat.f, pat.x)");
+
+    await vscode.commands.executeCommand("eggplant-pattern.preview");
+    let preview = await waitForPreviewState((state) => state.mode === "action");
+    const baselineRenderNonce = preview.renderNonce ?? 0;
+
+    await dispatchPreviewPanelTestMessage({
+      type: "saveTypstEdit",
+      targetId: "effect:effect_0",
+      source: "integral upright(\"override\") quad d x"
+    });
+    preview = await waitForPreviewState(
+      (state) => state.typstSources["effect:effect_0"] === "integral upright(\"override\") quad d x",
+      { minRenderNonce: baselineRenderNonce + 1 }
+    );
+    assert.equal(preview.typstSources["effect:effect_0"], "integral upright(\"override\") quad d x");
+
+    const overrideRenderNonce = preview.renderNonce ?? 0;
+    await dispatchPreviewPanelTestMessage({ type: "clearTypstEdit", targetId: "effect:effect_0" });
+    preview = await waitForPreviewState(
+      (state) => state.typstSources["effect:effect_0"] !== "integral upright(\"override\") quad d x",
+      { minRenderNonce: overrideRenderNonce + 1 }
+    );
+    assert.notEqual(preview.typstSources["effect:effect_0"], "integral upright(\"override\") quad d x");
   });
 
   test("preview dot includes git branch and commit metadata", async () => {
@@ -186,6 +229,30 @@ suite("eggplant pattern extension", () => {
     assert.match(preview.dot, /"seed:seed_0"/);
     assert.match(preview.dot, /Edge::<RelTx>::insert\(1, 2\)/);
     assert.match(preview.dot, /cluster_actions/);
+  });
+
+  test("manual preview resolves add_rule scope in unicode-commented files", async () => {
+    const editor = await openEditor(UNICODE_OFFSET_FIXTURE);
+    placeCursor(editor, "MyTx::add_rule(");
+
+    await vscode.commands.executeCommand("eggplant-pattern.preview");
+
+    const preview = await waitForPreviewState((state) => state.mode === "combined");
+    assert.match(preview.dot, /"Unit"/);
+    assert.match(preview.dot, /fib\(0\) = 0/);
+    assert.match(preview.dot, /fib\(1\) = 1/);
+  });
+
+  test("manual preview from fib sample add_rule token retries into rule scope instead of empty function scope", async () => {
+    const editor = await openEditor(FIB_FUNC_FIXTURE);
+    placeCursor(editor, "MyTx::add_rule(");
+
+    await vscode.commands.executeCommand("eggplant-pattern.preview");
+
+    const preview = await waitForPreviewState((state) => state.mode === "combined" && state.dot.includes("fib(0) = 0"));
+    assert.match(preview.dot, /fib\(0\) = 0/);
+    assert.match(preview.dot, /fib\(1\) = 1/);
+    assert.match(preview.dot, /"Unit"/);
   });
 
   test("manual preview on non-pattern rust scope is silent fail-open", async () => {
@@ -326,6 +393,33 @@ suite("eggplant pattern extension", () => {
     assert.equal(preview.recursiveStrategy, "dag-expand");
   });
 
+  test("holding temporary full preview preserves selected recursive detail", async () => {
+    const editor = await openEditor(RUST_FIXTURE);
+    placeCursor(editor, "ctx.insert_m_integral(pat.f, pat.x)");
+
+    await vscode.commands.executeCommand("eggplant-pattern.preview");
+    await dispatchPreviewPanelTestMessage({ type: "changeLabelStyle", labelStyle: "recursive" });
+
+    let preview = await waitForPreviewState((state) => state.labelStyle === "recursive");
+    assert.equal(preview.effectiveLabelStyle, "recursive");
+
+    const baselineRenderNonce = preview.renderNonce ?? 0;
+    await dispatchPreviewPanelTestMessage({ type: "setTemporaryFullPreview", active: true });
+    preview = await waitForPreviewState(
+      (state) => state.labelStyle === "recursive" && state.effectiveLabelStyle === "full",
+      { minRenderNonce: baselineRenderNonce + 1 }
+    );
+    assert.match(preview.title, /full/);
+
+    const fullRenderNonce = preview.renderNonce ?? 0;
+    await dispatchPreviewPanelTestMessage({ type: "setTemporaryFullPreview", active: false });
+    preview = await waitForPreviewState(
+      (state) => state.labelStyle === "recursive" && state.effectiveLabelStyle === "recursive",
+      { minRenderNonce: fullRenderNonce + 1 }
+    );
+    assert.match(preview.title, /recursive, dag-expand/);
+  });
+
   test("source dropdown switches between AST and Trace while reusing detail controls", async () => {
     const editor = await openEditor(RUST_FIXTURE);
     placeCursor(editor, "ctx.union(pat.p, op_value)");
@@ -373,6 +467,17 @@ suite("eggplant pattern extension", () => {
     const preview = await waitForPreviewState((state) => state.mode === "action");
     assert.match(preview.dot, /f \/ x/);
     assert.ok(preview.typstRenderings["effect:effect_0"]);
+    assert.equal(preview.typstStatusByTargetId["effect:effect_0"], "Typst: rendered");
+  });
+
+  test("preview exposes typst no-source status for plain nodes", async () => {
+    const editor = await openEditor(RUST_FIXTURE);
+    placeCursor(editor, "let p = Add::query");
+
+    await vscode.commands.executeCommand("eggplant-pattern.preview");
+
+    const preview = await waitForPreviewState((state) => state.mode === "pattern");
+    assert.equal(preview.typstStatusByTargetId["p"], "Typst: no source");
   });
 
   test("compact preview replaces math_microbenchmark root nodes with typst svg", async () => {

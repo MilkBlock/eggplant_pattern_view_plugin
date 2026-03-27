@@ -116,6 +116,7 @@ class PreviewController {
   private currentModeOverride: DotViewMode | undefined;
   private currentSourceMode: PreviewSourceMode = "ast";
   private currentLabelStyle: DotLabelStyle;
+  private temporaryFullLabelPreview = false;
   private currentRecursiveStrategy: RecursiveStrategy;
   private metadataSourceFiles: string[];
   private autoMetadataSourceFiles: string[] = [];
@@ -124,6 +125,7 @@ class PreviewController {
   private constraintFilterNodeId: string | null = null;
   private metadataWatchers: vscode.Disposable[] = [];
   private metadataRefreshTimer: NodeJS.Timeout | undefined;
+  private typstOverridesByTargetId: Record<string, string> = {};
   private readonly callbacks: {
     onModeChange: (mode: DotViewMode) => Promise<void>;
     onSourceModeChange: (sourceMode: PreviewSourceMode) => Promise<void>;
@@ -140,6 +142,10 @@ class PreviewController {
     onSelectMetadataSources: () => Promise<void>;
     onClearMetadataSources: () => Promise<void>;
     onCopyDot: (dot: string) => Promise<void>;
+    onCopyTypst: (source: string) => Promise<void>;
+    onSaveTypstEdit: (targetId: string, source: string) => Promise<void>;
+    onClearTypstEdit: (targetId: string) => Promise<void>;
+    onTemporaryFullPreviewChange: (active: boolean) => Promise<void>;
     onRefresh: () => Promise<void>;
   };
 
@@ -197,6 +203,49 @@ class PreviewController {
         await vscode.env.clipboard.writeText(dot);
         void vscode.window.setStatusBarMessage("Eggplant Pattern: copied DOT", 1500);
       },
+      onCopyTypst: async (source: string) => {
+        if (!source) {
+          return;
+        }
+        await vscode.env.clipboard.writeText(source);
+        void vscode.window.setStatusBarMessage("Eggplant Pattern: copied Typst", 1500);
+      },
+      onSaveTypstEdit: async (targetId: string, source: string) => {
+        if (!targetId || !this.lastPreview) {
+          return;
+        }
+        const trimmed = source.trim();
+        if (trimmed.length === 0) {
+          delete this.typstOverridesByTargetId[targetId];
+        } else {
+          this.typstOverridesByTargetId[targetId] = trimmed;
+        }
+        await this.renderLastPreview(
+          this.lastPreview.editor,
+          this.lastPreview.ir,
+          this.currentMode(),
+          this.labelStyle(),
+          this.currentRecursiveStrategy,
+          true
+        );
+      },
+      onClearTypstEdit: async (targetId: string) => {
+        if (!targetId || !this.lastPreview) {
+          return;
+        }
+        delete this.typstOverridesByTargetId[targetId];
+        await this.renderLastPreview(
+          this.lastPreview.editor,
+          this.lastPreview.ir,
+          this.currentMode(),
+          this.labelStyle(),
+          this.currentRecursiveStrategy,
+          true
+        );
+      },
+      onTemporaryFullPreviewChange: async (active: boolean) => {
+        await this.setTemporaryFullPreview(active);
+      },
       onRefresh: async () => {
         const editor = this.lastPreview?.editor ?? vscode.window.activeTextEditor;
         if (editor) {
@@ -240,6 +289,7 @@ class PreviewController {
     if (!preserveModeOverride) {
       this.currentModeOverride = undefined;
     }
+    this.typstOverridesByTargetId = {};
     this.pending = {
       editor,
       manual,
@@ -292,6 +342,7 @@ class PreviewController {
 
   async showCurrentLabelStyle(labelStyle: DotLabelStyle): Promise<void> {
     this.currentLabelStyle = labelStyle;
+    this.temporaryFullLabelPreview = false;
     this.activeConstraintId = null;
     this.constraintFilterMode = "all";
     this.constraintFilterNodeId = null;
@@ -316,7 +367,7 @@ class PreviewController {
         this.lastPreview.editor,
         this.lastPreview.ir,
         this.currentMode(),
-        this.currentLabelStyle,
+        this.labelStyle(),
         this.currentRecursiveStrategy,
         true
       );
@@ -335,7 +386,7 @@ class PreviewController {
     );
 
     if (this.lastPreview) {
-      await this.renderLastPreview(this.lastPreview.editor, this.lastPreview.ir, this.currentMode(), this.currentLabelStyle, strategy, true);
+      await this.renderLastPreview(this.lastPreview.editor, this.lastPreview.ir, this.currentMode(), this.labelStyle(), strategy, true);
     }
   }
 
@@ -448,7 +499,23 @@ class PreviewController {
   private async runRequest(request: PreviewRequest): Promise<void> {
     try {
       const offset = request.editor.document.offsetAt(request.editor.selection.active);
-      const extractedIr = await runExtractor(request.editor.document, offset);
+      const source = request.editor.document.getText();
+      let extractedIr: PatternIr;
+      try {
+        extractedIr = await runExtractor(request.editor.document, offset);
+      } catch (error) {
+        const retried = await tryRuleCallOffsetFallback(request.editor.document, source, offset, error);
+        if (!retried) {
+          throw error;
+        }
+        extractedIr = retried;
+      }
+      if (shouldRetryEmptyPatternFunctionOnRuleLine(extractedIr, source, offset)) {
+        const retried = await tryRuleCallOffsetFallback(request.editor.document, source, offset);
+        if (retried) {
+          extractedIr = retried;
+        }
+      }
       const requiredMetadataIdentifiers = collectMetadataIdentifiers(extractedIr);
       const autoMetadataSourceFiles = await discoverWorkspaceMetadataSourceFiles(
         request.editor.document.uri.fsPath,
@@ -470,7 +537,7 @@ class PreviewController {
         request.editor,
         ir,
         mode,
-        this.currentLabelStyle,
+        this.labelStyle(),
         this.currentRecursiveStrategy,
         !request.manual,
         allMetadataSourceFiles
@@ -507,6 +574,9 @@ class PreviewController {
   }
 
   private labelStyle(): DotLabelStyle {
+    if (this.temporaryFullLabelPreview && this.currentLabelStyle !== "full") {
+      return "full";
+    }
     return this.currentLabelStyle;
   }
 
@@ -516,6 +586,25 @@ class PreviewController {
 
   private currentMode(): DotViewMode {
     return this.currentModeOverride ?? PreviewPanel.current()?.snapshot()?.mode ?? "combined";
+  }
+
+  private async setTemporaryFullPreview(active: boolean): Promise<void> {
+    const nextActive = active && this.currentLabelStyle !== "full";
+    if (this.temporaryFullLabelPreview === nextActive) {
+      return;
+    }
+    this.temporaryFullLabelPreview = nextActive;
+    if (!this.lastPreview) {
+      return;
+    }
+    await this.renderLastPreview(
+      this.lastPreview.editor,
+      this.lastPreview.ir,
+      this.currentMode(),
+      this.labelStyle(),
+      this.currentRecursiveStrategy,
+      true
+    );
   }
 
   private async renderLastPreview(
@@ -561,6 +650,7 @@ class PreviewController {
         mode,
         this.currentSourceMode,
         labelStyle,
+        this.currentLabelStyle,
         recursiveStrategy,
         metadataSourceFiles,
         metadataSourcesView,
@@ -576,6 +666,7 @@ class PreviewController {
       mode,
       this.currentSourceMode,
       labelStyle,
+      this.currentLabelStyle,
       recursiveStrategy,
       metadataSourceFiles,
       metadataSourcesView,
@@ -584,7 +675,8 @@ class PreviewController {
       this.constraintFilterNodeId,
       this.activeConstraintId,
       previewInput.recoveryMetadata,
-      previewInput.notice
+      previewInput.notice,
+      this.typstOverridesByTargetId
     );
   }
 
@@ -597,7 +689,7 @@ class PreviewController {
       this.lastPreview.editor,
       this.lastPreview.ir,
       this.currentMode(),
-      this.currentLabelStyle,
+      this.labelStyle(),
       this.currentRecursiveStrategy,
       true
     );
@@ -618,7 +710,7 @@ class PreviewController {
       this.lastPreview.editor,
       this.lastPreview.ir,
       this.currentMode(),
-      this.currentLabelStyle,
+      this.labelStyle(),
       this.currentRecursiveStrategy,
       true
     );
@@ -639,7 +731,7 @@ class PreviewController {
       this.lastPreview.editor,
       this.lastPreview.ir,
       this.currentMode(),
-      this.currentLabelStyle,
+      this.labelStyle(),
       this.currentRecursiveStrategy,
       true
     );
@@ -809,6 +901,62 @@ function containsOffset(range: { start: number; end: number } | null, offset: nu
   return range !== null && offset >= range.start && offset <= range.end;
 }
 
+function shouldRetryEmptyPatternFunctionOnRuleLine(ir: PatternIr, source: string, offset: number): boolean {
+  if (ir.scope.kind !== "pattern_function") {
+    return false;
+  }
+  if (ir.roots.length > 0 || ir.nodes.length > 0 || ir.action_effects.length > 0 || ir.constraints.length > 0) {
+    return false;
+  }
+  return isNearRuleCallText(source, offset);
+}
+
+async function tryRuleCallOffsetFallback(
+  document: vscode.TextDocument,
+  source: string,
+  offset: number,
+  error?: unknown
+): Promise<PatternIr | null> {
+  if (error instanceof ExtractorError && error.kind !== "unsupported_scope") {
+    return null;
+  }
+  if (!isNearRuleCallText(source, offset)) {
+    return null;
+  }
+  for (const retryOffset of ruleCallRetryOffsets(source, offset)) {
+    try {
+      return await runExtractor(document, retryOffset);
+    } catch (retryError) {
+      if (!(retryError instanceof ExtractorError) || retryError.kind !== "unsupported_scope") {
+        throw retryError;
+      }
+    }
+  }
+  return null;
+}
+
+function isNearRuleCallText(source: string, offset: number): boolean {
+  const start = Math.max(0, offset - 96);
+  const end = Math.min(source.length, offset + 192);
+  return /add_rule(?:_with_hook)?/.test(source.slice(start, end));
+}
+
+function ruleCallRetryOffsets(source: string, offset: number): number[] {
+  const searchStart = Math.max(0, offset - 96);
+  const searchEnd = Math.min(source.length, offset + 1024);
+  const windowText = source.slice(searchStart, searchEnd);
+  const retries: number[] = [];
+  const patternClosureIndex = windowText.indexOf("||");
+  if (patternClosureIndex !== -1) {
+    retries.push(searchStart + patternClosureIndex);
+  }
+  const actionClosureMatch = windowText.match(/\|\s*[A-Za-z_][A-Za-z0-9_]*\s*,/);
+  if (actionClosureMatch?.index !== undefined) {
+    retries.push(searchStart + actionClosureMatch.index);
+  }
+  return Array.from(new Set(retries.filter((candidate) => candidate !== offset)));
+}
+
 function configuredDefaultDotView(): DotViewMode | "auto" {
   return vscode.workspace.getConfiguration().get<DotViewMode | "auto">(
     "eggplantPattern.defaultDotView",
@@ -878,7 +1026,8 @@ async function renderDot(
   ir: PatternIr,
   mode: DotViewMode,
   sourceMode: PreviewSourceMode,
-  labelStyle: DotLabelStyle,
+  effectiveLabelStyle: DotLabelStyle,
+  selectedLabelStyle: DotLabelStyle,
   recursiveStrategy: RecursiveStrategy,
   metadataSourceFiles: string[],
   metadataSourcesView: PreviewMetadataSourcesView,
@@ -887,31 +1036,58 @@ async function renderDot(
   constraintFilterNodeId: string | null,
   activeConstraintId: string | null,
   recoveryMetadata: ReturnType<typeof summarizeRuntimeActionSampleTrace> | null,
-  notice: string | null
+  notice: string | null,
+  typstOverridesByTargetId: Record<string, string>
 ): Promise<void> {
-  const typstRenderings = await renderTypstSnippets(
-    collectTypstReplacementSources(ir, mode, labelStyle, recursiveStrategy)
+  const typstSources = Object.fromEntries(
+    collectTypstReplacementSources(ir, mode, effectiveLabelStyle, recursiveStrategy)
+      .map((entry) => [entry.targetId, entry.source] as const)
   );
+  for (const [targetId, source] of Object.entries(typstOverridesByTargetId)) {
+    if (source.trim().length > 0 && targetId in typstSources) {
+      typstSources[targetId] = source.trim();
+    }
+  }
+  const typstRenderings = await renderTypstSnippets(
+    Object.entries(typstSources).map(([targetId, source]) => ({ targetId, source }))
+  );
+  const typstStatusByTargetId = Object.fromEntries(
+    Object.keys(typstSources).map((targetId) => {
+      const rendering = typstRenderings[targetId];
+      if (!rendering) {
+        return [targetId, "Typst: failed"];
+      }
+      return [targetId, rendering.mode === "math" ? "Typst: rendered" : "Typst: fallback text"];
+    })
+  );
+  for (const targetId of collectSourceTargetIds(ir, mode)) {
+    if (!(targetId in typstStatusByTargetId)) {
+      typstStatusByTargetId[targetId] = "Typst: no source";
+    }
+  }
   const dot = withGitDotMetadata(
-    patternIrToDotWithMode(ir, mode, labelStyle, recursiveStrategy, typstRenderings),
+    patternIrToDotWithMode(ir, mode, effectiveLabelStyle, recursiveStrategy, typstRenderings),
     editor.document.fileName
   );
   const svg = await dotToSvg(dot);
-  const strategySuffix = labelStyle === "recursive" ? `, ${recursiveStrategy}` : "";
+  const strategySuffix = effectiveLabelStyle === "recursive" ? `, ${recursiveStrategy}` : "";
   const visibleConstraints = filterConstraintEntries(constraints, constraintFilterMode, constraintFilterNodeId);
   const activeConstraint = visibleConstraints.find((constraint) => constraint.id === activeConstraintId) ?? null;
   await panel.render({
-    title: `Eggplant Pattern (${modeLabel(mode)}, ${sourceMode}, ${labelStyle}${strategySuffix}): ${editor.document.fileName.split("/").pop() ?? "Preview"}`,
+    title: `Eggplant Pattern (${modeLabel(mode)}, ${sourceMode}, ${effectiveLabelStyle}${strategySuffix}): ${editor.document.fileName.split("/").pop() ?? "Preview"}`,
     mode,
     sourceMode,
     recoveryMode: configuredRecoveryUiMode(),
     tracePath: configuredActionSampleTracePath(),
-    labelStyle,
+    labelStyle: selectedLabelStyle,
+    effectiveLabelStyle,
     recursiveStrategy,
     fileName: editor.document.fileName.split("/").pop() ?? "Preview",
     dot,
     svg,
     typstRenderings,
+    typstSources,
+    typstStatusByTargetId,
     sourceTargetIds: collectSourceTargetIds(ir, mode),
     constraints: visibleConstraints,
     constraintCountByNodeId: buildConstraintCountByNodeId(constraints),
@@ -930,6 +1106,7 @@ async function renderDot(
 }
 
 async function renderNotice(panel: PreviewPanel, editor: vscode.TextEditor, message: string): Promise<void> {
+  const labelStyle = configuredDefaultLabelStyle();
   const dot = withGitDotMetadata([
     "digraph EggplantPatternStatus {",
     "  graph [pad=0.3];",
@@ -939,17 +1116,20 @@ async function renderNotice(panel: PreviewPanel, editor: vscode.TextEditor, mess
   ].join("\n"), editor.document.fileName);
   const svg = await dotToSvg(dot);
   await panel.render({
-    title: `Eggplant Pattern (${modeLabel("combined")}, ${configuredDefaultLabelStyle()}): ${editor.document.fileName.split("/").pop() ?? "Preview"}`,
+    title: `Eggplant Pattern (${modeLabel("combined")}, ${labelStyle}): ${editor.document.fileName.split("/").pop() ?? "Preview"}`,
     mode: "combined",
     sourceMode: "ast",
     recoveryMode: configuredRecoveryUiMode(),
     tracePath: configuredActionSampleTracePath(),
-    labelStyle: configuredDefaultLabelStyle(),
+    labelStyle,
+    effectiveLabelStyle: labelStyle,
     recursiveStrategy: configuredDefaultRecursiveStrategy(),
     fileName: editor.document.fileName.split("/").pop() ?? "Preview",
     dot,
     svg,
     typstRenderings: {},
+    typstSources: {},
+    typstStatusByTargetId: {},
     sourceTargetIds: [],
     constraints: [],
     constraintCountByNodeId: {},
@@ -979,7 +1159,8 @@ async function renderTraceUnavailableNotice(
   editor: vscode.TextEditor,
   mode: DotViewMode,
   sourceMode: PreviewSourceMode,
-  labelStyle: DotLabelStyle,
+  effectiveLabelStyle: DotLabelStyle,
+  selectedLabelStyle: DotLabelStyle,
   recursiveStrategy: RecursiveStrategy,
   metadataSourceFiles: string[],
   metadataSourcesView: PreviewMetadataSourcesView,
@@ -994,17 +1175,20 @@ async function renderTraceUnavailableNotice(
   ].join("\n"), editor.document.fileName);
   const svg = await dotToSvg(dot);
   await panel.render({
-    title: `Eggplant Pattern (${modeLabel(mode)}, ${sourceMode}, ${labelStyle}${labelStyle === "recursive" ? `, ${recursiveStrategy}` : ""}): ${editor.document.fileName.split("/").pop() ?? "Preview"}`,
+    title: `Eggplant Pattern (${modeLabel(mode)}, ${sourceMode}, ${effectiveLabelStyle}${effectiveLabelStyle === "recursive" ? `, ${recursiveStrategy}` : ""}): ${editor.document.fileName.split("/").pop() ?? "Preview"}`,
     mode,
     sourceMode,
     recoveryMode: configuredRecoveryUiMode(),
     tracePath: configuredActionSampleTracePath(),
-    labelStyle,
+    labelStyle: selectedLabelStyle,
+    effectiveLabelStyle,
     recursiveStrategy,
     fileName: editor.document.fileName.split("/").pop() ?? "Preview",
     dot,
     svg,
     typstRenderings: {},
+    typstSources: {},
+    typstStatusByTargetId: {},
     sourceTargetIds: [],
     constraints: buildConstraintEntries(irlessPatternIr()),
     constraintCountByNodeId: {},

@@ -61,7 +61,7 @@ function toVariantTypeName(insertTarget: string): string {
 }
 
 function compactExpression(value: string): string {
-  return value
+  let compacted = value
     .replace(/\b(?:pat|matched|ctx|tx)\./g, "")
     .replace(/\.clone\(\)/g, "")
     .replace(/\.handle\(\)/g, "")
@@ -69,6 +69,15 @@ function compactExpression(value: string): string {
     .replace(/"([^"]+)"\.to_owned\(\)/g, "\"$1\"")
     .replace(/\s+/g, " ")
     .trim();
+
+  let previous = "";
+  while (previous !== compacted) {
+    previous = compacted;
+    compacted = compacted
+      .replace(/\bdevalue\(\s*([^()]+?)\s*\)/g, "$1");
+  }
+
+  return compacted;
 }
 
 function stripOuterParens(value: string): string {
@@ -222,6 +231,10 @@ function displayAtomicExpression(value: string): string {
   return stringLiteralMatch[1].replace(/\\"/g, "\"").replace(/\\\\/g, "\\");
 }
 
+function typstTextAtom(value: string): string {
+  return `upright(${JSON.stringify(value)})`;
+}
+
 function typstAtomicExpression(value: string): string {
   const compacted = compactExpression(value);
   const stringLiteralMatch = compacted.match(/^"((?:\\.|[^"])*)"$/);
@@ -232,8 +245,11 @@ function typstAtomicExpression(value: string): string {
     if (/^[A-Za-z][A-Za-z0-9]*$/.test(compacted) && /[0-9]/.test(compacted)) {
       return compacted;
     }
+    if (/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+$/.test(compacted)) {
+      return typstTextAtom(compacted);
+    }
     if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(compacted)) {
-      return JSON.stringify(compacted);
+      return typstTextAtom(compacted);
     }
     return compacted;
   }
@@ -242,7 +258,7 @@ function typstAtomicExpression(value: string): string {
   if (/^[A-Za-z]$/.test(unescaped)) {
     return unescaped;
   }
-  return JSON.stringify(unescaped);
+  return typstTextAtom(unescaped);
 }
 
 export function compactConstraintLabel(sourceText: string, resolvedText: string): string {
@@ -465,6 +481,22 @@ function parseArgsList(rawArgs: string): string[] {
   return args;
 }
 
+function stripSemanticActionArgNoise(value: string): string {
+  let current = value.trim();
+  while (true) {
+    const next = current
+      .replace(
+        /\b(?:[A-Za-z_][A-Za-z0-9_]*\.)?devalue\(\s*([^()]+?)\s*\)/g,
+        "$1"
+      )
+      .trim();
+    if (next === current) {
+      return current;
+    }
+    current = next;
+  }
+}
+
 function parseSemanticInsert(sourceText: string): { variantName: string; args: string[]; semantic: string } | null {
   const trimmed = sourceText.trim();
   const insertMatch = trimmed.match(
@@ -476,10 +508,11 @@ function parseSemanticInsert(sourceText: string): { variantName: string; args: s
 
   const [, insertTarget, args] = insertMatch;
   const variantName = toVariantTypeName(insertTarget);
+  const parsedArgs = parseArgsList(args);
   return {
     variantName,
-    args: parseArgsList(args).map((arg) => compactExpression(arg)),
-    semantic: `${variantName}(${args})`,
+    args: parsedArgs.map((arg) => compactExpression(arg)),
+    semantic: `${variantName}(${parsedArgs.map((arg) => stripSemanticActionArgNoise(arg)).join(", ")})`,
   };
 }
 
@@ -846,13 +879,7 @@ function nodeLabel(
   incomingCounts: Map<string, number>,
   inlineAnnotations: Map<string, InlineConstraintAnnotation[]>
 ): string {
-  const annotationSuffix = (() => {
-    const annotations = inlineAnnotations.get(nodeId) ?? [];
-    if (annotations.length === 0) {
-      return "";
-    }
-    return `\n${annotations.map((entry) => entry.displayText).join("\n")}`;
-  })();
+  const annotationSuffix = inlineAnnotationSuffix(inlineAnnotations, nodeId);
   if (labelStyle === "full") {
     return `${label}${annotationSuffix}`;
   }
@@ -868,6 +895,17 @@ function nodeLabel(
     return `${rendered}${annotationSuffix}`;
   }
   return `${dslType}${annotationSuffix}`;
+}
+
+function inlineAnnotationSuffix(
+  inlineAnnotations: Map<string, InlineConstraintAnnotation[]>,
+  nodeId: string
+): string {
+  const annotations = inlineAnnotations.get(nodeId) ?? [];
+  if (annotations.length === 0) {
+    return "";
+  }
+  return `\n${annotations.map((entry) => entry.displayText).join("\n")}`;
 }
 
 export function constraintLabel(sourceText: string, resolvedText: string, labelStyle: DotLabelStyle): string {
@@ -937,8 +975,9 @@ export function patternIrToDotWithMode(
       if (nodeSet.has(root)) {
         continue;
       }
+      const rootLabel = `${root}${inlineAnnotationSuffix(inlineAnnotations, root)}`;
       lines.push(
-        `  ${quote(root)} [label=${quote(root)}, shape=ellipse, style="dashed,filled", fillcolor="#f3f0ea", color="#8d8477", penwidth=2, fontname="Helvetica"];`
+        `  ${quote(root)} [label=${quote(rootLabel)}, shape=ellipse, style="dashed,filled", fillcolor="#f3f0ea", color="#8d8477", penwidth=2, fontname="Helvetica"];`
       );
     }
   }

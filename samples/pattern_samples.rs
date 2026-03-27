@@ -42,10 +42,10 @@ fn add_rule_display_demo() {
         "display_demo",
         ruleset,
         || {
-            let x = DisplayMath::query_leaf();
+            let xxx = DisplayMath::query_leaf();
             let f = DisplayMath::query_leaf();
-            let diff = MDiff::query(&x, &f);
-            DisplayPat::new(x, f, diff)
+            let diff = MDiff::query(&xxx, &f);
+            DisplayPat::new(xxx, f, diff)
         },
         |ctx, pat| {
             let integral = ctx.insert_m_integral(pat.f, pat.x);

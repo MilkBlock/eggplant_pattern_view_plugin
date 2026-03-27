@@ -6,6 +6,7 @@ export interface RenderedTypstSnippet {
   svg: string;
   width: number;
   height: number;
+  mode: "math" | "text-fallback";
 }
 
 const renderCache = new Map<string, Promise<RenderedTypstSnippet | null>>();
@@ -33,20 +34,53 @@ async function renderTypstSnippet(source: string): Promise<RenderedTypstSnippet 
 
 async function renderTypstSnippetUncached(source: string): Promise<RenderedTypstSnippet | null> {
   try {
-    const document = [
-      "#set page(width: auto, height: auto, margin: 0pt)",
-      "#set par(justify: false)",
-      `#box(inset: (x: 1.2pt, y: 1.6pt))[$ ${normalizeTypstMathSource(source)} $]`
-    ].join("\n");
-    const stdout = await runTypst(document);
+    const stdout = await runTypst(buildMathDocument(source));
     return {
       svg: stdout,
       width: parseDimension(stdout, "width"),
-      height: parseDimension(stdout, "height")
+      height: parseDimension(stdout, "height"),
+      mode: "math"
     };
   } catch (error) {
-    warnTypstFailure(error);
-    return null;
+    try {
+      const stdout = await runTypst(buildTextDocument(source));
+      return {
+        svg: stdout,
+        width: parseDimension(stdout, "width"),
+        height: parseDimension(stdout, "height"),
+        mode: "text-fallback"
+      };
+    } catch (textError) {
+      warnTypstFailure(textError);
+      return null;
+    }
+  }
+}
+
+function buildMathDocument(source: string): string {
+  return [
+    "#set page(width: auto, height: auto, margin: 0pt)",
+    "#set par(justify: false)",
+    `#box(inset: (x: 1.2pt, y: 1.6pt))[$ ${normalizeTypstMathSource(source)} $]`
+  ].join("\n");
+}
+
+function buildTextDocument(source: string): string {
+  return [
+    "#set page(width: auto, height: auto, margin: 0pt)",
+    "#set par(justify: false)",
+    `#box(inset: (x: 1.2pt, y: 1.6pt))[#(${JSON.stringify(displayTextFallbackSource(source))})]`
+  ].join("\n");
+}
+
+function displayTextFallbackSource(source: string): string {
+  let current = source;
+  while (true) {
+    const next = current.replace(/upright\("((?:\\.|[^"])*)"\)/g, "$1");
+    if (next === current) {
+      return next;
+    }
+    current = next;
   }
 }
 

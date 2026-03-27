@@ -82,7 +82,15 @@ fn find_scope(root: &SyntaxNode, offset: TextSize) -> Option<Scope> {
     if let Some(call) = root
         .descendants()
         .filter_map(ast::CallExpr::cast)
-        .filter(|call| call.syntax().text_range().contains(offset))
+        .filter(|call| {
+            let call_range = call.syntax().text_range();
+            let callee_range = call.expr().map(|expr| expr.syntax().text_range());
+            callee_range
+                .map(|range| range.contains(offset) || range.start() == offset)
+                .unwrap_or(false)
+                || call_range.contains(offset)
+                || call_range.start() == offset
+        })
         .find(is_add_rule_call)
     {
         return Some(Scope::RuleCall(call));
@@ -115,17 +123,39 @@ fn function_looks_like_pattern(function: &ast::Fn) -> bool {
     let Some(body) = function.body() else {
         return false;
     };
-    let has_pat_new = body
-        .syntax()
-        .descendants()
-        .filter_map(ast::CallExpr::cast)
+    let top_level_exprs = block_top_level_exprs(&body);
+    let has_pat_new = top_level_exprs
+        .iter()
+        .flat_map(|expr| expr.syntax().descendants().filter_map(ast::CallExpr::cast))
         .any(|call| call_path(&call).is_some_and(|path| path.ends_with("::new")));
-    let has_query = body
-        .syntax()
-        .descendants()
-        .filter_map(ast::CallExpr::cast)
+    let has_query = top_level_exprs
+        .iter()
+        .flat_map(|expr| expr.syntax().descendants().filter_map(ast::CallExpr::cast))
         .any(|call| is_query_call(&call));
     has_pat_new && has_query
+}
+
+fn block_top_level_exprs(block: &ast::BlockExpr) -> Vec<ast::Expr> {
+    let mut exprs = Vec::new();
+    for stmt in block.statements() {
+        match stmt {
+            ast::Stmt::LetStmt(let_stmt) => {
+                if let Some(init) = let_stmt.initializer() {
+                    exprs.push(init);
+                }
+            }
+            ast::Stmt::ExprStmt(expr_stmt) => {
+                if let Some(expr) = expr_stmt.expr() {
+                    exprs.push(expr);
+                }
+            }
+            ast::Stmt::Item(_) => {}
+        }
+    }
+    if let Some(tail) = block.tail_expr() {
+        exprs.push(tail);
+    }
+    exprs
 }
 
 fn extract_from_rule_call(call: ast::CallExpr) -> Result<PatternIr> {
@@ -1847,6 +1877,45 @@ fn demo() {
     }
 
     #[test]
+    fn add_rule_callee_offset_prefers_rule_scope_over_enclosing_function() {
+        let src = r#"
+use eggplant::prelude::*;
+use eggplant::tx_rx_vt_pr;
+
+tx_rx_vt_pr!(MyTx, MyPatRec);
+
+#[eggplant::func(output = i64, no_merge)]
+struct fib {
+    x: i64,
+}
+
+fn main() {
+    let step_ruleset = MyTx::new_ruleset("fib_step");
+    MyTx::add_rule(
+        "fib_step",
+        step_ruleset,
+        || {
+            let x = fib::x();
+            let f0 = fib::query(&x);
+            FibStep::new(x, f0)
+        },
+        |ctx, pat| {
+            ctx.set_fib(ctx.devalue(pat.x), ctx.devalue(pat.f0));
+        },
+    );
+}
+"#;
+        let ir = extract(src, "MyTx::add_rule(");
+        assert!(matches!(ir.scope.kind, ScopeKind::AddRuleCall));
+        assert_eq!(ir.roots, vec!["x", "f0"]);
+        assert_eq!(ir.action_effects.len(), 1);
+        assert_eq!(
+            ir.action_effects[0].source_text,
+            "ctx.set_fib(ctx.devalue(pat.x), ctx.devalue(pat.f0))"
+        );
+    }
+
+    #[test]
     fn keeps_inline_assertion_text() {
         let src = r#"
 fn demo() {
@@ -2260,6 +2329,33 @@ fn demo() {
                 .to_string()
                 .contains("no supported pattern scope found at cursor")
         );
+    }
+
+    #[test]
+    fn add_rule_token_start_offset_resolves_rule_call_scope() {
+        let src = r#"
+fn demo() {
+    MyTx::add_rule("seed", ruleset, || {
+        #[eggplant::pat_vars_catch]
+        struct Unit {}
+    }, |ctx, _pat| {
+        ctx.set_fib(0, 0);
+    });
+}
+"#;
+        let offset = src.find("MyTx::add_rule(").expect("add_rule should exist");
+        let ir = extract_pattern(
+            src,
+            ExtractOptions {
+                offset,
+                edition: Edition::CURRENT,
+            },
+        )
+        .expect("extract should succeed at add_rule token start");
+        assert!(matches!(ir.scope.kind, ScopeKind::AddRuleCall));
+        assert_eq!(ir.roots, vec!["Unit"]);
+        assert_eq!(ir.action_effects.len(), 1);
+        assert_eq!(ir.action_effects[0].source_text, "ctx.set_fib(0, 0)");
     }
 
     #[test]

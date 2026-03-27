@@ -40,11 +40,14 @@ export interface PreviewPanelState {
   mode: DotViewMode;
   sourceMode: PreviewSourceMode;
   labelStyle: DotLabelStyle;
+  effectiveLabelStyle: DotLabelStyle;
   recursiveStrategy: RecursiveStrategy;
   fileName: string;
   dot: string;
   svg: string;
   typstRenderings: Record<string, RenderedTypstSnippet>;
+  typstSources: Record<string, string>;
+  typstStatusByTargetId: Record<string, string>;
   sourceTargetIds: string[];
   constraints: PreviewConstraintEntry[];
   constraintCountByNodeId: Record<string, number>;
@@ -79,6 +82,10 @@ interface PreviewPanelCallbacks {
   onSelectMetadataSources(): Promise<void>;
   onClearMetadataSources(): Promise<void>;
   onCopyDot(dot: string): Promise<void>;
+  onCopyTypst(source: string): Promise<void>;
+  onSaveTypstEdit(targetId: string, source: string): Promise<void>;
+  onClearTypstEdit(targetId: string): Promise<void>;
+  onTemporaryFullPreviewChange(active: boolean): Promise<void>;
   onRefresh(): Promise<void>;
 }
 
@@ -98,6 +105,10 @@ type IncomingMessage =
   | { type: "selectMetadataSources" }
   | { type: "clearMetadataSources" }
   | { type: "copyDot"; dot: string }
+  | { type: "copyTypst"; source: string }
+  | { type: "saveTypstEdit"; targetId: string; source: string }
+  | { type: "clearTypstEdit"; targetId: string }
+  | { type: "setTemporaryFullPreview"; active: boolean }
   | { type: "refresh" };
 
 let currentPanel: PreviewPanel | undefined;
@@ -241,6 +252,18 @@ export class PreviewPanel implements vscode.Disposable {
         return;
       case "copyDot":
         await this.callbacks.onCopyDot(message.dot);
+        return;
+      case "copyTypst":
+        await this.callbacks.onCopyTypst(message.source);
+        return;
+      case "saveTypstEdit":
+        await this.callbacks.onSaveTypstEdit(message.targetId, message.source);
+        return;
+      case "clearTypstEdit":
+        await this.callbacks.onClearTypstEdit(message.targetId);
+        return;
+      case "setTemporaryFullPreview":
+        await this.callbacks.onTemporaryFullPreviewChange(message.active);
         return;
       case "refresh":
         await this.callbacks.onRefresh();
@@ -576,6 +599,26 @@ export class PreviewPanel implements vscode.Disposable {
         opacity: 0.5;
         cursor: default;
       }
+      .typst-edit-popover {
+        min-width: 320px;
+        max-width: min(480px, calc(100vw - 16px));
+      }
+      .typst-edit-input {
+        width: 100%;
+        min-height: 72px;
+        box-sizing: border-box;
+        resize: vertical;
+        border: 1px solid var(--border);
+        background: var(--bg);
+        color: var(--fg);
+        padding: 8px;
+        font: 12px/1.5 var(--vscode-editor-font-family, var(--vscode-font-family));
+      }
+      .typst-edit-hint {
+        margin-top: 6px;
+        font-size: 11px;
+        color: var(--muted);
+      }
     </style>
   </head>
   <body>
@@ -694,25 +737,64 @@ export class PreviewPanel implements vscode.Disposable {
       const constraintNodeList = document.getElementById("constraintNodeList");
       const constraintSelectionEmpty = document.getElementById("constraintSelectionEmpty");
       const sourceTargetIds = new Set();
+      let selectedLabelStyle = "recursive";
+      let temporaryFullPreviewActive = false;
       let metadataViewerVisible = false;
       let suppressGraphClicksUntil = 0;
       let pendingSourceClickTimeout = null;
       const sourceClickDelayMs = 400;
       let lastRenderedSvgMarkup = "";
       let currentDot = "";
+      const typstSourcesByTargetId = new Map();
+      const typstStatusByTargetId = new Map();
+      let currentContextTargetId = "";
+      let currentContextTypstSource = "";
+      let currentContextTypstStatus = "";
       graph.dataset.draggable = "false";
       graph.dataset.dragging = "false";
       const graphContextMenu = document.createElement("div");
       graphContextMenu.className = "graph-context-menu";
       graphContextMenu.hidden = true;
+      const typstStatusButton = document.createElement("button");
+      typstStatusButton.type = "button";
+      typstStatusButton.disabled = true;
+      graphContextMenu.appendChild(typstStatusButton);
       const copyDotButton = document.createElement("button");
       copyDotButton.type = "button";
       copyDotButton.textContent = "Copy DOT";
       graphContextMenu.appendChild(copyDotButton);
+      const copyTypstButton = document.createElement("button");
+      copyTypstButton.type = "button";
+      copyTypstButton.textContent = "Copy Typst";
+      graphContextMenu.appendChild(copyTypstButton);
+      const editTypstButton = document.createElement("button");
+      editTypstButton.type = "button";
+      editTypstButton.textContent = "Edit Typst";
+      graphContextMenu.appendChild(editTypstButton);
       document.body.appendChild(graphContextMenu);
+      const typstEditPopover = document.createElement("div");
+      typstEditPopover.className = "graph-context-menu typst-edit-popover";
+      typstEditPopover.hidden = true;
+      const typstEditInput = document.createElement("textarea");
+      typstEditInput.className = "typst-edit-input";
+      typstEditInput.rows = 3;
+      typstEditPopover.appendChild(typstEditInput);
+      const typstEditHint = document.createElement("div");
+      typstEditHint.className = "typst-edit-hint";
+      typstEditHint.textContent = "Enter: save  Shift+Enter: newline  Escape: cancel";
+      typstEditPopover.appendChild(typstEditHint);
+      document.body.appendChild(typstEditPopover);
 
       const syncRecursiveStrategyState = () => {
         recursiveStrategy.disabled = labelStyle.value !== "recursive";
+      };
+
+      const syncTemporaryFullPreview = (active) => {
+        if (temporaryFullPreviewActive === active) {
+          return;
+        }
+        temporaryFullPreviewActive = active;
+        vscode.postMessage({ type: "setTemporaryFullPreview", active });
       };
 
       const setMetadataViewerVisible = (visible) => {
@@ -1205,13 +1287,41 @@ export class PreviewPanel implements vscode.Disposable {
         graphContextMenu.hidden = true;
       };
 
-      const showGraphContextMenu = (clientX, clientY) => {
+      const hideTypstEditPopover = () => {
+        typstEditPopover.hidden = true;
+      };
+
+      const showGraphContextMenu = (clientX, clientY, targetId = "", typstSource = "", typstStatus = "") => {
+        currentContextTargetId = targetId;
+        currentContextTypstSource = typstSource;
+        currentContextTypstStatus = typstStatus;
+        typstStatusButton.hidden = !typstStatus;
+        typstStatusButton.textContent = typstStatus || "Typst";
         copyDotButton.disabled = !currentDot;
+        copyTypstButton.hidden = !typstSource;
+        copyTypstButton.disabled = !typstSource;
+        editTypstButton.hidden = !typstSource;
+        editTypstButton.disabled = !typstSource;
         graphContextMenu.hidden = false;
         const maxLeft = Math.max(0, window.innerWidth - graphContextMenu.offsetWidth - 8);
         const maxTop = Math.max(0, window.innerHeight - graphContextMenu.offsetHeight - 8);
         graphContextMenu.style.left = Math.min(clientX, maxLeft) + "px";
         graphContextMenu.style.top = Math.min(clientY, maxTop) + "px";
+      };
+
+      const showTypstEditPopover = (clientX, clientY) => {
+        if (!currentContextTargetId || !currentContextTypstSource) {
+          return;
+        }
+        hideGraphContextMenu();
+        typstEditInput.value = currentContextTypstSource;
+        typstEditPopover.hidden = false;
+        const maxLeft = Math.max(0, window.innerWidth - 420);
+        const maxTop = Math.max(0, window.innerHeight - 160);
+        typstEditPopover.style.left = Math.min(clientX, maxLeft) + "px";
+        typstEditPopover.style.top = Math.min(clientY, maxTop) + "px";
+        typstEditInput.focus();
+        typstEditInput.select();
       };
 
       const isGraphBackgroundEvent = (event) => {
@@ -1226,6 +1336,7 @@ export class PreviewPanel implements vscode.Disposable {
       });
 
       labelStyle.addEventListener("change", () => {
+        selectedLabelStyle = labelStyle.value;
         vscode.postMessage({ type: "changeLabelStyle", labelStyle: labelStyle.value });
         syncRecursiveStrategyState();
       });
@@ -1271,35 +1382,63 @@ export class PreviewPanel implements vscode.Disposable {
       });
 
       graph.addEventListener("contextmenu", (event) => {
-        if (!isGraphBackgroundEvent(event)) {
+        const nodeGroup = getEventNodeGroup(event);
+        const targetId = nodeGroup?.querySelector("title")?.textContent || "";
+        const typstSource = targetId ? (typstSourcesByTargetId.get(targetId) || "") : "";
+        const typstStatus = targetId ? (typstStatusByTargetId.get(targetId) || "Typst: no source") : "";
+        if (!isGraphBackgroundEvent(event) && !typstStatus) {
           hideGraphContextMenu();
           return;
         }
         event.preventDefault();
         event.stopPropagation();
-        showGraphContextMenu(event.clientX, event.clientY);
+        showGraphContextMenu(event.clientX, event.clientY, targetId, typstSource, typstStatus);
       });
 
       graph.addEventListener("pointerdown", () => {
         hideGraphContextMenu();
+        hideTypstEditPopover();
       }, true);
 
       window.addEventListener("scroll", () => {
         hideGraphContextMenu();
+        hideTypstEditPopover();
       }, true);
 
       window.addEventListener("resize", () => {
         hideGraphContextMenu();
+        hideTypstEditPopover();
       });
 
       window.addEventListener("keydown", (event) => {
+        if (selectedLabelStyle !== "full" && (event.ctrlKey || event.metaKey)) {
+          syncTemporaryFullPreview(true);
+        }
         if (event.key === "Escape") {
           hideGraphContextMenu();
+          hideTypstEditPopover();
+        }
+      });
+
+      window.addEventListener("keyup", (event) => {
+        if (!(event.ctrlKey || event.metaKey)) {
+          syncTemporaryFullPreview(false);
+        }
+      });
+
+      window.addEventListener("blur", () => {
+        syncTemporaryFullPreview(false);
+      });
+
+      document.addEventListener("visibilitychange", () => {
+        if (document.hidden) {
+          syncTemporaryFullPreview(false);
         }
       });
 
       document.addEventListener("click", () => {
         hideGraphContextMenu();
+        hideTypstEditPopover();
       });
 
       copyDotButton.addEventListener("click", () => {
@@ -1308,6 +1447,45 @@ export class PreviewPanel implements vscode.Disposable {
         }
         vscode.postMessage({ type: "copyDot", dot: currentDot });
         hideGraphContextMenu();
+      });
+
+      copyTypstButton.addEventListener("click", () => {
+        if (!currentContextTypstSource) {
+          return;
+        }
+        vscode.postMessage({ type: "copyTypst", source: currentContextTypstSource });
+        hideGraphContextMenu();
+      });
+
+      editTypstButton.addEventListener("click", (event) => {
+        event.stopPropagation();
+        showTypstEditPopover(parseInt(graphContextMenu.style.left || "0", 10), parseInt(graphContextMenu.style.top || "0", 10));
+      });
+
+      typstEditPopover.addEventListener("click", (event) => {
+        event.stopPropagation();
+      });
+
+      typstEditInput.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          hideTypstEditPopover();
+          return;
+        }
+        if (event.key === "Enter" && !event.shiftKey) {
+          event.preventDefault();
+          if (!currentContextTargetId) {
+            hideTypstEditPopover();
+            return;
+          }
+          const nextSource = typstEditInput.value.trim();
+          if (nextSource.length === 0) {
+            vscode.postMessage({ type: "clearTypstEdit", targetId: currentContextTargetId });
+          } else {
+            vscode.postMessage({ type: "saveTypstEdit", targetId: currentContextTargetId, source: nextSource });
+          }
+          hideTypstEditPopover();
+        }
       });
 
       switchToAst.addEventListener("click", () => {
@@ -1322,8 +1500,21 @@ export class PreviewPanel implements vscode.Disposable {
 
         const payload = message.payload;
         currentDot = typeof payload.dot === "string" ? payload.dot : "";
+        typstSourcesByTargetId.clear();
+        typstStatusByTargetId.clear();
+        for (const [targetId, source] of Object.entries(payload.typstSources || {})) {
+          if (typeof source === "string" && source.length > 0) {
+            typstSourcesByTargetId.set(targetId, source);
+          }
+        }
+        for (const [targetId, status] of Object.entries(payload.typstStatusByTargetId || {})) {
+          if (typeof status === "string" && status.length > 0) {
+            typstStatusByTargetId.set(targetId, status);
+          }
+        }
         mode.value = payload.mode;
         labelStyle.value = payload.labelStyle;
+        selectedLabelStyle = payload.labelStyle;
         sourceMode.value = payload.sourceMode;
         recoveryMode.value = payload.recoveryMode || "off";
         recursiveStrategy.value = payload.recursiveStrategy;
@@ -1368,7 +1559,11 @@ export class PreviewPanel implements vscode.Disposable {
           ? " | diag: " + payload.recoveryDiagnostics.join(" ; ")
           : "";
         const traceSummary = payload.tracePath ? " | trace: " + payload.tracePath : "";
-        meta.textContent = payload.notice || payload.fileName + " | " + payload.mode + " | source=" + payload.sourceMode + " | " + payload.labelStyle + (payload.labelStyle === "recursive" ? " | " + payload.recursiveStrategy : "") + " | recovery=" + recoveryMode.value + traceSummary + sourceSummary + recoverySummary + recoveryDiagnostics;
+        const effectiveLabelStyle = payload.effectiveLabelStyle || payload.labelStyle;
+        const labelSummary = effectiveLabelStyle === payload.labelStyle
+          ? payload.labelStyle
+          : payload.labelStyle + " -> " + effectiveLabelStyle;
+        meta.textContent = payload.notice || payload.fileName + " | " + payload.mode + " | source=" + payload.sourceMode + " | " + labelSummary + (payload.labelStyle === "recursive" ? " | " + payload.recursiveStrategy : "") + " | recovery=" + recoveryMode.value + traceSummary + sourceSummary + recoverySummary + recoveryDiagnostics;
         renderConstraints(
           payload.constraints || [],
           payload.activeConstraintId,
@@ -1449,6 +1644,10 @@ export async function dispatchPreviewPanelTestMessage(
     | { type: "selectMetadataSources" }
     | { type: "clearMetadataSources" }
     | { type: "copyDot"; dot: string }
+    | { type: "copyTypst"; source: string }
+    | { type: "saveTypstEdit"; targetId: string; source: string }
+    | { type: "clearTypstEdit"; targetId: string }
+    | { type: "setTemporaryFullPreview"; active: boolean }
     | { type: "refresh" }
 ): Promise<void> {
   await currentPanel?.dispatchTestMessage(message);

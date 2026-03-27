@@ -19,6 +19,7 @@ import { normalizeTypstMathSource, renderTypstSnippets } from "../../typst";
 const WORKSPACE_ROOT = path.resolve(__dirname, "../../../../");
 const FIXTURE_PATH = path.resolve(WORKSPACE_ROOT, "samples", "pattern_samples.rs");
 const RELATION_FIXTURE_PATH = path.resolve(WORKSPACE_ROOT, "samples", "relation.rs");
+const FIBONACCI_FUNC_FIXTURE_PATH = path.resolve(WORKSPACE_ROOT, "samples", "fibonacci_func.rs");
 const MATH_METADATA_FIXTURE = "/Users/mineralsteins/Repos/egg_related/eggplant_backup/benches/runners/eggplant_rewrite/math_microbenchmark.rs";
 const EXTRACTOR_PATH = path.resolve(
   WORKSPACE_ROOT,
@@ -514,6 +515,128 @@ fn demo() {
     assert.deepEqual(ir.action_effects[0].referenced_pat_vars, ["edge"]);
   });
 
+  test("action view renders func read calls as nodes", () => {
+    const source = `
+fn demo() {
+  let add_1_2_key = Value::new(MyTx::canonical_raw(&add_1_2));
+  let add_1_3_key = Value::new(MyTx::canonical_raw(&add_1_3));
+  MyTx::add_rule("read_complex_output", ruleset, || {
+    #[eggplant::pat_vars_catch]
+    struct Unit {}
+  }, move |ctx, _pat| {
+    let out_v = ctx.read_lead_to(add_1_2_key);
+    let missing = ctx.try_read_lead_to(add_1_3_key);
+    println!("{:?} {:?}", out_v, missing);
+  });
+}
+`;
+    const offset = source.indexOf("ctx.read_lead_to");
+    assert.notEqual(offset, -1);
+
+    const result = spawnSync(EXTRACTOR_PATH, ["--offset", String(offset)], {
+      cwd: WORKSPACE_ROOT,
+      input: source,
+      encoding: "utf8"
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const ir = JSON.parse(result.stdout) as PatternIr;
+
+    assert.deepEqual(
+      ir.action_effects.map((effect) => ({
+        boundVar: effect.bound_var,
+        source: effect.source_text
+      })),
+      [
+        { boundVar: "out_v", source: "ctx.read_lead_to(add_1_2_key)" },
+        { boundVar: "missing", source: "ctx.try_read_lead_to(add_1_3_key)" }
+      ]
+    );
+
+    const dot = patternIrToDotWithMode(ir, "action", "full");
+    assert.match(dot, /Action Effects/);
+    assert.match(dot, /ctx\.read_lead_to\(add_1_2_key\)/);
+    assert.match(dot, /ctx\.try_read_lead_to\(add_1_3_key\)/);
+  });
+
+  test("multiline insert action labels drop insert_ prefix", () => {
+    const ir: PatternIr = {
+      scope: {
+        kind: "add_rule_call",
+        text_range: { start: 0, end: 20 },
+        pattern_range: { start: 0, end: 8 },
+        action_range: { start: 9, end: 20 }
+      },
+      nodes: [],
+      edges: [],
+      roots: [],
+      constraints: [],
+      action_effects: [
+        {
+          id: "effect_0",
+          effect_id: "effect@10:40",
+          bound_var: "ifnode",
+          source_text: `ctx.insert_if_node(
+              pat.if_eclass,
+              pat.pred,
+              pat.inputs,
+              pat.then_branch,
+              pat.else_branch,
+          )`,
+          referenced_pat_vars: ["if_eclass", "pred", "inputs", "then_branch", "else_branch"],
+          referenced_action_vars: [],
+          range: { start: 10, end: 40 }
+        }
+      ],
+      seed_facts: [],
+      display_templates: [],
+      typst_templates: [],
+      precedence_templates: [],
+      diagnostics: []
+    };
+
+    const dot = patternIrToDotWithMode(ir, "action", "compact");
+    assert.match(dot, /label="IfNode\(/);
+    assert.doesNotMatch(dot, /insert_if_node/);
+  });
+
+  test("action labels treat devalue as transparent bridge instead of visible syntax", () => {
+    const ir: PatternIr = {
+      scope: {
+        kind: "add_rule_call",
+        text_range: { start: 0, end: 20 },
+        pattern_range: { start: 0, end: 8 },
+        action_range: { start: 9, end: 20 }
+      },
+      nodes: [
+        { id: "arg_get", kind: "query", dsl_type: "Get", label: "arg_get: Get", range: { start: 0, end: 1 }, inputs: [] }
+      ],
+      edges: [],
+      roots: ["arg_get"],
+      constraints: [],
+      action_effects: [
+        {
+          id: "effect_0",
+          effect_id: "effect@10:24",
+          bound_var: "original_get_index",
+          source_text: "ctx.insert_single(ctx.insert_get(tmp_arg, ctx.devalue(pat.arg_get.index)))",
+          referenced_pat_vars: ["arg_get"],
+          referenced_action_vars: ["tmp_arg"],
+          range: { start: 10, end: 24 }
+        }
+      ],
+      seed_facts: [],
+      display_templates: [],
+      typst_templates: [],
+      precedence_templates: [],
+      diagnostics: []
+    };
+
+    const dot = patternIrToDotWithMode(ir, "action", "compact");
+    assert.doesNotMatch(dot, /devalue/);
+    assert.match(dot, /Single\(insert_get\(tmp_arg, arg_get.index\)\)/);
+  });
+
   test("dot renders typed relation aggregate nodes and projected query-field edges", () => {
     const ir: PatternIr = {
       scope: {
@@ -692,8 +815,8 @@ enum SharedMath {
     const sqrtFive = typstSources.find((entry) => entry.targetId === "effect:effect_33");
     const denom = typstSources.find((entry) => entry.targetId === "effect:effect_41");
 
-    assert.equal(sqrtFive?.source, 'sqrt("five")');
-    assert.equal(denom?.source, 'frac(1, (frac((1 + sqrt("five")), 2)  - frac((1 - sqrt("five")), 2) )) ');
+    assert.equal(sqrtFive?.source, 'sqrt(upright("five"))');
+    assert.equal(denom?.source, 'frac(1, (frac((1 + sqrt(upright("five"))), 2)  - frac((1 - sqrt(upright("five"))), 2) )) ');
 
     const renderings = await renderTypstSnippets(
       typstSources.filter((entry) => entry.targetId === "effect:effect_33" || entry.targetId === "effect:effect_41")
@@ -732,10 +855,108 @@ enum SharedMath {
     };
 
     const typstSources = collectTypstReplacementSources(ir, "pattern", "compact");
-    assert.deepEqual(typstSources, [{ targetId: "integ", source: 'integral "one" quad d x' }]);
+    assert.deepEqual(typstSources, [{ targetId: "integ", source: 'integral upright("one") quad d x' }]);
 
     const renderings = await renderTypstSnippets(typstSources);
     assert.ok(renderings.integ);
+  });
+
+  test("typst rendering falls back to plain text for non-math-safe raw DSL strings", async () => {
+    const renderings = await renderTypstSnippets([
+      {
+        targetId: "complex-raw",
+        source: '(get arg ("tmp_type", "in_func"(no-ctx))[if_len + len])'
+      }
+    ]);
+
+    assert.ok(renderings["complex-raw"]);
+    assert.ok(renderings["complex-raw"].width > 0);
+    assert.ok(renderings["complex-raw"].height > 0);
+  });
+
+  test("typst text fallback strips internal upright wrappers from displayed text", async () => {
+    const renderings = await renderTypstSnippets([
+      {
+        targetId: "upright-fallback",
+        source: 'fib(upright("x1")) = ???'
+      }
+    ]);
+
+    assert.ok(renderings["upright-fallback"]);
+    assert.equal(renderings["upright-fallback"].mode, "text-fallback");
+  });
+
+  test("func typst templates are parsed and rendered for function-table query nodes", () => {
+    const source = fs.readFileSync(FIBONACCI_FUNC_FIXTURE_PATH, "utf8");
+    const offset = source.indexOf("ctx.set_fib(x2, f0 + f1);");
+    assert.notEqual(offset, -1);
+
+    const result = spawnSync(EXTRACTOR_PATH, ["--offset", String(offset)], {
+      cwd: WORKSPACE_ROOT,
+      input: source,
+      encoding: "utf8"
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const ir = JSON.parse(result.stdout) as PatternIr;
+
+    const fibTypst = ir.typst_templates.find((template) => template.variant_name === "fib");
+    assert.ok(fibTypst);
+    assert.equal(fibTypst?.template, "fib({x})");
+    assert.deepEqual(fibTypst?.fields, ["x"]);
+
+    const dot = patternIrToDotWithMode(ir, "pattern", "compact", "dag-expand");
+    assert.match(dot, /"f0" \[label="fib\(x\)"/);
+    assert.match(dot, /"f1" \[label="fib\(x1\)"/);
+
+    const actionDot = patternIrToDotWithMode(ir, "action", "compact", "dag-expand");
+    assert.match(actionDot, /label="fib\(x2\) = f0 \+ f1"/);
+
+    const typstSources = collectTypstReplacementSources(ir, "combined", "compact", "dag-expand");
+    const f1Source = typstSources.find((entry) => entry.targetId === "f1");
+    const actionSource = typstSources.find((entry) => entry.targetId === "effect:effect_0");
+    assert.equal(f1Source?.source, "fib(x1)");
+    assert.equal(actionSource?.source, "fib(x2) = f0 + f1");
+  });
+
+  test("typst sources treat field access chains as math-safe atomic text", async () => {
+    const ir: PatternIr = {
+      scope: {
+        kind: "add_rule_call",
+        text_range: { start: 0, end: 20 },
+        pattern_range: { start: 0, end: 8 },
+        action_range: { start: 9, end: 20 }
+      },
+      nodes: [],
+      edges: [],
+      roots: [],
+      constraints: [],
+      action_effects: [
+        {
+          id: "effect_0",
+          effect_id: "effect@10:20",
+          bound_var: "out",
+          source_text: "ctx.insert_get(tmp_arg, ctx.devalue(pat.arg_arg_get.index))",
+          referenced_pat_vars: [],
+          referenced_action_vars: [],
+          range: { start: 10, end: 20 }
+        }
+      ],
+      seed_facts: [],
+      display_templates: [],
+      typst_templates: [
+        { variant_name: "Get", template: "{base} + {index}", fields: ["base", "index"] }
+      ],
+      precedence_templates: [{ variant_name: "Get", precedence: 90 }],
+      diagnostics: []
+    };
+
+    const typstSources = collectTypstReplacementSources(ir, "action", "compact");
+    assert.deepEqual(typstSources, [{ targetId: "effect:effect_0", source: 'upright("tmp_arg") + upright("arg_arg_get.index")' }]);
+
+    const renderings = await renderTypstSnippets(typstSources);
+    assert.ok(renderings["effect:effect_0"]);
+    assert.equal(renderings["effect:effect_0"].mode, "math");
   });
 
   test("extractor keeps inline assertions and unique ids", () => {
@@ -928,6 +1149,50 @@ fn demo() {
     assert.match(dot, /"effect:effect_1" -> "effect:effect_0"/);
     assert.match(dot, /"effect:effect_2" -> "effect:effect_1"/);
     assert.match(dot, /"effect:effect_2" -> "effect:effect_0"/);
+  });
+
+  test("full action labels suppress ctx.devalue wrappers in insert args", () => {
+    const ir: PatternIr = {
+      scope: {
+        kind: "add_rule_call",
+        text_range: { start: 0, end: 20 },
+        pattern_range: { start: 0, end: 8 },
+        action_range: { start: 9, end: 20 }
+      },
+      nodes: [
+        {
+          id: "arg_get",
+          kind: "query",
+          dsl_type: "Get",
+          label: "arg_get: Get",
+          range: { start: 0, end: 1 },
+          inputs: []
+        }
+      ],
+      edges: [],
+      roots: ["arg_get"],
+      constraints: [],
+      action_effects: [
+        {
+          id: "effect_0",
+          effect_id: "effect@10:12",
+          bound_var: "original_get_index",
+          source_text: "ctx.insert_get(tmp_arg, ctx.devalue(pat.arg_get.index))",
+          referenced_pat_vars: ["arg_get"],
+          referenced_action_vars: [],
+          range: { start: 10, end: 12 }
+        }
+      ],
+      seed_facts: [],
+      display_templates: [],
+      typst_templates: [],
+      precedence_templates: [],
+      diagnostics: []
+    };
+
+    const fullDot = patternIrToDotWithMode(ir, "action", "full");
+    assert.match(fullDot, /Get\(tmp_arg, pat\.arg_get\.index\)/);
+    assert.doesNotMatch(fullDot, /devalue\(/);
   });
 
   test("dot generation supports action-only and pattern-only views", () => {
@@ -1216,6 +1481,68 @@ fn demo() {
     });
   });
 
+  test("small binary handle arithmetic constraints become node annotations", () => {
+    const annotation = inlineConstraintAnnotation({
+      id: "constraint_0",
+      source_text: "x1_constraint",
+      resolved_text: "x1.handle().eq(&(x.handle() + (&1_i64).as_handle()))",
+      referenced_vars: ["x1", "x"],
+      range: { start: 0, end: 10 }
+    });
+    assert.deepEqual(annotation, {
+      nodeId: "x1",
+      fieldName: null,
+      valueText: "x + 1_i64",
+      displayText: "= x + 1_i64",
+      hideInSidebar: true
+    });
+  });
+
+  test("3-var handle arithmetic constraints stay in sidebar", () => {
+    const annotation = inlineConstraintAnnotation({
+      id: "constraint_0",
+      source_text: "x2_constraint",
+      resolved_text: "x2.handle().eq(&(x.handle() + y.handle()))",
+      referenced_vars: ["x2", "x", "y"],
+      range: { start: 0, end: 10 }
+    });
+    assert.equal(annotation, null);
+  });
+
+  test("simple relation field handle-equality joins become node annotations", () => {
+    const annotation = inlineConstraintAnnotation({
+      id: "constraint_0",
+      source_text: "join",
+      resolved_text: "path.handle_dst().eq(&edge.handle_src())",
+      referenced_vars: ["path", "edge"],
+      range: { start: 0, end: 10 }
+    });
+    assert.deepEqual(annotation, {
+      nodeId: "path",
+      fieldName: "dst",
+      valueText: "edge.src",
+      displayText: "dst = edge.src",
+      hideInSidebar: true
+    });
+  });
+
+  test("simple arithmetic handle equality constraints become node annotations", () => {
+    const annotation = inlineConstraintAnnotation({
+      id: "constraint_0",
+      source_text: "x1_constraint",
+      resolved_text: "x1.handle().eq(&(x.handle() + (&1_i64).as_handle()))",
+      referenced_vars: ["x", "x1"],
+      range: { start: 0, end: 10 }
+    });
+    assert.deepEqual(annotation, {
+      nodeId: "x1",
+      fieldName: null,
+      valueText: "x + 1_i64",
+      displayText: "= x + 1_i64",
+      hideInSidebar: true
+    });
+  });
+
   test("dot labels inline simple constant constraints onto nodes", () => {
     const ir: PatternIr = {
       scope: {
@@ -1283,6 +1610,125 @@ fn demo() {
 
     const dot = patternIrToDotWithMode(ir, "pattern", "compact");
     assert.match(dot, /"l" \[label="Const\\n= r"/);
+  });
+
+  test("dot labels inline simple relation handle-join constraints onto left node", () => {
+    const ir: PatternIr = {
+      scope: {
+        kind: "pattern_function",
+        text_range: { start: 0, end: 10 },
+        pattern_range: { start: 0, end: 10 },
+        action_range: null
+      },
+      nodes: [
+        { id: "path", kind: "query", dsl_type: "Path", label: "path: Path", range: { start: 0, end: 1 }, inputs: [] },
+        { id: "edge", kind: "query", dsl_type: "Edge", label: "edge: Edge", range: { start: 2, end: 3 }, inputs: [] }
+      ],
+      edges: [],
+      roots: ["path", "edge"],
+      constraints: [
+        {
+          id: "constraint_0",
+          source_text: "join",
+          resolved_text: "path.handle_dst().eq(&edge.handle_src())",
+          referenced_vars: ["path", "edge"],
+          range: { start: 4, end: 8 }
+        }
+      ],
+      action_effects: [],
+      seed_facts: [],
+      display_templates: [],
+      typst_templates: [],
+      precedence_templates: [],
+      diagnostics: []
+    };
+
+    const dot = patternIrToDotWithMode(ir, "pattern", "compact");
+    assert.match(dot, /"path" \[label="Path\\ndst = edge\.src"/);
+    assert.doesNotMatch(dot, /join/);
+  });
+
+  test("dot labels inline simple arithmetic handle constraints onto nodes", () => {
+    const ir: PatternIr = {
+      scope: {
+        kind: "pattern_function",
+        text_range: { start: 0, end: 10 },
+        pattern_range: { start: 0, end: 10 },
+        action_range: null
+      },
+      nodes: [
+        { id: "x", kind: "query_leaf", dsl_type: "i64", label: "x: i64", range: { start: 0, end: 1 }, inputs: [] },
+        { id: "x1", kind: "query_leaf", dsl_type: "i64", label: "x1: i64", range: { start: 2, end: 3 }, inputs: [] }
+      ],
+      edges: [],
+      roots: ["x", "x1"],
+      constraints: [
+        {
+          id: "constraint_0",
+          source_text: "x1_constraint",
+          resolved_text: "x1.handle().eq(&(x.handle() + (&1_i64).as_handle()))",
+          referenced_vars: ["x", "x1"],
+          range: { start: 4, end: 8 }
+        }
+      ],
+      action_effects: [],
+      seed_facts: [],
+      display_templates: [],
+      typst_templates: [],
+      precedence_templates: [],
+      diagnostics: []
+    };
+
+    const dot = patternIrToDotWithMode(ir, "pattern", "compact");
+    assert.match(dot, /"x1" \[label="i64\\n= x \+ 1_i64"/);
+    assert.doesNotMatch(dot, /x1_constraint/);
+  });
+
+  test("dot labels inline arithmetic constraints onto standalone root nodes", () => {
+    const ir: PatternIr = {
+      scope: {
+        kind: "add_rule_call",
+        text_range: { start: 0, end: 10 },
+        pattern_range: { start: 0, end: 10 },
+        action_range: null
+      },
+      nodes: [
+        { id: "f0", kind: "query", dsl_type: "fib", label: "f0: fib", range: { start: 0, end: 1 }, inputs: ["x"] },
+        { id: "f1", kind: "query", dsl_type: "fib", label: "f1: fib", range: { start: 2, end: 3 }, inputs: ["x1"] }
+      ],
+      edges: [
+        { from: "f0", to: "x", kind: "operand", index: 0 },
+        { from: "f1", to: "x1", kind: "operand", index: 0 }
+      ],
+      roots: ["x", "x1", "x2", "f0", "f1"],
+      constraints: [
+        {
+          id: "constraint_0",
+          source_text: "x1_constraint",
+          resolved_text: "x1.handle().eq(&(x.handle() + (&1_i64).as_handle()))",
+          referenced_vars: ["x", "x1"],
+          range: { start: 4, end: 8 }
+        },
+        {
+          id: "constraint_1",
+          source_text: "x2_constraint",
+          resolved_text: "x2.handle().eq(&(x.handle() + (&2_i64).as_handle()))",
+          referenced_vars: ["x", "x2"],
+          range: { start: 9, end: 13 }
+        }
+      ],
+      action_effects: [],
+      seed_facts: [],
+      display_templates: [],
+      typst_templates: [],
+      precedence_templates: [],
+      diagnostics: []
+    };
+
+    const dot = patternIrToDotWithMode(ir, "pattern", "compact");
+    assert.match(dot, /"x1" \[label="x1\\n= x \+ 1_i64"/);
+    assert.match(dot, /"x2" \[label="x2\\n= x \+ 2_i64"/);
+    assert.doesNotMatch(dot, /x1_constraint|x2_constraint/);
   });
 
   test("typst replacement keeps annotated nodes as overlay candidates", () => {
