@@ -678,6 +678,25 @@ suite("eggplant pattern extension", () => {
     assert.deepEqual(preview.highlightedActionEffectIds, ["effect:effect_0"]);
   });
 
+  test("rule check rewrite replaces redundant insert source in rust code", async () => {
+    const tempFixture = await createTempRustFixture("redundant_action_insert.rs");
+    try {
+      const editor = await openEditor(tempFixture);
+      placeCursor(editor, "MyTx::add_rule(");
+
+      await vscode.commands.executeCommand("eggplant-pattern.preview");
+      let preview = await waitForPreviewState((state) => state.mode === "combined" && state.ruleChecks.length > 0);
+      await dispatchPreviewPanelTestMessage({ type: "applyRuleCheckRewrite", checkId: preview.ruleChecks[0].id });
+
+      preview = await waitForPreviewState((state) => state.mode === "combined" && state.ruleChecks.length === 0);
+      const updated = await fs.promises.readFile(tempFixture, "utf8");
+      assert.match(updated, /let duplicate = pat\.p;/);
+      assert.equal(updated.includes("ctx.insert_add(pat.l, pat.r)"), false);
+    } finally {
+      await fs.promises.rm(path.dirname(tempFixture), { recursive: true, force: true });
+    }
+  });
+
   test("node constraints popover omits constraints already inlined into node annotations", async () => {
     const editor = await openEditor(FIB_FUNC_FIXTURE);
     placeCursor(editor, "MyTx::add_rule(");
@@ -813,6 +832,14 @@ async function activateExtension(): Promise<void> {
 async function openEditor(filePath: string): Promise<vscode.TextEditor> {
   const document = await vscode.workspace.openTextDocument(filePath);
   return vscode.window.showTextDocument(document);
+}
+
+async function createTempRustFixture(fixtureName: string): Promise<string> {
+  const tempDir = await fs.promises.mkdtemp(path.join(FIXTURE_DIR, "tmp-"));
+  const sourcePath = path.join(FIXTURE_DIR, fixtureName);
+  const targetPath = path.join(tempDir, fixtureName);
+  await fs.promises.copyFile(sourcePath, targetPath);
+  return targetPath;
 }
 
 function placeCursor(editor: vscode.TextEditor, needle: string): void {

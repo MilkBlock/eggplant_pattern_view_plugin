@@ -9,6 +9,18 @@ export interface RuleCheckEntry {
   duplicatePatternNodeIds: string[];
   duplicateActionEffectIds: string[];
   sourceRange: TextSpan | null;
+  rewriteReplacement: string | null;
+  rewriteLabel: string | null;
+}
+
+export interface RuleCheckTextEdit {
+  range: TextSpan;
+  text: string;
+}
+
+export interface RuleCheckRewritePlan {
+  edits: RuleCheckTextEdit[];
+  summary: string;
 }
 
 function toVariantTypeName(insertTarget: string): string {
@@ -124,9 +136,98 @@ export function findRedundantActionInsertChecks(ir: PatternIr): RuleCheckEntry[]
       suggestion: `Reuse matched pattern sub-DAG ${suggestionTarget} instead of reinserting ${parsed.variantName} in the action.`,
       duplicatePatternNodeIds: matchedNodeIds,
       duplicateActionEffectIds: [`effect:${effect.id}`],
-      sourceRange: effect.range ?? null
+      sourceRange: effect.range ?? null,
+      rewriteReplacement: `pat.${suggestionTarget}`,
+      rewriteLabel: `Rewrite to pat.${suggestionTarget}`
     });
   }
 
   return checks;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function replaceIdentifierUses(
+  sourceText: string,
+  range: TextSpan,
+  identifier: string,
+  replacement: string
+): RuleCheckTextEdit[] {
+  const edits: RuleCheckTextEdit[] = [];
+  const snippet = sourceText.slice(range.start, range.end);
+  const pattern = new RegExp(`\\b${escapeRegExp(identifier)}\\b`, "g");
+  for (const match of snippet.matchAll(pattern)) {
+    if (typeof match.index !== "number") {
+      continue;
+    }
+    edits.push({
+      range: {
+        start: range.start + match.index,
+        end: range.start + match.index + match[0].length
+      },
+      text: replacement
+    });
+  }
+  return edits;
+}
+
+function findSingleLineLetBindingRange(sourceText: string, effectRange: TextSpan, boundVar: string): TextSpan | null {
+  const lineStart = sourceText.lastIndexOf("\n", Math.max(effectRange.start - 1, 0)) + 1;
+  const nextNewline = sourceText.indexOf("\n", effectRange.end);
+  const lineEnd = nextNewline === -1 ? sourceText.length : nextNewline + 1;
+  const lineText = sourceText.slice(lineStart, lineEnd);
+  if (!new RegExp(`^\\s*let\\s+${escapeRegExp(boundVar)}\\s*=`, "m").test(lineText)) {
+    return null;
+  }
+  if (!lineText.includes(";")) {
+    return null;
+  }
+  return { start: lineStart, end: lineEnd };
+}
+
+export function buildRuleCheckRewritePlan(
+  ir: PatternIr,
+  check: RuleCheckEntry,
+  sourceText: string
+): RuleCheckRewritePlan | null {
+  const replacement = check.rewriteReplacement;
+  const matchedNodeId = check.duplicatePatternNodeIds[0];
+  const targetEffectId = check.duplicateActionEffectIds[0]?.replace(/^effect:/, "");
+  if (!replacement || !matchedNodeId || !targetEffectId) {
+    return null;
+  }
+
+  const targetEffect = ir.action_effects.find((effect) => effect.id === targetEffectId);
+  if (!targetEffect) {
+    return null;
+  }
+
+  if (targetEffect.bound_var) {
+    const bindingRange = findSingleLineLetBindingRange(sourceText, targetEffect.range, targetEffect.bound_var);
+    if (!bindingRange) {
+      return null;
+    }
+    const edits: RuleCheckTextEdit[] = [];
+    for (const effect of ir.action_effects) {
+      if (!effect.referenced_action_vars.includes(targetEffect.bound_var)) {
+        continue;
+      }
+      edits.push(...replaceIdentifierUses(sourceText, effect.range, targetEffect.bound_var, replacement));
+    }
+    if (edits.length === 0) {
+      return null;
+    }
+    edits.push({ range: bindingRange, text: "" });
+    return {
+      edits,
+      summary: `Removed redundant insert binding ${targetEffect.bound_var} and rewired its uses to ${replacement}.`
+    };
+  }
+
+  return {
+    edits: [{ range: targetEffect.range, text: replacement }],
+    summary: `Replaced redundant inline insert with ${replacement}.`
+  };
 }

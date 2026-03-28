@@ -16,7 +16,7 @@ import {
   PreviewSourceMode,
   RecoveryUiMode
 } from "./previewPanel";
-import { findRedundantActionInsertChecks } from "./ruleChecks";
+import { buildRuleCheckRewritePlan, findRedundantActionInsertChecks } from "./ruleChecks";
 import { dotToSvg } from "./svg";
 import { renderTypstSnippets } from "./typst";
 
@@ -151,6 +151,7 @@ class PreviewController {
     onTemporaryFullPreviewChange: (active: boolean) => Promise<void>;
     onToggleRuleChecks: () => Promise<void>;
     onSelectRuleCheck: (checkId: string) => Promise<void>;
+    onApplyRuleCheckRewrite: (checkId: string) => Promise<void>;
     onRefresh: () => Promise<void>;
   };
 
@@ -256,6 +257,9 @@ class PreviewController {
       },
       onSelectRuleCheck: async (checkId: string) => {
         await this.selectRuleCheck(checkId);
+      },
+      onApplyRuleCheckRewrite: async (checkId: string) => {
+        await this.applyRuleCheckRewrite(checkId);
       },
       onRefresh: async () => {
         const editor = this.lastPreview?.editor ?? vscode.window.activeTextEditor;
@@ -747,6 +751,46 @@ class PreviewController {
       this.currentRecursiveStrategy,
       true
     );
+  }
+
+  private async applyRuleCheckRewrite(checkId: string): Promise<void> {
+    const preview = this.lastPreview;
+    if (!preview) {
+      return;
+    }
+
+    const check = findRedundantActionInsertChecks(preview.ir).find((entry) => entry.id === checkId);
+    if (!check) {
+      void vscode.window.showWarningMessage("This redundant rule check is no longer available.");
+      return;
+    }
+
+    const document = preview.editor.document;
+    const plan = buildRuleCheckRewritePlan(preview.ir, check, document.getText());
+    if (!plan) {
+      void vscode.window.showWarningMessage("This redundant rule check cannot be rewritten automatically yet.");
+      return;
+    }
+
+    const edit = new vscode.WorkspaceEdit();
+    const orderedEdits = [...plan.edits].sort((left, right) => right.range.start - left.range.start);
+    for (const textEdit of orderedEdits) {
+      edit.replace(
+        document.uri,
+        new vscode.Range(document.positionAt(textEdit.range.start), document.positionAt(textEdit.range.end)),
+        textEdit.text
+      );
+    }
+
+    const applied = await vscode.workspace.applyEdit(edit);
+    if (!applied) {
+      void vscode.window.showWarningMessage("Failed to apply redundant rule rewrite.");
+      return;
+    }
+
+    this.activeRuleCheckId = null;
+    void vscode.window.setStatusBarMessage(`Eggplant Pattern: ${plan.summary}`, 2500);
+    await this.requestPreview(preview.editor, true, true);
   }
 
   private async setConstraintFilterMode(mode: PreviewConstraintFilterMode): Promise<void> {

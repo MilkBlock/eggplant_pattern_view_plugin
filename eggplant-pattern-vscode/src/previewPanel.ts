@@ -113,6 +113,7 @@ interface PreviewPanelCallbacks {
   onTemporaryFullPreviewChange(active: boolean): Promise<void>;
   onToggleRuleChecks(): Promise<void>;
   onSelectRuleCheck(checkId: string): Promise<void>;
+  onApplyRuleCheckRewrite(checkId: string): Promise<void>;
   onRefresh(): Promise<void>;
 }
 
@@ -139,6 +140,7 @@ type IncomingMessage =
   | { type: "setTemporaryFullPreview"; active: boolean }
   | { type: "toggleRuleChecks" }
   | { type: "selectRuleCheck"; checkId: string }
+  | { type: "applyRuleCheckRewrite"; checkId: string }
   | { type: "refresh" };
 
 let currentPanel: PreviewPanel | undefined;
@@ -316,6 +318,9 @@ export class PreviewPanel implements vscode.Disposable {
         return;
       case "selectRuleCheck":
         await this.callbacks.onSelectRuleCheck(message.checkId);
+        return;
+      case "applyRuleCheckRewrite":
+        await this.callbacks.onApplyRuleCheckRewrite(message.checkId);
         return;
       case "refresh":
         await this.callbacks.onRefresh();
@@ -654,6 +659,14 @@ export class PreviewPanel implements vscode.Disposable {
         margin-top: 4px;
         color: var(--muted);
       }
+      .check-actions {
+        display: flex;
+        gap: 8px;
+        margin-top: 8px;
+      }
+      .check-actions button {
+        padding: 4px 8px;
+      }
       .check-empty {
         margin: 0;
         font-size: 12px;
@@ -793,13 +806,6 @@ export class PreviewPanel implements vscode.Disposable {
           <option value="sample">sample</option>
           <option value="hybrid">hybrid</option>
         </select>
-        <button id="selectTraceFile" type="button">Select Trace</button>
-        <button id="clearTraceFile" type="button">Clear Trace</button>
-        <button id="metadataSources" type="button">Meta Sources</button>
-        <button id="showCurrentMetadataSources" type="button">Show Current Meta Sources</button>
-        <button id="clearMetadataSources" type="button">Clear Sources</button>
-        <button id="toggleRuleChecks" type="button">Check</button>
-        <button id="refresh" type="button">Refresh</button>
       </div>
       <div class="meta" id="meta">No preview yet.</div>
       <div class="metadata-viewer" id="metadataViewer" hidden>
@@ -871,13 +877,6 @@ export class PreviewPanel implements vscode.Disposable {
       const sourceMode = document.getElementById("sourceMode");
       const recursiveStrategy = document.getElementById("recursiveStrategy");
       const recoveryMode = document.getElementById("recoveryMode");
-      const selectTraceFile = document.getElementById("selectTraceFile");
-      const clearTraceFile = document.getElementById("clearTraceFile");
-      const refresh = document.getElementById("refresh");
-      const metadataSources = document.getElementById("metadataSources");
-      const showCurrentMetadataSources = document.getElementById("showCurrentMetadataSources");
-      const clearMetadataSources = document.getElementById("clearMetadataSources");
-      const toggleRuleChecks = document.getElementById("toggleRuleChecks");
       const checkPanel = document.getElementById("checkPanel");
       const checkSummary = document.getElementById("checkSummary");
       const checkList = document.getElementById("checkList");
@@ -904,6 +903,9 @@ export class PreviewPanel implements vscode.Disposable {
       const sourceClickDelayMs = 400;
       let lastRenderedSvgMarkup = "";
       let currentDot = "";
+      let currentTracePath = "";
+      let currentManualMetadataSourceCount = 0;
+      let currentRuleChecksVisible = false;
       const typstSourcesByTargetId = new Map();
       const typstStatusByTargetId = new Map();
       const constraintsByNodeId = new Map();
@@ -920,6 +922,34 @@ export class PreviewPanel implements vscode.Disposable {
       typstStatusButton.type = "button";
       typstStatusButton.disabled = true;
       graphContextMenu.appendChild(typstStatusButton);
+      const menuSelectTraceFileButton = document.createElement("button");
+      menuSelectTraceFileButton.type = "button";
+      menuSelectTraceFileButton.textContent = "Select Trace";
+      graphContextMenu.appendChild(menuSelectTraceFileButton);
+      const menuClearTraceFileButton = document.createElement("button");
+      menuClearTraceFileButton.type = "button";
+      menuClearTraceFileButton.textContent = "Clear Trace";
+      graphContextMenu.appendChild(menuClearTraceFileButton);
+      const menuMetadataSourcesButton = document.createElement("button");
+      menuMetadataSourcesButton.type = "button";
+      menuMetadataSourcesButton.textContent = "Meta Sources";
+      graphContextMenu.appendChild(menuMetadataSourcesButton);
+      const menuShowCurrentMetadataSourcesButton = document.createElement("button");
+      menuShowCurrentMetadataSourcesButton.type = "button";
+      menuShowCurrentMetadataSourcesButton.textContent = "Show Current Meta Sources";
+      graphContextMenu.appendChild(menuShowCurrentMetadataSourcesButton);
+      const menuClearMetadataSourcesButton = document.createElement("button");
+      menuClearMetadataSourcesButton.type = "button";
+      menuClearMetadataSourcesButton.textContent = "Clear Sources";
+      graphContextMenu.appendChild(menuClearMetadataSourcesButton);
+      const menuToggleRuleChecksButton = document.createElement("button");
+      menuToggleRuleChecksButton.type = "button";
+      menuToggleRuleChecksButton.textContent = "Check";
+      graphContextMenu.appendChild(menuToggleRuleChecksButton);
+      const menuRefreshButton = document.createElement("button");
+      menuRefreshButton.type = "button";
+      menuRefreshButton.textContent = "Refresh";
+      graphContextMenu.appendChild(menuRefreshButton);
       const copyDotButton = document.createElement("button");
       copyDotButton.type = "button";
       copyDotButton.textContent = "Copy DOT";
@@ -975,7 +1005,21 @@ export class PreviewPanel implements vscode.Disposable {
       const setMetadataViewerVisible = (visible) => {
         metadataViewerVisible = visible;
         metadataViewer.hidden = !visible;
-        showCurrentMetadataSources.textContent = visible ? "Hide Current Meta Sources" : "Show Current Meta Sources";
+        syncSharedActionState();
+      };
+
+      const syncSharedActionState = () => {
+        const showCurrentMetadataSourcesLabel = metadataViewerVisible
+          ? "Hide Current Meta Sources"
+          : "Show Current Meta Sources";
+        const toggleRuleChecksLabel = currentRuleChecksVisible ? "Hide Check" : "Check";
+        const canClearTrace = currentTracePath.length > 0;
+        const canClearMetadataSources = currentManualMetadataSourceCount > 0;
+
+        menuShowCurrentMetadataSourcesButton.textContent = showCurrentMetadataSourcesLabel;
+        menuToggleRuleChecksButton.textContent = toggleRuleChecksLabel;
+        menuClearTraceFileButton.disabled = !canClearTrace;
+        menuClearMetadataSourcesButton.disabled = !canClearMetadataSources;
       };
 
       const renderMetadataList = (element, items) => {
@@ -1479,8 +1523,9 @@ export class PreviewPanel implements vscode.Disposable {
       };
 
       const renderRuleChecks = (checks, visible, activeRuleCheckId) => {
+        currentRuleChecksVisible = visible;
         checkPanel.hidden = !visible;
-        toggleRuleChecks.textContent = visible ? "Hide Check" : "Check";
+        syncSharedActionState();
         checkList.innerHTML = "";
 
         if (!visible) {
@@ -1515,9 +1560,24 @@ export class PreviewPanel implements vscode.Disposable {
           const suggestion = document.createElement("p");
           suggestion.className = "check-suggestion";
           suggestion.textContent = check.suggestion;
+          const actions = document.createElement("div");
+          actions.className = "check-actions";
+          if (check.rewriteReplacement && check.sourceRange) {
+            const rewriteButton = document.createElement("button");
+            rewriteButton.type = "button";
+            rewriteButton.textContent = check.rewriteLabel || "Rewrite";
+            rewriteButton.addEventListener("click", (event) => {
+              event.stopPropagation();
+              vscode.postMessage({ type: "applyRuleCheckRewrite", checkId: check.id });
+            });
+            actions.appendChild(rewriteButton);
+          }
           item.appendChild(kind);
           item.appendChild(message);
           item.appendChild(suggestion);
+          if (actions.childElementCount > 0) {
+            item.appendChild(actions);
+          }
           item.addEventListener("click", () => {
             vscode.postMessage({ type: "selectRuleCheck", checkId: check.id });
           });
@@ -1706,32 +1766,52 @@ export class PreviewPanel implements vscode.Disposable {
         vscode.postMessage({ type: "changeRecoveryMode", recoveryMode: recoveryMode.value });
       });
 
-      selectTraceFile.addEventListener("click", () => {
+      menuSelectTraceFileButton.addEventListener("click", (event) => {
+        event.stopPropagation();
         vscode.postMessage({ type: "selectTraceFile" });
+        hideGraphContextMenu();
       });
 
-      clearTraceFile.addEventListener("click", () => {
+      menuClearTraceFileButton.addEventListener("click", (event) => {
+        event.stopPropagation();
+        if (!currentTracePath) {
+          return;
+        }
         vscode.postMessage({ type: "clearTraceFile" });
+        hideGraphContextMenu();
       });
 
-      refresh.addEventListener("click", () => {
-        vscode.postMessage({ type: "refresh" });
-      });
-
-      metadataSources.addEventListener("click", () => {
+      menuMetadataSourcesButton.addEventListener("click", (event) => {
+        event.stopPropagation();
         vscode.postMessage({ type: "selectMetadataSources" });
+        hideGraphContextMenu();
       });
 
-      showCurrentMetadataSources.addEventListener("click", () => {
+      menuShowCurrentMetadataSourcesButton.addEventListener("click", (event) => {
+        event.stopPropagation();
         setMetadataViewerVisible(!metadataViewerVisible);
+        hideGraphContextMenu();
       });
 
-      clearMetadataSources.addEventListener("click", () => {
+      menuClearMetadataSourcesButton.addEventListener("click", (event) => {
+        event.stopPropagation();
+        if (currentManualMetadataSourceCount === 0) {
+          return;
+        }
         vscode.postMessage({ type: "clearMetadataSources" });
+        hideGraphContextMenu();
       });
 
-      toggleRuleChecks.addEventListener("click", () => {
+      menuToggleRuleChecksButton.addEventListener("click", (event) => {
+        event.stopPropagation();
         vscode.postMessage({ type: "toggleRuleChecks" });
+        hideGraphContextMenu();
+      });
+
+      menuRefreshButton.addEventListener("click", (event) => {
+        event.stopPropagation();
+        vscode.postMessage({ type: "refresh" });
+        hideGraphContextMenu();
       });
 
       graph.addEventListener("contextmenu", (event) => {
@@ -1740,10 +1820,6 @@ export class PreviewPanel implements vscode.Disposable {
         const typstSource = targetId ? (typstSourcesByTargetId.get(targetId) || "") : "";
         const typstStatus = targetId ? (typstStatusByTargetId.get(targetId) || "Typst: no source") : "";
         const nodeConstraints = targetId ? (constraintsByNodeId.get(targetId) || []) : [];
-        if (!isGraphBackgroundEvent(event) && !typstStatus) {
-          hideGraphContextMenu();
-          return;
-        }
         event.preventDefault();
         event.stopPropagation();
         showGraphContextMenu(event.clientX, event.clientY, targetId, typstSource, typstStatus, nodeConstraints);
@@ -1923,6 +1999,9 @@ export class PreviewPanel implements vscode.Disposable {
             kind: entry.kinds.join("+")
           }))
         );
+        currentTracePath = payload.tracePath || "";
+        currentManualMetadataSourceCount = (metadataSourcesView.manual || []).length;
+        syncSharedActionState();
         const sourceSummary = payload.metadataSourceFiles.length > 0
           ? " | meta sources: " + payload.metadataSourceFiles.length
           : "";
@@ -1978,6 +2057,7 @@ export class PreviewPanel implements vscode.Disposable {
 
       syncRecursiveStrategyState();
       setMetadataViewerVisible(false);
+      syncSharedActionState();
     </script>
   </body>
 </html>`;
@@ -2034,6 +2114,7 @@ export async function dispatchPreviewPanelTestMessage(
     | { type: "setTemporaryFullPreview"; active: boolean }
     | { type: "toggleRuleChecks" }
     | { type: "selectRuleCheck"; checkId: string }
+    | { type: "applyRuleCheckRewrite"; checkId: string }
     | { type: "refresh" }
 ): Promise<void> {
   await currentPanel?.dispatchTestMessage(message);
