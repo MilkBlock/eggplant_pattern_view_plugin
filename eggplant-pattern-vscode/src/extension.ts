@@ -788,6 +788,7 @@ class PreviewController {
       return;
     }
 
+    await document.save();
     this.activeRuleCheckId = null;
     void vscode.window.setStatusBarMessage(`Eggplant Pattern: ${plan.summary}`, 2500);
     await this.requestPreview(preview.editor, true, true);

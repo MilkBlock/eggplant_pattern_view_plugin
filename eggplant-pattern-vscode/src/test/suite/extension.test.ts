@@ -690,8 +690,9 @@ suite("eggplant pattern extension", () => {
 
       preview = await waitForPreviewState((state) => state.mode === "combined" && state.ruleChecks.length === 0);
       const updated = await fs.promises.readFile(tempFixture, "utf8");
-      assert.match(updated, /let duplicate = pat\.p;/);
+      assert.equal(updated.includes("let duplicate ="), false);
       assert.equal(updated.includes("ctx.insert_add(pat.l, pat.r)"), false);
+      assert.match(updated, /ctx\.union\(pat\.p, pat\.p\);/);
     } finally {
       await fs.promises.rm(path.dirname(tempFixture), { recursive: true, force: true });
     }
