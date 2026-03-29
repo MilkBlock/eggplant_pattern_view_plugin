@@ -8,19 +8,22 @@ import { configureExtractorResolution, ExtractorError, runExtractor } from "./ex
 import { PatternIr } from "./ir";
 import { clearMetadataSourceCache, discoverWorkspaceMetadataSourceFiles, loadMetadataSources, mergeExternalMetadata, pickMetadataSourceFiles } from "./metadataSources";
 import {
-  buildConstraintCountByNodeId,
   buildConstraintEntries,
+  buildMetadataSourcesView,
+  buildPreviewPanelState,
+  createDefaultPreviewInteractionState,
+  collectSourceTargetIds,
   drilldownConstraintNode as applyConstraintNodeDrilldown,
   filterConstraintEntries,
+  formatPreviewTitle,
   PreviewConstraintEntry,
   PreviewConstraintFilterMode,
   PreviewInteractionState,
-  PreviewMetadataSourceEntry,
-  PreviewMetadataSourceKind,
+  PreviewInteractionProjection,
   PreviewMetadataSourcesView,
   PreviewSourceMode,
+  projectPreviewInteractionState,
   RecoveryUiMode,
-  reconcilePreviewInteractionState,
   selectConstraint as applyConstraintSelection,
   selectRuleCheck as applyRuleCheckSelection,
   setConstraintFilterMode as applyConstraintFilterMode,
@@ -134,11 +137,7 @@ class PreviewController {
   private currentRecursiveStrategy: RecursiveStrategy;
   private metadataSourceFiles: string[];
   private autoMetadataSourceFiles: string[] = [];
-  private activeConstraintId: string | null = null;
-  private constraintFilterMode: PreviewConstraintFilterMode = "all";
-  private constraintFilterNodeId: string | null = null;
-  private ruleCheckViewVisible = false;
-  private activeRuleCheckId: string | null = null;
+  private interactionState: PreviewInteractionState = createDefaultPreviewInteractionState();
   private metadataWatchers: vscode.Disposable[] = [];
   private metadataRefreshTimer: NodeJS.Timeout | undefined;
   private typstOverridesByTargetId: Record<string, string> = {};
@@ -332,9 +331,7 @@ class PreviewController {
 
   async showCurrentMode(mode: DotViewMode): Promise<void> {
     this.currentModeOverride = mode;
-    this.activeConstraintId = null;
-    this.constraintFilterMode = "all";
-    this.constraintFilterNodeId = null;
+    this.resetConstraintSelection();
     if (this.lastPreview) {
       await this.renderLastPreview(
         this.lastPreview.editor,
@@ -371,9 +368,7 @@ class PreviewController {
   async showCurrentLabelStyle(labelStyle: DotLabelStyle): Promise<void> {
     this.currentLabelStyle = labelStyle;
     this.temporaryFullLabelPreview = false;
-    this.activeConstraintId = null;
-    this.constraintFilterMode = "all";
-    this.constraintFilterNodeId = null;
+    this.resetConstraintSelection();
     await vscode.workspace.getConfiguration().update(
       "eggplantPattern.defaultLabelStyle",
       labelStyle,
@@ -387,9 +382,7 @@ class PreviewController {
 
   async showCurrentSourceMode(sourceMode: PreviewSourceMode): Promise<void> {
     this.currentSourceMode = sourceMode;
-    this.activeConstraintId = null;
-    this.constraintFilterMode = "all";
-    this.constraintFilterNodeId = null;
+    this.resetConstraintSelection();
     if (this.lastPreview) {
       await this.renderLastPreview(
         this.lastPreview.editor,
@@ -404,9 +397,7 @@ class PreviewController {
 
   async showCurrentRecursiveStrategy(strategy: RecursiveStrategy): Promise<void> {
     this.currentRecursiveStrategy = strategy;
-    this.activeConstraintId = null;
-    this.constraintFilterMode = "all";
-    this.constraintFilterNodeId = null;
+    this.resetConstraintSelection();
     await vscode.workspace.getConfiguration().update(
       "eggplantPattern.defaultRecursiveStrategy",
       strategy,
@@ -617,21 +608,20 @@ class PreviewController {
   }
 
   private previewInteractionState(): PreviewInteractionState {
-    return {
-      ruleCheckViewVisible: this.ruleCheckViewVisible,
-      activeRuleCheckId: this.activeRuleCheckId,
-      constraintFilterMode: this.constraintFilterMode,
-      constraintFilterNodeId: this.constraintFilterNodeId,
-      activeConstraintId: this.activeConstraintId
-    };
+    return this.interactionState;
   }
 
   private applyPreviewInteractionState(state: PreviewInteractionState): void {
-    this.ruleCheckViewVisible = state.ruleCheckViewVisible;
-    this.activeRuleCheckId = state.activeRuleCheckId;
-    this.constraintFilterMode = state.constraintFilterMode;
-    this.constraintFilterNodeId = state.constraintFilterNodeId;
-    this.activeConstraintId = state.activeConstraintId;
+    this.interactionState = { ...state };
+  }
+
+  private resetConstraintSelection(): void {
+    this.applyPreviewInteractionState({
+      ...this.previewInteractionState(),
+      activeConstraintId: null,
+      constraintFilterMode: "all",
+      constraintFilterNodeId: null
+    });
   }
 
   private async setTemporaryFullPreview(active: boolean): Promise<void> {
@@ -668,9 +658,12 @@ class PreviewController {
     const allConstraintEntries = buildConstraintEntries(baseIr, { includeInlineHidden: true });
     const constraintEntries = buildConstraintEntries(baseIr);
     const ruleChecks = findRedundantActionInsertChecks(baseIr);
-    this.applyPreviewInteractionState(
-      reconcilePreviewInteractionState(this.previewInteractionState(), ruleChecks, constraintEntries)
+    const interactionProjection = projectPreviewInteractionState(
+      this.previewInteractionState(),
+      ruleChecks,
+      constraintEntries
     );
+    this.applyPreviewInteractionState(interactionProjection.state);
     const metadataSourcesView = buildMetadataSourcesView(
       editor.document.fileName,
       this.autoMetadataSourceFiles,
@@ -707,11 +700,7 @@ class PreviewController {
       allConstraintEntries,
       constraintEntries,
       ruleChecks,
-      this.ruleCheckViewVisible,
-      this.activeRuleCheckId,
-      this.constraintFilterMode,
-      this.constraintFilterNodeId,
-      this.activeConstraintId,
+      interactionProjection,
       previewInput.recoveryMetadata,
       previewInput.notice,
       this.typstOverridesByTargetId
@@ -803,13 +792,16 @@ class PreviewController {
     }
 
     await document.save();
-    this.activeRuleCheckId = null;
+    this.applyPreviewInteractionState({
+      ...this.previewInteractionState(),
+      activeRuleCheckId: null
+    });
     void vscode.window.setStatusBarMessage(`Eggplant Pattern: ${plan.summary}`, 2500);
     await this.requestPreview(preview.editor, true, true);
   }
 
   private async setConstraintFilterMode(mode: PreviewConstraintFilterMode): Promise<void> {
-    if (mode === this.constraintFilterMode) {
+    if (mode === this.previewInteractionState().constraintFilterMode) {
       return;
     }
     this.applyPreviewInteractionState(
@@ -1143,15 +1135,12 @@ async function renderDot(
   allConstraints: PreviewConstraintEntry[],
   constraints: PreviewConstraintEntry[],
   ruleChecks: ReturnType<typeof findRedundantActionInsertChecks>,
-  ruleCheckViewVisible: boolean,
-  activeRuleCheckId: string | null,
-  constraintFilterMode: PreviewConstraintFilterMode,
-  constraintFilterNodeId: string | null,
-  activeConstraintId: string | null,
+  interactionProjection: PreviewInteractionProjection,
   recoveryMetadata: ReturnType<typeof summarizeRuntimeActionSampleTrace> | null,
   notice: string | null,
   typstOverridesByTargetId: Record<string, string>
 ): Promise<void> {
+  const sourceTargetIds = collectSourceTargetIds(ir, mode);
   const typstSources = Object.fromEntries(
     collectTypstReplacementSources(ir, mode, effectiveLabelStyle, recursiveStrategy)
       .map((entry) => [entry.targetId, entry.source] as const)
@@ -1173,7 +1162,7 @@ async function renderDot(
       return [targetId, rendering.mode === "math" ? "Typst: rendered" : "Typst: fallback text"];
     })
   );
-  for (const targetId of collectSourceTargetIds(ir, mode)) {
+  for (const targetId of sourceTargetIds) {
     if (!(targetId in typstStatusByTargetId)) {
       typstStatusByTargetId[targetId] = "Typst: no source";
     }
@@ -1183,59 +1172,35 @@ async function renderDot(
     editor.document.fileName
   );
   const svg = await dotToSvg(dot);
-  const strategySuffix = effectiveLabelStyle === "recursive" ? `, ${recursiveStrategy}` : "";
-  const visibleConstraints = filterConstraintEntries(constraints, constraintFilterMode, constraintFilterNodeId);
-  const activeConstraint = visibleConstraints.find((constraint) => constraint.id === activeConstraintId) ?? null;
-  const activeRuleCheck = ruleChecks.find((check) => check.id === activeRuleCheckId) ?? null;
-  const highlightedPatternNodeIds = new Set<string>();
-  const highlightedActionEffectIds = new Set<string>();
-  const checksToHighlight = ruleCheckViewVisible
-    ? (activeRuleCheck ? [activeRuleCheck] : ruleChecks)
-    : [];
-  for (const check of checksToHighlight) {
-    for (const nodeId of check.duplicatePatternNodeIds) {
-      highlightedPatternNodeIds.add(nodeId);
-    }
-    for (const effectId of check.duplicateActionEffectIds) {
-      highlightedActionEffectIds.add(effectId);
-    }
-  }
-  await panel.render({
-    title: `Eggplant Pattern (${modeLabel(mode)}, ${sourceMode}, ${effectiveLabelStyle}${strategySuffix}): ${editor.document.fileName.split("/").pop() ?? "Preview"}`,
-    mode,
-    sourceMode,
-    recoveryMode: configuredRecoveryUiMode(),
-    tracePath: configuredActionSampleTracePath(),
-    labelStyle: selectedLabelStyle,
-    effectiveLabelStyle,
-    recursiveStrategy,
-    fileName: editor.document.fileName.split("/").pop() ?? "Preview",
-    dot,
-    svg,
-    typstRenderings,
-    typstSources,
-    typstStatusByTargetId,
-    sourceTargetIds: collectSourceTargetIds(ir, mode),
-    allConstraints,
-    constraints: visibleConstraints,
-    ruleChecks,
-    ruleCheckViewVisible,
-    activeRuleCheckId: activeRuleCheck?.id ?? null,
-    highlightedPatternNodeIds: Array.from(highlightedPatternNodeIds),
-    highlightedActionEffectIds: Array.from(highlightedActionEffectIds),
-    constraintCountByNodeId: buildConstraintCountByNodeId(constraints),
-    constraintFilterMode,
-    constraintFilterNodeId,
-    activeConstraintId: activeConstraint?.id ?? null,
-    activeConstraintNodeIds: activeConstraint?.referencedNodeIds ?? [],
-    metadataSourceFiles,
-    metadataSourcesView,
-    recoverySummary: recoveryMetadata?.summary ?? null,
-    recoveryDiagnostics: recoveryMetadata?.diagnostics.map((entry) => entry.message) ?? [],
-    sourceWarning: null,
-    showSwitchToAst: false,
-    notice
-  });
+  await panel.render(
+    buildPreviewPanelState({
+      mode,
+      sourceMode,
+      selectedLabelStyle,
+      effectiveLabelStyle,
+      recursiveStrategy,
+      fileName: editor.document.fileName.split("/").pop() ?? "Preview",
+      dot,
+      svg,
+      typstRenderings,
+      typstSources,
+      typstStatusByTargetId,
+      sourceTargetIds,
+      allConstraints,
+      constraints,
+      ruleChecks,
+      interactionState: interactionProjection.state,
+      metadataSourceFiles,
+      metadataSourcesView,
+      recoveryMode: configuredRecoveryUiMode(),
+      tracePath: configuredActionSampleTracePath(),
+      recoverySummary: recoveryMetadata?.summary ?? null,
+      recoveryDiagnostics: recoveryMetadata?.diagnostics.map((entry) => entry.message) ?? [],
+      sourceWarning: null,
+      showSwitchToAst: false,
+      notice
+    })
+  );
 }
 
 async function renderNotice(panel: PreviewPanel, editor: vscode.TextEditor, message: string): Promise<void> {
@@ -1249,7 +1214,13 @@ async function renderNotice(panel: PreviewPanel, editor: vscode.TextEditor, mess
   ].join("\n"), editor.document.fileName);
   const svg = await dotToSvg(dot);
   await panel.render({
-    title: `Eggplant Pattern (${modeLabel("combined")}, ${labelStyle}): ${editor.document.fileName.split("/").pop() ?? "Preview"}`,
+    title: formatPreviewTitle(
+      "combined",
+      "ast",
+      labelStyle,
+      configuredDefaultRecursiveStrategy(),
+      editor.document.fileName.split("/").pop() ?? "Preview"
+    ),
     mode: "combined",
     sourceMode: "ast",
     recoveryMode: configuredRecoveryUiMode(),
@@ -1314,7 +1285,13 @@ async function renderTraceUnavailableNotice(
   ].join("\n"), editor.document.fileName);
   const svg = await dotToSvg(dot);
   await panel.render({
-    title: `Eggplant Pattern (${modeLabel(mode)}, ${sourceMode}, ${effectiveLabelStyle}${effectiveLabelStyle === "recursive" ? `, ${recursiveStrategy}` : ""}): ${editor.document.fileName.split("/").pop() ?? "Preview"}`,
+    title: formatPreviewTitle(
+      mode,
+      sourceMode,
+      effectiveLabelStyle,
+      recursiveStrategy,
+      editor.document.fileName.split("/").pop() ?? "Preview"
+    ),
     mode,
     sourceMode,
     recoveryMode: configuredRecoveryUiMode(),
@@ -1361,17 +1338,6 @@ async function tryRenderNotice(panel: PreviewPanel, editor: vscode.TextEditor, m
   }
 }
 
-function modeLabel(mode: DotViewMode): string {
-  switch (mode) {
-    case "pattern":
-      return "pattern.dot";
-    case "action":
-      return "action.dot";
-    case "combined":
-      return "action + pattern.dot";
-  }
-}
-
 function formatPreviewError(error: unknown): string {
   if (error instanceof ExtractorError) {
     return error.message;
@@ -1389,24 +1355,6 @@ interface PreviewRequest {
 interface LastPreview {
   editor: vscode.TextEditor;
   ir: PatternIr;
-}
-
-function collectSourceTargetIds(ir: PatternIr, mode: DotViewMode): string[] {
-  const targetIds: string[] = [];
-  if (mode === "pattern" || mode === "combined") {
-    for (const node of ir.nodes) {
-      targetIds.push(node.id);
-    }
-  }
-  if (mode === "action" || mode === "combined") {
-    for (const effect of ir.action_effects) {
-      targetIds.push(`effect:${effect.id}`);
-    }
-    for (const fact of ir.seed_facts) {
-      targetIds.push(`seed:${fact.id}`);
-    }
-  }
-  return targetIds;
 }
 
 function irlessPatternIr(): PatternIr {
@@ -1445,39 +1393,6 @@ function resolveSourceSpan(ir: PatternIr, targetId: string): { start: number; en
     return ir.seed_facts.find((entry) => `seed:${entry.id}` === targetId)?.range ?? null;
   }
   return null;
-}
-
-function buildMetadataSourcesView(
-  currentFile: string,
-  autoMetadataSourceFiles: string[],
-  manualMetadataSourceFiles: string[]
-): PreviewMetadataSourcesView {
-  const autoDiscovered = Array.from(new Set(autoMetadataSourceFiles));
-  const manual = Array.from(new Set(manualMetadataSourceFiles));
-  const entries: PreviewMetadataSourceEntry[] = [
-    { path: currentFile, kind: "current" },
-    ...autoDiscovered.map((filePath) => ({ path: filePath, kind: "auto" as const })),
-    ...manual.map((filePath) => ({ path: filePath, kind: "manual" as const }))
-  ];
-  const effectiveKinds = new Map<string, Set<PreviewMetadataSourceKind>>();
-  for (const entry of entries) {
-    const kinds = effectiveKinds.get(entry.path) ?? new Set<PreviewMetadataSourceKind>();
-    kinds.add(entry.kind);
-    effectiveKinds.set(entry.path, kinds);
-  }
-  const effectiveEntries = Array.from(effectiveKinds.entries()).map(([filePath, kinds]) => ({
-    path: filePath,
-    kinds: Array.from(kinds)
-  }));
-  const effective = effectiveEntries.map((entry) => entry.path);
-  return {
-    currentFile,
-    autoDiscovered,
-    manual,
-    effective,
-    entries,
-    effectiveEntries
-  };
 }
 
 async function loadActionRecoveryPreviewMetadata(

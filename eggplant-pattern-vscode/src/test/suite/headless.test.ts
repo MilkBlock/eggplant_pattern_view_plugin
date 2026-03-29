@@ -18,6 +18,7 @@ import {
   buildConstraintEntries,
   drilldownConstraintNode,
   filterConstraintEntries,
+  projectPreviewInteractionState,
   reconcilePreviewInteractionState,
   selectConstraint as selectPreviewConstraint,
   selectRuleCheck as selectPreviewRuleCheck,
@@ -184,6 +185,13 @@ suite("eggplant pattern headless tests", () => {
     assert.equal(state.activeConstraintId, "constraint_0");
     assert.equal(state.constraintFilterMode, "node-specific");
     assert.equal(state.constraintFilterNodeId, "l");
+
+    const projected = projectPreviewInteractionState(state, ruleChecks, constraints);
+    assert.equal(projected.state.activeRuleCheckId, "rule-check-0");
+    assert.equal(projected.state.activeConstraintId, "constraint_0");
+    assert.deepEqual(projected.activeConstraintNodeIds, ["l", "r"]);
+    assert.deepEqual(projected.highlightedPatternNodeIds, ["l"]);
+    assert.deepEqual(projected.highlightedActionEffectIds, ["effect:effect_0"]);
 
     const reconciled = reconcilePreviewInteractionState(
       {

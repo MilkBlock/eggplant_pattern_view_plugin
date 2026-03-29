@@ -45,6 +45,14 @@ export interface PreviewInteractionState {
   activeConstraintId: string | null;
 }
 
+export interface PreviewInteractionProjection {
+  state: PreviewInteractionState;
+  visibleConstraints: PreviewConstraintEntry[];
+  activeConstraintNodeIds: string[];
+  highlightedPatternNodeIds: string[];
+  highlightedActionEffectIds: string[];
+}
+
 export interface PreviewPanelState {
   renderNonce?: number;
   title: string;
@@ -83,6 +91,44 @@ export interface PreviewPanelState {
   sourceWarning: string | null;
   showSwitchToAst: boolean;
   notice: string | null;
+}
+
+export interface BuildPreviewPanelStateInput {
+  mode: DotViewMode;
+  sourceMode: PreviewSourceMode;
+  selectedLabelStyle: DotLabelStyle;
+  effectiveLabelStyle: DotLabelStyle;
+  recursiveStrategy: RecursiveStrategy;
+  fileName: string;
+  dot: string;
+  svg: string;
+  typstRenderings: Record<string, RenderedTypstSnippet>;
+  typstSources: Record<string, string>;
+  typstStatusByTargetId: Record<string, string>;
+  sourceTargetIds: string[];
+  allConstraints: PreviewConstraintEntry[];
+  constraints: PreviewConstraintEntry[];
+  ruleChecks: RuleCheckEntry[];
+  interactionState: PreviewInteractionState;
+  metadataSourceFiles: string[];
+  metadataSourcesView: PreviewMetadataSourcesView;
+  recoveryMode: RecoveryUiMode;
+  tracePath: string;
+  recoverySummary: string | null;
+  recoveryDiagnostics: string[];
+  sourceWarning: string | null;
+  showSwitchToAst: boolean;
+  notice: string | null;
+}
+
+export function createDefaultPreviewInteractionState(): PreviewInteractionState {
+  return {
+    ruleCheckViewVisible: false,
+    activeRuleCheckId: null,
+    constraintFilterMode: "all",
+    constraintFilterNodeId: null,
+    activeConstraintId: null
+  };
 }
 
 export function buildConstraintEntries(
@@ -212,5 +258,187 @@ export function reconcilePreviewInteractionState(
     constraintFilterMode,
     constraintFilterNodeId,
     activeConstraintId
+  };
+}
+
+export function projectPreviewInteractionState(
+  state: PreviewInteractionState,
+  ruleChecks: RuleCheckEntry[],
+  constraints: PreviewConstraintEntry[]
+): PreviewInteractionProjection {
+  const reconciled = reconcilePreviewInteractionState(state, ruleChecks, constraints);
+  const visibleConstraints = filterConstraintEntries(
+    constraints,
+    reconciled.constraintFilterMode,
+    reconciled.constraintFilterNodeId
+  );
+  const activeConstraint = visibleConstraints.find((constraint) => constraint.id === reconciled.activeConstraintId) ?? null;
+  const activeRuleCheck = ruleChecks.find((check) => check.id === reconciled.activeRuleCheckId) ?? null;
+  const highlightedPatternNodeIds = new Set<string>();
+  const highlightedActionEffectIds = new Set<string>();
+  const checksToHighlight = reconciled.ruleCheckViewVisible
+    ? (activeRuleCheck ? [activeRuleCheck] : ruleChecks)
+    : [];
+  for (const check of checksToHighlight) {
+    for (const nodeId of check.duplicatePatternNodeIds) {
+      highlightedPatternNodeIds.add(nodeId);
+    }
+    for (const effectId of check.duplicateActionEffectIds) {
+      highlightedActionEffectIds.add(effectId);
+    }
+  }
+
+  return {
+    state: {
+      ...reconciled,
+      activeRuleCheckId: activeRuleCheck?.id ?? null,
+      activeConstraintId: activeConstraint?.id ?? null
+    },
+    visibleConstraints,
+    activeConstraintNodeIds: activeConstraint?.referencedNodeIds ?? [],
+    highlightedPatternNodeIds: Array.from(highlightedPatternNodeIds),
+    highlightedActionEffectIds: Array.from(highlightedActionEffectIds)
+  };
+}
+
+export function modeLabel(mode: DotViewMode): string {
+  switch (mode) {
+    case "pattern":
+      return "pattern.dot";
+    case "action":
+      return "action.dot";
+    case "combined":
+      return "action + pattern.dot";
+  }
+}
+
+export function formatPreviewTitle(
+  mode: DotViewMode,
+  sourceMode: PreviewSourceMode,
+  effectiveLabelStyle: DotLabelStyle,
+  recursiveStrategy: RecursiveStrategy,
+  fileName: string
+): string {
+  const strategySuffix = effectiveLabelStyle === "recursive" ? `, ${recursiveStrategy}` : "";
+  return `Eggplant Pattern (${modeLabel(mode)}, ${sourceMode}, ${effectiveLabelStyle}${strategySuffix}): ${fileName}`;
+}
+
+export function collectSourceTargetIds(ir: PatternIr, mode: DotViewMode): string[] {
+  const targetIds: string[] = [];
+  if (mode === "pattern" || mode === "combined") {
+    for (const node of ir.nodes) {
+      targetIds.push(node.id);
+    }
+  }
+  if (mode === "action" || mode === "combined") {
+    for (const effect of ir.action_effects) {
+      targetIds.push(`effect:${effect.id}`);
+    }
+    for (const fact of ir.seed_facts) {
+      targetIds.push(`seed:${fact.id}`);
+    }
+  }
+  return targetIds;
+}
+
+export function buildMetadataSourcesView(
+  currentFile: string,
+  autoMetadataSourceFiles: string[],
+  manualMetadataSourceFiles: string[]
+): PreviewMetadataSourcesView {
+  const autoDiscovered = Array.from(new Set(autoMetadataSourceFiles));
+  const manual = Array.from(new Set(manualMetadataSourceFiles));
+  const entries: PreviewMetadataSourceEntry[] = [
+    { path: currentFile, kind: "current" },
+    ...autoDiscovered.map((filePath) => ({ path: filePath, kind: "auto" as const })),
+    ...manual.map((filePath) => ({ path: filePath, kind: "manual" as const }))
+  ];
+  const effectiveKinds = new Map<string, Set<PreviewMetadataSourceKind>>();
+  for (const entry of entries) {
+    const kinds = effectiveKinds.get(entry.path) ?? new Set<PreviewMetadataSourceKind>();
+    kinds.add(entry.kind);
+    effectiveKinds.set(entry.path, kinds);
+  }
+  const effectiveEntries = Array.from(effectiveKinds.entries()).map(([filePath, kinds]) => ({
+    path: filePath,
+    kinds: Array.from(kinds)
+  }));
+  const effective = effectiveEntries.map((entry) => entry.path);
+  return {
+    currentFile,
+    autoDiscovered,
+    manual,
+    effective,
+    entries,
+    effectiveEntries
+  };
+}
+
+export function buildPreviewPanelState(input: BuildPreviewPanelStateInput): PreviewPanelState {
+  const {
+    mode,
+    sourceMode,
+    selectedLabelStyle,
+    effectiveLabelStyle,
+    recursiveStrategy,
+    fileName,
+    dot,
+    svg,
+    typstRenderings,
+    typstSources,
+    typstStatusByTargetId,
+    sourceTargetIds,
+    allConstraints,
+    constraints,
+    ruleChecks,
+    interactionState,
+    metadataSourceFiles,
+    metadataSourcesView,
+    recoveryMode,
+    tracePath,
+    recoverySummary,
+    recoveryDiagnostics,
+    sourceWarning,
+    showSwitchToAst,
+    notice
+  } = input;
+  const projection = projectPreviewInteractionState(interactionState, ruleChecks, constraints);
+  const projectedState = projection.state;
+
+  return {
+    title: formatPreviewTitle(mode, sourceMode, effectiveLabelStyle, recursiveStrategy, fileName),
+    mode,
+    sourceMode,
+    recoveryMode,
+    tracePath,
+    labelStyle: selectedLabelStyle,
+    effectiveLabelStyle,
+    recursiveStrategy,
+    fileName,
+    dot,
+    svg,
+    typstRenderings,
+    typstSources,
+    typstStatusByTargetId,
+    sourceTargetIds,
+    allConstraints,
+    constraints: projection.visibleConstraints,
+    ruleChecks,
+    ruleCheckViewVisible: projectedState.ruleCheckViewVisible,
+    activeRuleCheckId: projectedState.activeRuleCheckId,
+    highlightedPatternNodeIds: projection.highlightedPatternNodeIds,
+    highlightedActionEffectIds: projection.highlightedActionEffectIds,
+    constraintCountByNodeId: buildConstraintCountByNodeId(constraints),
+    constraintFilterMode: projectedState.constraintFilterMode,
+    constraintFilterNodeId: projectedState.constraintFilterNodeId,
+    activeConstraintId: projectedState.activeConstraintId,
+    activeConstraintNodeIds: projection.activeConstraintNodeIds,
+    metadataSourceFiles,
+    metadataSourcesView,
+    recoverySummary,
+    recoveryDiagnostics,
+    sourceWarning,
+    showSwitchToAst,
+    notice
   };
 }
