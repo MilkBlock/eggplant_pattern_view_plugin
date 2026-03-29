@@ -1,95 +1,14 @@
 import * as vscode from "vscode";
 import { DotLabelStyle, DotViewMode, RecursiveStrategy } from "./dot";
 import { RuleCheckEntry } from "./ruleChecks";
-import { RenderedTypstSnippet } from "./typst";
-
-export type PreviewSourceMode = "ast" | "trace";
-export type PreviewConstraintFilterMode = "all" | "node-specific";
-export type RecoveryUiMode = "off" | "static" | "sample" | "hybrid";
-
-export type PreviewMetadataSourceKind = "current" | "auto" | "manual";
-
-export interface PreviewMetadataSourceEntry {
-  path: string;
-  kind: PreviewMetadataSourceKind;
-}
-
-export interface PreviewMetadataEffectiveSourceEntry {
-  path: string;
-  kinds: PreviewMetadataSourceKind[];
-}
-
-export interface PreviewMetadataSourcesView {
-  currentFile: string;
-  autoDiscovered: string[];
-  manual: string[];
-  effective: string[];
-  entries: PreviewMetadataSourceEntry[];
-  effectiveEntries: PreviewMetadataEffectiveSourceEntry[];
-}
-
-export interface PreviewConstraintEntry {
-  id: string;
-  compactText: string;
-  fullText: string;
-  sourceText: string;
-  referencedNodeIds: string[];
-}
-
-export function groupConstraintsByNodeId(
-  constraints: PreviewConstraintEntry[]
-): Record<string, PreviewConstraintEntry[]> {
-  const grouped: Record<string, PreviewConstraintEntry[]> = {};
-  for (const constraint of constraints) {
-    for (const nodeId of constraint.referencedNodeIds) {
-      if (!grouped[nodeId]) {
-        grouped[nodeId] = [];
-      }
-      grouped[nodeId].push(constraint);
-    }
-  }
-  return grouped;
-}
-
-export interface PreviewPanelState {
-  renderNonce?: number;
-  title: string;
-  mode: DotViewMode;
-  sourceMode: PreviewSourceMode;
-  labelStyle: DotLabelStyle;
-  effectiveLabelStyle: DotLabelStyle;
-  recursiveStrategy: RecursiveStrategy;
-  fileName: string;
-  dot: string;
-  svg: string;
-  typstRenderings: Record<string, RenderedTypstSnippet>;
-  typstSources: Record<string, string>;
-  typstStatusByTargetId: Record<string, string>;
-  sourceTargetIds: string[];
-  allConstraints: PreviewConstraintEntry[];
-  constraints: PreviewConstraintEntry[];
-  nodeConstraintsPopoverTargetId?: string | null;
-  nodeConstraintsPopoverRows?: PreviewConstraintEntry[];
-  ruleChecks: RuleCheckEntry[];
-  ruleCheckViewVisible: boolean;
-  activeRuleCheckId: string | null;
-  highlightedPatternNodeIds: string[];
-  highlightedActionEffectIds: string[];
-  constraintCountByNodeId: Record<string, number>;
-  constraintFilterMode: PreviewConstraintFilterMode;
-  constraintFilterNodeId: string | null;
-  activeConstraintId: string | null;
-  activeConstraintNodeIds: string[];
-  metadataSourceFiles: string[];
-  metadataSourcesView: PreviewMetadataSourcesView;
-  recoveryMode: RecoveryUiMode;
-  tracePath: string;
-  recoverySummary: string | null;
-  recoveryDiagnostics: string[];
-  sourceWarning: string | null;
-  showSwitchToAst: boolean;
-  notice: string | null;
-}
+import {
+  PreviewConstraintEntry,
+  PreviewConstraintFilterMode,
+  PreviewMetadataSourcesView,
+  PreviewPanelState,
+  PreviewSourceMode,
+  RecoveryUiMode
+} from "./shared/previewCore";
 
 interface PreviewPanelCallbacks {
   onModeChange(mode: DotViewMode): Promise<void>;

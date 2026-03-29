@@ -3,18 +3,31 @@ import { spawnSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 import { buildTraceSourcePreview, resolveDynamicActionRecoveryPolicy, summarizeRuntimeActionSampleTrace } from "./actionRecovery";
-import { collectTypstReplacementSources, compactConstraintLabel, DotLabelStyle, DotViewMode, inlineConstraintAnnotation, patternIrToDotWithMode, RecursiveStrategy } from "./dot";
+import { collectTypstReplacementSources, DotLabelStyle, DotViewMode, patternIrToDotWithMode, RecursiveStrategy } from "./dot";
 import { configureExtractorResolution, ExtractorError, runExtractor } from "./extractor";
 import { PatternIr } from "./ir";
 import { clearMetadataSourceCache, discoverWorkspaceMetadataSourceFiles, loadMetadataSources, mergeExternalMetadata, pickMetadataSourceFiles } from "./metadataSources";
 import {
+  buildConstraintCountByNodeId,
+  buildConstraintEntries,
+  drilldownConstraintNode as applyConstraintNodeDrilldown,
+  filterConstraintEntries,
+  PreviewConstraintEntry,
   PreviewConstraintFilterMode,
+  PreviewInteractionState,
   PreviewMetadataSourceEntry,
   PreviewMetadataSourceKind,
   PreviewMetadataSourcesView,
-  PreviewPanel,
   PreviewSourceMode,
-  RecoveryUiMode
+  RecoveryUiMode,
+  reconcilePreviewInteractionState,
+  selectConstraint as applyConstraintSelection,
+  selectRuleCheck as applyRuleCheckSelection,
+  setConstraintFilterMode as applyConstraintFilterMode,
+  toggleRuleCheckView
+} from "./shared/previewCore";
+import {
+  PreviewPanel,
 } from "./previewPanel";
 import { buildRuleCheckRewritePlan, findRedundantActionInsertChecks } from "./ruleChecks";
 import { dotToSvg } from "./svg";
@@ -603,6 +616,24 @@ class PreviewController {
     return this.currentModeOverride ?? PreviewPanel.current()?.snapshot()?.mode ?? "combined";
   }
 
+  private previewInteractionState(): PreviewInteractionState {
+    return {
+      ruleCheckViewVisible: this.ruleCheckViewVisible,
+      activeRuleCheckId: this.activeRuleCheckId,
+      constraintFilterMode: this.constraintFilterMode,
+      constraintFilterNodeId: this.constraintFilterNodeId,
+      activeConstraintId: this.activeConstraintId
+    };
+  }
+
+  private applyPreviewInteractionState(state: PreviewInteractionState): void {
+    this.ruleCheckViewVisible = state.ruleCheckViewVisible;
+    this.activeRuleCheckId = state.activeRuleCheckId;
+    this.constraintFilterMode = state.constraintFilterMode;
+    this.constraintFilterNodeId = state.constraintFilterNodeId;
+    this.activeConstraintId = state.activeConstraintId;
+  }
+
   private async setTemporaryFullPreview(active: boolean): Promise<void> {
     const nextActive = active && this.currentLabelStyle !== "full";
     if (this.temporaryFullLabelPreview === nextActive) {
@@ -637,26 +668,9 @@ class PreviewController {
     const allConstraintEntries = buildConstraintEntries(baseIr, { includeInlineHidden: true });
     const constraintEntries = buildConstraintEntries(baseIr);
     const ruleChecks = findRedundantActionInsertChecks(baseIr);
-    if (!ruleChecks.some((check) => check.id === this.activeRuleCheckId)) {
-      this.activeRuleCheckId = null;
-    }
-    const constraintFilterNodeId = this.constraintFilterNodeId;
-    if (
-      this.constraintFilterMode === "node-specific"
-      && constraintFilterNodeId
-      && !constraintEntries.some((constraint) => constraint.referencedNodeIds.includes(constraintFilterNodeId))
-    ) {
-      this.constraintFilterMode = "all";
-      this.constraintFilterNodeId = null;
-    }
-    const visibleConstraints = filterConstraintEntries(
-      constraintEntries,
-      this.constraintFilterMode,
-      this.constraintFilterNodeId
+    this.applyPreviewInteractionState(
+      reconcilePreviewInteractionState(this.previewInteractionState(), ruleChecks, constraintEntries)
     );
-    if (!visibleConstraints.some((constraint) => constraint.id === this.activeConstraintId)) {
-      this.activeConstraintId = null;
-    }
     const metadataSourcesView = buildMetadataSourcesView(
       editor.document.fileName,
       this.autoMetadataSourceFiles,
@@ -708,7 +722,9 @@ class PreviewController {
     if (!this.lastPreview) {
       return;
     }
-    this.activeConstraintId = this.activeConstraintId === constraintId ? null : constraintId;
+    this.applyPreviewInteractionState(
+      applyConstraintSelection(this.previewInteractionState(), constraintId)
+    );
     await this.renderLastPreview(
       this.lastPreview.editor,
       this.lastPreview.ir,
@@ -720,10 +736,7 @@ class PreviewController {
   }
 
   private async toggleRuleChecks(): Promise<void> {
-    this.ruleCheckViewVisible = !this.ruleCheckViewVisible;
-    if (!this.ruleCheckViewVisible) {
-      this.activeRuleCheckId = null;
-    }
+    this.applyPreviewInteractionState(toggleRuleCheckView(this.previewInteractionState()));
     if (!this.lastPreview) {
       return;
     }
@@ -741,8 +754,9 @@ class PreviewController {
     if (!this.lastPreview) {
       return;
     }
-    this.ruleCheckViewVisible = true;
-    this.activeRuleCheckId = this.activeRuleCheckId === checkId ? null : checkId;
+    this.applyPreviewInteractionState(
+      applyRuleCheckSelection(this.previewInteractionState(), checkId)
+    );
     await this.renderLastPreview(
       this.lastPreview.editor,
       this.lastPreview.ir,
@@ -798,10 +812,9 @@ class PreviewController {
     if (mode === this.constraintFilterMode) {
       return;
     }
-    this.constraintFilterMode = mode;
-    if (mode === "all") {
-      this.constraintFilterNodeId = null;
-    }
+    this.applyPreviewInteractionState(
+      applyConstraintFilterMode(this.previewInteractionState(), mode)
+    );
     if (!this.lastPreview) {
       return;
     }
@@ -819,13 +832,10 @@ class PreviewController {
     if (!this.lastPreview) {
       return;
     }
-    const visibleConstraints = buildConstraintEntries(this.lastPreview.ir)
-      .filter((constraint) => constraint.referencedNodeIds.includes(targetId));
-    this.constraintFilterMode = "node-specific";
-    this.constraintFilterNodeId = targetId;
-    if (!visibleConstraints.some((constraint) => constraint.id === this.activeConstraintId)) {
-      this.activeConstraintId = null;
-    }
+    const visibleConstraints = filterConstraintEntries(buildConstraintEntries(this.lastPreview.ir), "node-specific", targetId);
+    this.applyPreviewInteractionState(
+      applyConstraintNodeDrilldown(this.previewInteractionState(), targetId, visibleConstraints)
+    );
     await this.renderLastPreview(
       this.lastPreview.editor,
       this.lastPreview.ir,
@@ -1130,8 +1140,8 @@ async function renderDot(
   recursiveStrategy: RecursiveStrategy,
   metadataSourceFiles: string[],
   metadataSourcesView: PreviewMetadataSourcesView,
-  allConstraints: ReturnType<typeof buildConstraintEntries>,
-  constraints: ReturnType<typeof buildConstraintEntries>,
+  allConstraints: PreviewConstraintEntry[],
+  constraints: PreviewConstraintEntry[],
   ruleChecks: ReturnType<typeof findRedundantActionInsertChecks>,
   ruleCheckViewVisible: boolean,
   activeRuleCheckId: string | null,
@@ -1397,52 +1407,6 @@ function collectSourceTargetIds(ir: PatternIr, mode: DotViewMode): string[] {
     }
   }
   return targetIds;
-}
-
-function buildConstraintEntries(
-  ir: PatternIr,
-  options: { includeInlineHidden?: boolean } = {}
-): Array<{ id: string; compactText: string; fullText: string; sourceText: string; referencedNodeIds: string[] }> {
-  const nodeIds = new Set(ir.nodes.map((node) => node.id));
-  const rootIds = new Set(ir.roots);
-  return ir.constraints
-    .filter((constraint) => options.includeInlineHidden || inlineConstraintAnnotation(constraint)?.hideInSidebar !== true)
-    .map((constraint) => ({
-      id: constraint.id,
-      compactText: compactConstraintLabel(constraint.source_text, constraint.resolved_text),
-      fullText: constraint.resolved_text,
-      sourceText: constraint.source_text,
-      referencedNodeIds: (() => {
-        const referenced = constraint.referenced_vars.filter((name) => nodeIds.has(name) || rootIds.has(name));
-        return referenced.length > 0 ? referenced : [...ir.roots];
-      })()
-    }));
-}
-
-function filterConstraintEntries(
-  constraints: Array<{ id: string; compactText: string; fullText: string; sourceText: string; referencedNodeIds: string[] }>,
-  mode: PreviewConstraintFilterMode,
-  nodeId: string | null
-): Array<{ id: string; compactText: string; fullText: string; sourceText: string; referencedNodeIds: string[] }> {
-  if (mode !== "node-specific") {
-    return constraints;
-  }
-  if (!nodeId) {
-    return [];
-  }
-  return constraints.filter((constraint) => constraint.referencedNodeIds.includes(nodeId));
-}
-
-function buildConstraintCountByNodeId(
-  constraints: Array<{ id: string; compactText: string; fullText: string; sourceText: string; referencedNodeIds: string[] }>
-): Record<string, number> {
-  const counts: Record<string, number> = {};
-  for (const constraint of constraints) {
-    for (const nodeId of constraint.referencedNodeIds) {
-      counts[nodeId] = (counts[nodeId] ?? 0) + 1;
-    }
-  }
-  return counts;
 }
 
 function irlessPatternIr(): PatternIr {
