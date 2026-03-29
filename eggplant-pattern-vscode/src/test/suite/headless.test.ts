@@ -15,7 +15,11 @@ import {
   summarizeRuntimeActionSampleTrace
 } from "../../actionRecovery";
 import {
+  buildMetadataSourcesView,
+  buildPreviewPanelState,
   buildConstraintEntries,
+  collectSourceTargetIds,
+  createDefaultPreviewInteractionState,
   drilldownConstraintNode,
   filterConstraintEntries,
   projectPreviewInteractionState,
@@ -26,6 +30,7 @@ import {
 } from "../../shared/previewCore";
 import { displayTextFallbackSource, renderTypstSnippetsWithRenderer } from "../../shared/typstCore";
 import { normalizeTypstMathSource, renderTypstSnippets } from "../../typst";
+import { findRedundantActionInsertChecks } from "../../ruleChecks";
 
 const WORKSPACE_ROOT = path.resolve(__dirname, "../../../../");
 const FIXTURE_PATH = path.resolve(WORKSPACE_ROOT, "samples", "pattern_samples.rs");
@@ -208,6 +213,166 @@ suite("eggplant pattern headless tests", () => {
     assert.equal(reconciled.activeConstraintId, null);
     assert.equal(reconciled.constraintFilterMode, "all");
     assert.equal(reconciled.constraintFilterNodeId, null);
+  });
+
+  test("cross-host parity keeps preview/check semantics aligned for the same fixture", () => {
+    const ir: PatternIr = {
+      scope: {
+        kind: "add_rule_call",
+        text_range: { start: 0, end: 180 },
+        pattern_range: { start: 0, end: 92 },
+        action_range: { start: 93, end: 180 }
+      },
+      nodes: [
+        { id: "l", kind: "query_leaf", dsl_type: "Const", label: "l: Const", range: { start: 1, end: 2 }, inputs: [] },
+        { id: "r", kind: "query_leaf", dsl_type: "Const", label: "r: Const", range: { start: 3, end: 4 }, inputs: [] },
+        { id: "sum", kind: "query", dsl_type: "Add", label: "sum: Add(l, r)", range: { start: 6, end: 18 }, inputs: ["l", "r"] }
+      ],
+      edges: [
+        { from: "sum", to: "l", kind: "input", index: 0 },
+        { from: "sum", to: "r", kind: "input", index: 1 }
+      ],
+      roots: ["sum"],
+      constraints: [
+        {
+          id: "constraint_0",
+          source_text: "custom_pair_constraint(l, r)",
+          resolved_text: "custom_pair_constraint(l, r)",
+          referenced_vars: ["l", "r"],
+          range: { start: 19, end: 45 }
+        },
+        {
+          id: "constraint_1",
+          source_text: "sum.handle().eq(&(l.handle() + 1))",
+          resolved_text: "sum.handle().eq(&(l.handle() + 1))",
+          referenced_vars: ["sum", "l"],
+          range: { start: 46, end: 82 }
+        }
+      ],
+      action_effects: [
+        {
+          id: "effect_0",
+          effect_id: "effect@120:154",
+          bound_var: "duplicate",
+          source_text: "ctx.insert_add(pat.l, pat.r);",
+          referenced_pat_vars: ["l", "r"],
+          referenced_action_vars: [],
+          range: { start: 120, end: 154 }
+        }
+      ],
+      seed_facts: [],
+      display_templates: [],
+      typst_templates: [],
+      precedence_templates: [],
+      diagnostics: []
+    };
+
+    const allConstraints = buildConstraintEntries(ir, { includeInlineHidden: true });
+    const constraints = buildConstraintEntries(ir);
+    const ruleChecks = findRedundantActionInsertChecks(ir);
+
+    assert.equal(allConstraints.length, 2);
+    assert.equal(constraints.length, 1);
+    assert.equal(ruleChecks.length, 1);
+
+    let interactionState = createDefaultPreviewInteractionState();
+    interactionState = toggleRuleCheckView(interactionState);
+    interactionState = selectPreviewRuleCheck(interactionState, ruleChecks[0].id);
+    interactionState = drilldownConstraintNode(
+      interactionState,
+      "l",
+      filterConstraintEntries(constraints, "node-specific", "l")
+    );
+    interactionState = selectPreviewConstraint(interactionState, "constraint_0");
+
+    const projectForVscodeHost = () => {
+      const interactionProjection = projectPreviewInteractionState(interactionState, ruleChecks, constraints);
+      return buildPreviewPanelState({
+        mode: "combined",
+        sourceMode: "ast",
+        selectedLabelStyle: "recursive",
+        effectiveLabelStyle: "recursive",
+        recursiveStrategy: "tree-safe",
+        fileName: "parity_fixture.rs",
+        dot: "digraph { sum -> l; sum -> r; }",
+        svg: "<svg/>",
+        typstRenderings: {},
+        typstSources: {},
+        typstStatusByTargetId: {},
+        sourceTargetIds: collectSourceTargetIds(ir, "combined"),
+        allConstraints,
+        constraints,
+        ruleChecks,
+        interactionState: interactionProjection.state,
+        metadataSourceFiles: [],
+        metadataSourcesView: buildMetadataSourcesView("parity_fixture.rs", [], []),
+        recoveryMode: "off",
+        tracePath: "",
+        recoverySummary: null,
+        recoveryDiagnostics: [],
+        sourceWarning: null,
+        showSwitchToAst: false,
+        notice: null
+      });
+    };
+
+    const projectForWebHost = () => {
+      const projection = projectPreviewInteractionState(interactionState, ruleChecks, constraints);
+      const activeState = projection.state;
+      return buildPreviewPanelState({
+        mode: "combined",
+        sourceMode: "ast",
+        selectedLabelStyle: "recursive",
+        effectiveLabelStyle: "recursive",
+        recursiveStrategy: "tree-safe",
+        fileName: "parity_fixture.rs",
+        dot: "digraph { sum -> l; sum -> r; }",
+        svg: "<svg/>",
+        typstRenderings: {},
+        typstSources: {},
+        typstStatusByTargetId: {},
+        sourceTargetIds: collectSourceTargetIds(ir, "combined"),
+        allConstraints,
+        constraints,
+        ruleChecks,
+        interactionState: activeState,
+        metadataSourceFiles: [],
+        metadataSourcesView: buildMetadataSourcesView("parity_fixture.rs", [], []),
+        recoveryMode: "off",
+        tracePath: "",
+        recoverySummary: null,
+        recoveryDiagnostics: [],
+        sourceWarning: null,
+        showSwitchToAst: false,
+        notice: null
+      });
+    };
+
+    const vscodeState = projectForVscodeHost();
+    const webState = projectForWebHost();
+
+    const semantics = (state: ReturnType<typeof projectForVscodeHost>) => ({
+      sourceTargetIds: state.sourceTargetIds,
+      allConstraintIds: state.allConstraints.map((entry) => entry.id),
+      visibleConstraintIds: state.constraints.map((entry) => entry.id),
+      ruleCheckIds: state.ruleChecks.map((entry) => entry.id),
+      ruleCheckViewVisible: state.ruleCheckViewVisible,
+      activeRuleCheckId: state.activeRuleCheckId,
+      highlightedPatternNodeIds: [...state.highlightedPatternNodeIds].sort(),
+      highlightedActionEffectIds: [...state.highlightedActionEffectIds].sort(),
+      constraintFilterMode: state.constraintFilterMode,
+      constraintFilterNodeId: state.constraintFilterNodeId,
+      activeConstraintId: state.activeConstraintId,
+      activeConstraintNodeIds: [...state.activeConstraintNodeIds].sort(),
+      constraintCountByNodeId: state.constraintCountByNodeId
+    });
+
+    assert.deepEqual(semantics(vscodeState), semantics(webState));
+    assert.deepEqual(semantics(vscodeState).allConstraintIds, ["constraint_0", "constraint_1"]);
+    assert.deepEqual(semantics(vscodeState).visibleConstraintIds, ["constraint_0"]);
+    assert.equal(semantics(vscodeState).activeRuleCheckId, ruleChecks[0].id);
+    assert.deepEqual(semantics(vscodeState).highlightedPatternNodeIds, ["sum"]);
+    assert.deepEqual(semantics(vscodeState).highlightedActionEffectIds, ["effect:effect_0"]);
   });
 
   test("dynamic action recovery policy normalizes experimental mode settings", () => {
