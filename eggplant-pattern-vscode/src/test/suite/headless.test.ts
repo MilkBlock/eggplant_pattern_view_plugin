@@ -14,6 +14,16 @@ import {
   resolveDynamicActionRecoveryPolicy,
   summarizeRuntimeActionSampleTrace
 } from "../../actionRecovery";
+import {
+  buildConstraintEntries,
+  drilldownConstraintNode,
+  filterConstraintEntries,
+  reconcilePreviewInteractionState,
+  selectConstraint as selectPreviewConstraint,
+  selectRuleCheck as selectPreviewRuleCheck,
+  toggleRuleCheckView
+} from "../../shared/previewCore";
+import { displayTextFallbackSource, renderTypstSnippetsWithRenderer } from "../../shared/typstCore";
 import { normalizeTypstMathSource, renderTypstSnippets } from "../../typst";
 
 const WORKSPACE_ROOT = path.resolve(__dirname, "../../../../");
@@ -80,6 +90,116 @@ suite("eggplant pattern headless tests", () => {
     assert.equal(normalizeTypstMathSource("x + y"), "x + y");
     assert.equal(normalizeTypstMathSource("$x + y$"), "x + y");
     assert.equal(normalizeTypstMathSource("$$x + y$$"), "x + y");
+  });
+
+  test("shared typst contract caches duplicate fallback renders and strips upright wrappers", async () => {
+    const seenDocuments: string[] = [];
+    const renderings = await renderTypstSnippetsWithRenderer(
+      [
+        { targetId: "lhs", source: 'fib(upright("x1")) = ???' },
+        { targetId: "rhs", source: 'fib(upright("x1")) = ???' }
+      ],
+      {
+        async render(document: string): Promise<string> {
+          seenDocuments.push(document);
+          if (document.includes("$ fib(upright(\"x1\")) = ??? $")) {
+            throw new Error("math render failed");
+          }
+          return '<svg width="12pt" height="5pt"></svg>';
+        }
+      },
+      new Map()
+    );
+
+    assert.equal(seenDocuments.length, 2);
+    assert.equal(renderings.lhs.mode, "text-fallback");
+    assert.equal(renderings.rhs.mode, "text-fallback");
+    assert.equal(displayTextFallbackSource('fib(upright("x1")) = ???'), "fib(x1) = ???");
+  });
+
+  test("shared preview interaction helpers stay deterministic across reconcile and drilldown", () => {
+    const ir: PatternIr = {
+      scope: {
+        kind: "pattern_function",
+        text_range: { start: 0, end: 10 },
+        pattern_range: { start: 0, end: 10 },
+        action_range: null
+      },
+      nodes: [
+        { id: "l", kind: "query_leaf", dsl_type: "Const", label: "l: Const", range: { start: 0, end: 1 }, inputs: [] },
+        { id: "r", kind: "query_leaf", dsl_type: "Const", label: "r: Const", range: { start: 2, end: 3 }, inputs: [] }
+      ],
+      edges: [],
+      roots: ["l", "r"],
+      constraints: [
+        {
+          id: "constraint_0",
+          source_text: "custom_pair_constraint(l, r)",
+          resolved_text: "custom_pair_constraint(l, r)",
+          referenced_vars: ["l", "r"],
+          range: { start: 4, end: 9 }
+        }
+      ],
+      action_effects: [],
+      seed_facts: [],
+      display_templates: [],
+      typst_templates: [],
+      precedence_templates: [],
+      diagnostics: []
+    };
+
+    const constraints = buildConstraintEntries(ir, { includeInlineHidden: true });
+    const ruleChecks = [
+      {
+        id: "rule-check-0",
+        severity: "warning" as const,
+        kind: "redundant-action-insert" as const,
+        message: "duplicate insert",
+        suggestion: "reuse pat.l",
+        duplicatePatternNodeIds: ["l"],
+        duplicateActionEffectIds: ["effect:effect_0"],
+        sourceRange: null,
+        rewriteReplacement: "pat.l",
+        rewriteLabel: "rewrite"
+      }
+    ];
+
+    let state = toggleRuleCheckView({
+      ruleCheckViewVisible: false,
+      activeRuleCheckId: null,
+      constraintFilterMode: "all",
+      constraintFilterNodeId: null,
+      activeConstraintId: null
+    });
+    state = selectPreviewRuleCheck(state, "rule-check-0");
+    state = selectPreviewConstraint(state, "constraint_0");
+    state = drilldownConstraintNode(
+      state,
+      "l",
+      filterConstraintEntries(constraints, "node-specific", "l")
+    );
+
+    assert.equal(state.ruleCheckViewVisible, true);
+    assert.equal(state.activeRuleCheckId, "rule-check-0");
+    assert.equal(state.activeConstraintId, "constraint_0");
+    assert.equal(state.constraintFilterMode, "node-specific");
+    assert.equal(state.constraintFilterNodeId, "l");
+
+    const reconciled = reconcilePreviewInteractionState(
+      {
+        ...state,
+        activeRuleCheckId: "missing-check",
+        activeConstraintId: "missing-constraint",
+        constraintFilterNodeId: "missing-node"
+      },
+      ruleChecks,
+      constraints
+    );
+
+    assert.equal(reconciled.activeRuleCheckId, null);
+    assert.equal(reconciled.activeConstraintId, null);
+    assert.equal(reconciled.constraintFilterMode, "all");
+    assert.equal(reconciled.constraintFilterNodeId, null);
   });
 
   test("dynamic action recovery policy normalizes experimental mode settings", () => {
