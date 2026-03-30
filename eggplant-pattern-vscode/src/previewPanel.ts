@@ -461,6 +461,10 @@ export class PreviewPanel implements vscode.Disposable {
         user-select: none;
         -webkit-user-select: none;
       }
+      .graph svg text,
+      .graph svg tspan {
+        font-family: "Iosevka", "Iosevka Term", var(--vscode-editor-font-family, var(--vscode-font-family)) !important;
+      }
       .graph svg * {
         user-select: none;
         -webkit-user-select: none;

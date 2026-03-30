@@ -938,7 +938,7 @@ export function patternIrToDotWithMode(
     "digraph EggplantPattern {",
     "  rankdir=TB;",
     "  graph [pad=0.3, nodesep=0.5, ranksep=0.6];",
-    "  node [shape=box, style=\"rounded,filled\", fillcolor=\"#f8f5ec\", color=\"#6b5b3e\", fontname=\"Helvetica\"];",
+    "  node [shape=box, style=\"rounded,filled\", fillcolor=\"#f8f5ec\", color=\"#6b5b3e\", fontname=\"Iosevka\"];",
     "  edge [color=\"#7a7468\"];"
   ];
 
@@ -977,14 +977,14 @@ export function patternIrToDotWithMode(
       }
       const rootLabel = `${root}${inlineAnnotationSuffix(inlineAnnotations, root)}`;
       lines.push(
-        `  ${quote(root)} [label=${quote(rootLabel)}, shape=ellipse, style="dashed,filled", fillcolor="#f3f0ea", color="#8d8477", penwidth=2, fontname="Helvetica"];`
+        `  ${quote(root)} [label=${quote(rootLabel)}, shape=ellipse, style="dashed,filled", fillcolor="#f3f0ea", color="#8d8477", penwidth=2, fontname="Iosevka"];`
       );
     }
   }
 
   if (!showPattern) {
     for (const anchor of actionAnchorVars) {
-      lines.push(`  ${quote(anchor)} [label=${quote(anchor)}, shape=ellipse, style="dashed,filled", fillcolor="#f3f0ea", color="#8d8477", fontname="Helvetica"];`);
+      lines.push(`  ${quote(anchor)} [label=${quote(anchor)}, shape=ellipse, style="dashed,filled", fillcolor="#f3f0ea", color="#8d8477", fontname="Iosevka"];`);
     }
   }
 

@@ -1114,7 +1114,7 @@ async function renderNotice(panel: PreviewPanel, editor: vscode.TextEditor, mess
   const dot = withGitDotMetadata([
     "digraph EggplantPatternStatus {",
     "  graph [pad=0.3];",
-    "  node [shape=note, style=\"rounded,filled\", fillcolor=\"#fff4de\", color=\"#b26a00\", fontname=\"Helvetica\"];",
+    "  node [shape=note, style=\"rounded,filled\", fillcolor=\"#fff4de\", color=\"#b26a00\", fontname=\"Iosevka\"];",
     `  status [label=${JSON.stringify(message)}];`,
     "}"
   ].join("\n"), editor.document.fileName);
@@ -1174,7 +1174,7 @@ async function renderTraceUnavailableNotice(
   const dot = withGitDotMetadata([
     "digraph EggplantPatternStatus {",
     "  graph [pad=0.3];",
-    "  node [shape=note, style=\"rounded,filled\", fillcolor=\"#fff4de\", color=\"#b26a00\", fontname=\"Helvetica\"];",
+    "  node [shape=note, style=\"rounded,filled\", fillcolor=\"#fff4de\", color=\"#b26a00\", fontname=\"Iosevka\"];",
     `  status [label=${JSON.stringify(message)}];`,
     "}"
   ].join("\n"), editor.document.fileName);
