@@ -15,7 +15,6 @@ import {
   summarizeRuntimeActionSampleTrace
 } from "../../actionRecovery";
 import { normalizeTypstMathSource, renderTypstSnippets } from "../../typst";
-import { findRedundantActionInsertChecks } from "../../ruleChecks";
 import { resolveEggPreviewOffset } from "../../eggRuleMapping";
 
 const WORKSPACE_ROOT = path.resolve(__dirname, "../../../../");
