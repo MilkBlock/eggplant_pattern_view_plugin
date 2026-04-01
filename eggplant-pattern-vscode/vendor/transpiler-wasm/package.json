@@ -1,0 +1,15 @@
+{
+  "name": "eggplant-transpiler-wasm-wrapper",
+  "type": "module",
+  "version": "0.1.0",
+  "files": [
+    "eggplant_transpiler_wasm_wrapper_bg.wasm",
+    "eggplant_transpiler_wasm_wrapper.js",
+    "eggplant_transpiler_wasm_wrapper.d.ts"
+  ],
+  "main": "eggplant_transpiler_wasm_wrapper.js",
+  "types": "eggplant_transpiler_wasm_wrapper.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

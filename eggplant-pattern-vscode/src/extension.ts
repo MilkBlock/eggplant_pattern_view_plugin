@@ -4,7 +4,8 @@ import * as fs from "fs";
 import * as path from "path";
 import { buildTraceSourcePreview, resolveDynamicActionRecoveryPolicy, summarizeRuntimeActionSampleTrace } from "./actionRecovery";
 import { collectTypstReplacementSources, compactConstraintLabel, DotLabelStyle, DotViewMode, inlineConstraintAnnotation, patternIrToDotWithMode, RecursiveStrategy } from "./dot";
-import { configureExtractorResolution, ExtractorError, runExtractor } from "./extractor";
+import { configureExtractorResolution, ExtractorError, runExtractorSource } from "./extractor";
+import { configureTranspilerResolution, EggTranspilerError, transpileEggSource } from "./eggTranspiler";
 import { PatternIr } from "./ir";
 import { clearMetadataSourceCache, discoverWorkspaceMetadataSourceFiles, loadMetadataSources, mergeExternalMetadata, pickMetadataSourceFiles } from "./metadataSources";
 import {
@@ -26,17 +27,18 @@ interface GitDotMetadata {
 
 export function activate(context: vscode.ExtensionContext): void {
   configureExtractorResolution(context.extensionPath);
+  configureTranspilerResolution(context.extensionPath);
   const controller = new PreviewController(context);
 
   context.subscriptions.push(
     vscode.commands.registerCommand("eggplant-pattern.preview", async () => {
       const editor = controller.previewEditor();
       if (!editor) {
-        void vscode.window.showWarningMessage("Open a Rust editor to preview an eggplant pattern.");
+        void vscode.window.showWarningMessage("Open a Rust or .egg editor to preview an eggplant pattern.");
         return;
       }
-      if (editor.document.languageId !== "rust") {
-        void vscode.window.showWarningMessage("Eggplant pattern preview only runs for Rust files.");
+      if (!isSupportedPreviewDocument(editor.document)) {
+        void vscode.window.showWarningMessage("Eggplant pattern preview only runs for Rust or .egg files.");
         return;
       }
       await controller.requestPreview(editor, true, false);
@@ -226,7 +228,9 @@ class PreviewController {
           this.currentMode(),
           this.labelStyle(),
           this.currentRecursiveStrategy,
-          true
+          true,
+          undefined,
+          this.lastPreview.prepared
         );
       },
       onClearTypstEdit: async (targetId: string) => {
@@ -240,7 +244,9 @@ class PreviewController {
           this.currentMode(),
           this.labelStyle(),
           this.currentRecursiveStrategy,
-          true
+          true,
+          undefined,
+          this.lastPreview.prepared
         );
       },
       onTemporaryFullPreviewChange: async (active: boolean) => {
@@ -258,7 +264,7 @@ class PreviewController {
 
   scheduleRefresh(editor?: vscode.TextEditor): void {
     const activeEditor = editor ?? vscode.window.activeTextEditor;
-    if (!activeEditor || activeEditor.document.languageId !== "rust") {
+    if (!activeEditor || !isSupportedPreviewDocument(activeEditor.document)) {
       return;
     }
     if (!vscode.workspace.getConfiguration().get<boolean>("eggplantPattern.autoPreview", true)) {
@@ -276,13 +282,13 @@ class PreviewController {
 
   previewEditor(): vscode.TextEditor | undefined {
     const activeEditor = vscode.window.activeTextEditor;
-    if (activeEditor) {
+    if (activeEditor && isSupportedPreviewDocument(activeEditor.document)) {
       return activeEditor;
     }
-    if (this.lastPreview?.editor.document.languageId === "rust") {
+    if (this.lastPreview && isSupportedPreviewDocument(this.lastPreview.editor.document)) {
       return this.lastPreview.editor;
     }
-    return vscode.window.visibleTextEditors.find((editor) => editor.document.languageId === "rust");
+    return vscode.window.visibleTextEditors.find((editor) => isSupportedPreviewDocument(editor.document));
   }
 
   async requestPreview(editor: vscode.TextEditor, manual: boolean, preserveModeOverride: boolean): Promise<void> {
@@ -314,18 +320,20 @@ class PreviewController {
         mode,
         this.labelStyle(),
         this.recursiveStrategy(),
-        true
+        true,
+        undefined,
+        this.lastPreview.prepared
       );
       return;
     }
 
     const editor = this.previewEditor();
     if (!editor) {
-      void vscode.window.showWarningMessage("Open a Rust editor to preview an eggplant pattern.");
+      void vscode.window.showWarningMessage("Open a Rust or .egg editor to preview an eggplant pattern.");
       return;
     }
-    if (editor.document.languageId !== "rust") {
-      void vscode.window.showWarningMessage("Eggplant pattern preview only runs for Rust files.");
+    if (!isSupportedPreviewDocument(editor.document)) {
+      void vscode.window.showWarningMessage("Eggplant pattern preview only runs for Rust or .egg files.");
       return;
     }
 
@@ -353,7 +361,7 @@ class PreviewController {
     );
 
     if (this.lastPreview) {
-      await this.renderLastPreview(this.lastPreview.editor, this.lastPreview.ir, this.currentMode(), labelStyle, this.currentRecursiveStrategy, true);
+      await this.renderLastPreview(this.lastPreview.editor, this.lastPreview.ir, this.currentMode(), labelStyle, this.currentRecursiveStrategy, true, undefined, this.lastPreview.prepared);
     }
   }
 
@@ -369,7 +377,9 @@ class PreviewController {
         this.currentMode(),
         this.labelStyle(),
         this.currentRecursiveStrategy,
-        true
+        true,
+        undefined,
+        this.lastPreview.prepared
       );
     }
   }
@@ -386,7 +396,7 @@ class PreviewController {
     );
 
     if (this.lastPreview) {
-      await this.renderLastPreview(this.lastPreview.editor, this.lastPreview.ir, this.currentMode(), this.labelStyle(), strategy, true);
+      await this.renderLastPreview(this.lastPreview.editor, this.lastPreview.ir, this.currentMode(), this.labelStyle(), strategy, true, undefined, this.lastPreview.prepared);
     }
   }
 
@@ -455,7 +465,7 @@ class PreviewController {
 
   private async refreshCurrentPreview(): Promise<void> {
     const editor = this.lastPreview?.editor ?? vscode.window.activeTextEditor;
-    if (!editor || editor.document.languageId !== "rust") {
+    if (!editor || !isSupportedPreviewDocument(editor.document)) {
       return;
     }
     await this.requestPreview(editor, true, true);
@@ -475,7 +485,7 @@ class PreviewController {
     }
 
     const editor = this.lastPreview?.editor ?? vscode.window.activeTextEditor;
-    if (!editor || editor.document.languageId !== "rust") {
+    if (!editor || !isSupportedPreviewDocument(editor.document)) {
       return;
     }
 
@@ -499,29 +509,32 @@ class PreviewController {
   private async runRequest(request: PreviewRequest): Promise<void> {
     try {
       const offset = request.editor.document.offsetAt(request.editor.selection.active);
-      const source = request.editor.document.getText();
+      const prepared = await preparePreviewDocument(request.editor.document, offset);
+      const source = prepared.extractorSource;
       let extractedIr: PatternIr;
       try {
-        extractedIr = await runExtractor(request.editor.document, offset);
+        extractedIr = await runExtractorSource(source, prepared.extractorOffset, prepared.extractorFileName);
       } catch (error) {
-        const retried = await tryRuleCallOffsetFallback(request.editor.document, source, offset, error);
+        const retried = await tryRuleCallOffsetFallback(prepared, error);
         if (!retried) {
           throw error;
         }
         extractedIr = retried;
       }
-      if (shouldRetryEmptyPatternFunctionOnRuleLine(extractedIr, source, offset)) {
-        const retried = await tryRuleCallOffsetFallback(request.editor.document, source, offset);
+      if (shouldRetryEmptyPatternFunctionOnRuleLine(extractedIr, source, prepared.extractorOffset)) {
+        const retried = await tryRuleCallOffsetFallback(prepared);
         if (retried) {
           extractedIr = retried;
         }
       }
       const requiredMetadataIdentifiers = collectMetadataIdentifiers(extractedIr);
-      const autoMetadataSourceFiles = await discoverWorkspaceMetadataSourceFiles(
-        request.editor.document.uri.fsPath,
-        this.metadataSourceFiles,
-        requiredMetadataIdentifiers
-      );
+      const autoMetadataSourceFiles = prepared.kind === "rust"
+        ? await discoverWorkspaceMetadataSourceFiles(
+          request.editor.document.uri.fsPath,
+          this.metadataSourceFiles,
+          requiredMetadataIdentifiers
+        )
+        : [];
       this.autoMetadataSourceFiles = autoMetadataSourceFiles;
       const allMetadataSourceFiles = Array.from(new Set([
         ...autoMetadataSourceFiles,
@@ -532,7 +545,7 @@ class PreviewController {
       if (this.pending && this.pending.id > request.id) {
         return;
       }
-      const mode = request.forcedMode ?? this.currentModeOverride ?? resolveDotViewMode(ir, offset);
+      const mode = request.forcedMode ?? this.currentModeOverride ?? resolveDotViewMode(ir, prepared.extractorOffset);
       await this.renderLastPreview(
         request.editor,
         ir,
@@ -540,11 +553,13 @@ class PreviewController {
         this.labelStyle(),
         this.currentRecursiveStrategy,
         !request.manual,
-        allMetadataSourceFiles
+        allMetadataSourceFiles,
+        prepared
       );
       this.lastPreview = {
         editor: request.editor,
-        ir
+        ir,
+        prepared
       };
       this.lastAutoWarning = undefined;
     } catch (error) {
@@ -603,7 +618,9 @@ class PreviewController {
       this.currentMode(),
       this.labelStyle(),
       this.currentRecursiveStrategy,
-      true
+      true,
+      undefined,
+      this.lastPreview.prepared
     );
   }
 
@@ -617,7 +634,14 @@ class PreviewController {
     metadataSourceFiles: string[] = Array.from(new Set([
       ...this.autoMetadataSourceFiles,
       ...this.metadataSourceFiles
-    ]))
+    ])),
+    prepared: PreparedPreviewDocument = {
+      kind: "rust",
+      extractorSource: editor.document.getText(),
+      extractorOffset: editor.document.offsetAt(editor.selection.active),
+      extractorFileName: editor.document.fileName,
+      sourceNotice: null
+    }
   ): Promise<void> {
     const allConstraintEntries = buildConstraintEntries(baseIr);
     const constraintEntries = buildConstraintEntries(baseIr);
@@ -664,6 +688,7 @@ class PreviewController {
       this.panel(preserveFocus),
       editor,
       previewInput.ir,
+      prepared,
       mode,
       this.currentSourceMode,
       labelStyle,
@@ -677,7 +702,7 @@ class PreviewController {
       this.constraintFilterNodeId,
       this.activeConstraintId,
       previewInput.recoveryMetadata,
-      previewInput.notice,
+      [previewInput.notice, prepared.sourceNotice].filter((value): value is string => Boolean(value)).join(" | ") || null,
       this.typstOverridesByTargetId
     );
   }
@@ -693,7 +718,9 @@ class PreviewController {
       this.currentMode(),
       this.labelStyle(),
       this.currentRecursiveStrategy,
-      true
+      true,
+      undefined,
+      this.lastPreview.prepared
     );
   }
 
@@ -714,7 +741,9 @@ class PreviewController {
       this.currentMode(),
       this.labelStyle(),
       this.currentRecursiveStrategy,
-      true
+      true,
+      undefined,
+      this.lastPreview.prepared
     );
   }
 
@@ -735,7 +764,9 @@ class PreviewController {
       this.currentMode(),
       this.labelStyle(),
       this.currentRecursiveStrategy,
-      true
+      true,
+      undefined,
+      this.lastPreview.prepared
     );
   }
 
@@ -770,6 +801,10 @@ class PreviewController {
   private async revealSourceTarget(targetId: string): Promise<void> {
     const preview = this.lastPreview;
     if (!preview) {
+      return;
+    }
+    if (preview.prepared.kind !== "rust") {
+      void vscode.window.showInformationMessage("Source reveal is disabled for .egg previews because current spans refer to generated in-memory Rust.");
       return;
     }
 
@@ -914,20 +949,18 @@ function shouldRetryEmptyPatternFunctionOnRuleLine(ir: PatternIr, source: string
 }
 
 async function tryRuleCallOffsetFallback(
-  document: vscode.TextDocument,
-  source: string,
-  offset: number,
+  prepared: PreparedPreviewDocument,
   error?: unknown
 ): Promise<PatternIr | null> {
   if (error instanceof ExtractorError && error.kind !== "unsupported_scope") {
     return null;
   }
-  if (!isNearRuleCallText(source, offset)) {
+  if (!isNearRuleCallText(prepared.extractorSource, prepared.extractorOffset)) {
     return null;
   }
-  for (const retryOffset of ruleCallRetryOffsets(source, offset)) {
+  for (const retryOffset of ruleCallRetryOffsets(prepared.extractorSource, prepared.extractorOffset)) {
     try {
-      return await runExtractor(document, retryOffset);
+      return await runExtractorSource(prepared.extractorSource, retryOffset, prepared.extractorFileName);
     } catch (retryError) {
       if (!(retryError instanceof ExtractorError) || retryError.kind !== "unsupported_scope") {
         throw retryError;
@@ -1026,6 +1059,7 @@ async function renderDot(
   panel: PreviewPanel,
   editor: vscode.TextEditor,
   ir: PatternIr,
+  prepared: PreparedPreviewDocument,
   mode: DotViewMode,
   sourceMode: PreviewSourceMode,
   effectiveLabelStyle: DotLabelStyle,
@@ -1042,6 +1076,7 @@ async function renderDot(
   notice: string | null,
   typstOverridesByTargetId: Record<string, string>
 ): Promise<void> {
+  const sourceTargetIds = prepared.kind === "rust" ? collectSourceTargetIds(ir, mode) : [];
   const typstSources = Object.fromEntries(
     collectTypstReplacementSources(ir, mode, effectiveLabelStyle, recursiveStrategy)
       .map((entry) => [entry.targetId, entry.source] as const)
@@ -1063,7 +1098,7 @@ async function renderDot(
       return [targetId, rendering.mode === "math" ? "Typst: rendered" : "Typst: fallback text"];
     })
   );
-  for (const targetId of collectSourceTargetIds(ir, mode)) {
+  for (const targetId of sourceTargetIds) {
     if (!(targetId in typstStatusByTargetId)) {
       typstStatusByTargetId[targetId] = "Typst: no source";
     }
@@ -1091,7 +1126,7 @@ async function renderDot(
     typstRenderings,
     typstSources,
     typstStatusByTargetId,
-    sourceTargetIds: collectSourceTargetIds(ir, mode),
+    sourceTargetIds,
     allConstraints,
     constraints: visibleConstraints,
     constraintCountByNodeId: buildConstraintCountByNodeId(constraints),
@@ -1234,7 +1269,7 @@ function modeLabel(mode: DotViewMode): string {
 }
 
 function formatPreviewError(error: unknown): string {
-  if (error instanceof ExtractorError) {
+  if (error instanceof ExtractorError || error instanceof EggTranspilerError) {
     return error.message;
   }
   return error instanceof Error ? error.message : String(error);
@@ -1247,9 +1282,85 @@ interface PreviewRequest {
   forcedMode: DotViewMode | undefined;
 }
 
+type PreviewDocumentKind = "rust" | "egg";
+
+interface PreparedPreviewDocument {
+  kind: PreviewDocumentKind;
+  extractorSource: string;
+  extractorOffset: number;
+  extractorFileName: string;
+  sourceNotice: string | null;
+}
+
 interface LastPreview {
   editor: vscode.TextEditor;
   ir: PatternIr;
+  prepared: PreparedPreviewDocument;
+}
+
+function isRustPreviewDocument(document: vscode.TextDocument): boolean {
+  return document.languageId === "rust";
+}
+
+function isEggPreviewDocument(document: vscode.TextDocument): boolean {
+  return document.fileName.endsWith(".egg") || document.uri.fsPath.endsWith(".egg");
+}
+
+function isSupportedPreviewDocument(document: vscode.TextDocument): boolean {
+  return isRustPreviewDocument(document) || isEggPreviewDocument(document);
+}
+
+function collectRuleCallOffsets(source: string): number[] {
+  return Array.from(source.matchAll(/add_rule(?:_with_hook)?\s*\(/g)).map((match) => match.index ?? 0);
+}
+
+function countEggRuleFormsBeforeOffset(source: string, offset: number): number {
+  const bounded = source.slice(0, Math.max(0, Math.min(source.length, offset)));
+  return Array.from(bounded.matchAll(/\((?:rewrite|birewrite|rule)\b/g)).length;
+}
+
+function resolveEggPreviewOffset(eggSource: string, eggOffset: number, generatedRust: string): number {
+  const ruleCallOffsets = collectRuleCallOffsets(generatedRust);
+  if (ruleCallOffsets.length === 0) {
+    throw new EggTranspilerError(
+      "transpile_failed",
+      "Generated Rust does not contain any add_rule scopes yet."
+    );
+  }
+  if (ruleCallOffsets.length === 1) {
+    return ruleCallOffsets[0];
+  }
+  const eggRuleOrdinal = Math.max(0, countEggRuleFormsBeforeOffset(eggSource, eggOffset) - 1);
+  return ruleCallOffsets[Math.min(eggRuleOrdinal, ruleCallOffsets.length - 1)];
+}
+
+async function preparePreviewDocument(
+  document: vscode.TextDocument,
+  offset: number
+): Promise<PreparedPreviewDocument> {
+  if (isRustPreviewDocument(document)) {
+    return {
+      kind: "rust",
+      extractorSource: document.getText(),
+      extractorOffset: offset,
+      extractorFileName: document.fileName,
+      sourceNotice: null
+    };
+  }
+
+  if (!isEggPreviewDocument(document)) {
+    throw new Error("Unsupported preview document type.");
+  }
+
+  const eggSource = document.getText();
+  const generatedRust = await transpileEggSource(eggSource);
+  return {
+    kind: "egg",
+    extractorSource: generatedRust,
+    extractorOffset: resolveEggPreviewOffset(eggSource, offset, generatedRust),
+    extractorFileName: `${document.fileName}.transpiled.rs`,
+    sourceNotice: "preview source=.egg -> in-memory transpiled Rust; source reveal and rewrites are disabled"
+  };
 }
 
 function collectSourceTargetIds(ir: PatternIr, mode: DotViewMode): string[] {

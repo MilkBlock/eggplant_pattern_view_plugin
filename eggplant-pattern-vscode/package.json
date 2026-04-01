@@ -18,6 +18,7 @@
   ],
   "activationEvents": [
     "onLanguage:rust",
+    "workspaceContains:**/*.egg",
     "onCommand:eggplant-pattern.preview",
     "onCommand:eggplant-pattern.showPatternDot",
     "onCommand:eggplant-pattern.showActionDot",
@@ -53,7 +54,7 @@
         {
           "command": "eggplant-pattern.selectDotView",
           "group": "navigation",
-          "when": "resourceLangId == rust"
+          "when": "resourceLangId == rust || resourceExtname == .egg"
         }
       ]
     },

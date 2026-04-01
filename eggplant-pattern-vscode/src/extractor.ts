@@ -71,8 +71,16 @@ export function resolveExtractorPath(): string {
 }
 
 export async function runExtractor(document: vscode.TextDocument, offset: number): Promise<PatternIr> {
-  const extractorPath = resolveExtractorPath();
   const source = document.getText();
+  return runExtractorSource(source, offset, document.fileName);
+}
+
+export async function runExtractorSource(
+  source: string,
+  offset: number,
+  fileName = "preview.rs"
+): Promise<PatternIr> {
+  const extractorPath = resolveExtractorPath();
   // VS Code offsets are UTF-16 code units; extractor expects UTF-8 byte offsets.
   const byteOffset = Buffer.byteLength(source.slice(0, offset), "utf8");
   await ensureExtractorAvailable(extractorPath);
@@ -104,7 +112,7 @@ export async function runExtractor(document: vscode.TextDocument, offset: number
         resolve(JSON.parse(stdout) as PatternIr);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        reject(new ExtractorError("invalid_json", `Extractor returned invalid JSON: ${message}`));
+        reject(new ExtractorError("invalid_json", `Extractor returned invalid JSON for ${fileName}: ${message}`));
       }
     });
 
