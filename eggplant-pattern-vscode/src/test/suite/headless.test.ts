@@ -31,6 +31,7 @@ import {
 import { displayTextFallbackSource, renderTypstSnippetsWithRenderer } from "../../shared/typstCore";
 import { normalizeTypstMathSource, renderTypstSnippets } from "../../typst";
 import { findRedundantActionInsertChecks } from "../../ruleChecks";
+import { resolveEggPreviewOffset } from "../../eggRuleMapping";
 
 const WORKSPACE_ROOT = path.resolve(__dirname, "../../../../");
 const FIXTURE_PATH = path.resolve(WORKSPACE_ROOT, "samples", "pattern_samples.rs");
@@ -720,6 +721,33 @@ fn demo(use_mul: bool, recorder: ActionSampleRecorder) {
     assert.ok(ir.scope.action_range);
     assert.ok(ir.scope.pattern_range);
     assert.ok(ir.action_effects.length >= 2);
+  });
+
+  test(".egg rule cursor mapping selects the matching transpiled add_rule ordinal", () => {
+    const eggSource = [
+      "(ruleset demo)",
+      "(datatype Math (Num i64) (Add Math Math) (Mul Math Math))",
+      "(rewrite (Add a (Num 0)) a :ruleset demo)",
+      "(rewrite (Mul a (Num 1)) a :ruleset demo)",
+    ].join("\n");
+
+    const generatedRust = [
+      "fn main() {",
+      "  MyTx::add_rule(\"rule_add\", demo, || { /* add */ }, |ctx, pat| { ctx.union(pat.add_node1, pat.a); });",
+      "  MyTx::add_rule(\"rule_mul\", demo, || { /* mul */ }, |ctx, pat| { ctx.union(pat.mul_node1, pat.a); });",
+      "}",
+    ].join("\n");
+
+    const addRuleOffsets = Array.from(generatedRust.matchAll(/add_rule(?:_with_hook)?\s*\(/g)).map((match) => match.index ?? 0);
+    assert.equal(addRuleOffsets.length, 2);
+
+    const addRuleEggOffset = eggSource.indexOf("(rewrite (Add a (Num 0))");
+    const mulRuleEggOffset = eggSource.indexOf("(rewrite (Mul a (Num 1))");
+    assert.notEqual(addRuleEggOffset, -1);
+    assert.notEqual(mulRuleEggOffset, -1);
+
+    assert.equal(resolveEggPreviewOffset(eggSource, addRuleEggOffset, generatedRust), addRuleOffsets[0]);
+    assert.equal(resolveEggPreviewOffset(eggSource, mulRuleEggOffset, generatedRust), addRuleOffsets[1]);
   });
 
   test("inline nested action calls get synthetic tmp bindings and separate graph nodes", () => {

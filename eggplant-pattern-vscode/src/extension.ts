@@ -5,6 +5,7 @@ import * as path from "path";
 import { buildTraceSourcePreview, resolveDynamicActionRecoveryPolicy, summarizeRuntimeActionSampleTrace } from "./actionRecovery";
 import { collectTypstReplacementSources, DotLabelStyle, DotViewMode, patternIrToDotWithMode, RecursiveStrategy } from "./dot";
 import { configureExtractorResolution, ExtractorError, runExtractor, runExtractorSource } from "./extractor";
+import { resolveEggPreviewOffset } from "./eggRuleMapping";
 import { configureTranspilerResolution, EggTranspilerError, transpileEggSource } from "./eggTranspiler";
 import { PatternIr } from "./ir";
 import { clearMetadataSourceCache, discoverWorkspaceMetadataSourceFiles, loadMetadataSources, mergeExternalMetadata, pickMetadataSourceFiles } from "./metadataSources";
@@ -1422,30 +1423,6 @@ function isSupportedPreviewDocument(document: vscode.TextDocument): boolean {
   return isRustPreviewDocument(document) || isEggPreviewDocument(document);
 }
 
-function collectRuleCallOffsets(source: string): number[] {
-  return Array.from(source.matchAll(/add_rule(?:_with_hook)?\s*\(/g)).map((match) => match.index ?? 0);
-}
-
-function countEggRuleFormsBeforeOffset(source: string, offset: number): number {
-  const bounded = source.slice(0, Math.max(0, Math.min(source.length, offset)));
-  return Array.from(bounded.matchAll(/\((?:rewrite|birewrite|rule)\b/g)).length;
-}
-
-function resolveEggPreviewOffset(eggSource: string, eggOffset: number, generatedRust: string): number {
-  const ruleCallOffsets = collectRuleCallOffsets(generatedRust);
-  if (ruleCallOffsets.length === 0) {
-    throw new EggTranspilerError(
-      "transpile_failed",
-      "Generated Rust does not contain any add_rule scopes yet."
-    );
-  }
-  if (ruleCallOffsets.length === 1) {
-    return ruleCallOffsets[0];
-  }
-  const eggRuleOrdinal = Math.max(0, countEggRuleFormsBeforeOffset(eggSource, eggOffset) - 1);
-  return ruleCallOffsets[Math.min(eggRuleOrdinal, ruleCallOffsets.length - 1)];
-}
-
 async function preparePreviewDocument(
   document: vscode.TextDocument,
   offset: number
@@ -1466,10 +1443,17 @@ async function preparePreviewDocument(
 
   const eggSource = document.getText();
   const generatedRust = await transpileEggSource(eggSource);
+  let extractorOffset: number;
+  try {
+    extractorOffset = resolveEggPreviewOffset(eggSource, offset, generatedRust);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new EggTranspilerError("transpile_failed", message);
+  }
   return {
     kind: "egg",
     extractorSource: generatedRust,
-    extractorOffset: resolveEggPreviewOffset(eggSource, offset, generatedRust),
+    extractorOffset,
     extractorFileName: `${document.fileName}.transpiled.rs`,
     sourceNotice: "preview source=.egg -> in-memory transpiled Rust; source reveal and rewrites are disabled"
   };
