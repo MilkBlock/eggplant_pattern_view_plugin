@@ -1,6 +1,5 @@
 import * as fs from "fs";
 import * as path from "path";
-import { pathToFileURL } from "url";
 
 let configuredExtensionPath: string | undefined;
 let transpilerModulePromise: Promise<TranspilerModule> | undefined;
@@ -47,7 +46,9 @@ async function loadTranspilerModule(): Promise<TranspilerModule> {
         );
       }
 
-      const transpilerModule = (await import(pathToFileURL(modulePath).href)) as TranspilerModule;
+      // Keep a filesystem path import here. The extension compiles to CommonJS and
+      // runtime loading goes through require(); `file://` specifiers fail there.
+      const transpilerModule = (await import(modulePath)) as TranspilerModule;
       const wasmBytes = await fs.promises.readFile(wasmPath);
       if (typeof transpilerModule.initSync === "function") {
         transpilerModule.initSync({ module: wasmBytes });
