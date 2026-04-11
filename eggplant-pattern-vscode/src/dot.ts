@@ -37,7 +37,7 @@ const TYPOLOGY_PATTERN_COLOR = "#5F7A8A";
 const TYPOLOGY_ACTION_COLOR = "#B86A5B";
 
 function typstColorWrap(source: string, color: string): string {
-  return `#text(fill: rgb(${JSON.stringify(color)}))[${source}]`;
+  return `#text(fill: rgb(${JSON.stringify(color)}))[$ ${source} $]`;
 }
 
 function quote(value: string): string {
@@ -597,7 +597,7 @@ function typstPatternSource(
   nodeById: Map<string, PatternNode>,
   incomingCounts: Map<string, number>
 ): string {
-  const patternAtomicRenderer = (value: string) => typstColorWrap(typstAtomicExpression(value), TYPOLOGY_PATTERN_COLOR);
+  const patternAtomicRenderer = (value: string) => typstAtomicExpression(value);
   if (labelStyle !== "full" && node.inputs.length > 0) {
     const recursive = recursivePatternLabel(
       ir,
@@ -606,7 +606,7 @@ function typstPatternSource(
       node.id,
       strategy,
       new Set(),
-      patternAtomicRenderer
+      typstAtomicExpression
     );
     if (recursive) {
       return typstColorWrap(recursive.text, TYPOLOGY_PATTERN_COLOR);
@@ -617,7 +617,7 @@ function typstPatternSource(
   if (typstTemplate) {
     const rendered = applyDisplayTemplate(
       typstTemplate,
-      node.inputs.map((input) => patternAtomicRenderer(input)),
+      node.inputs.map((input) => typstAtomicExpression(input)),
       variantPrecedence(ir, node.dsl_type)
     );
     if (rendered) {
@@ -626,7 +626,7 @@ function typstPatternSource(
   }
 
   if (node.inputs.length === 0) {
-    return typstColorWrap(patternAtomicRenderer(node.id), TYPOLOGY_PATTERN_COLOR);
+    return typstColorWrap(typstAtomicExpression(node.id), TYPOLOGY_PATTERN_COLOR);
   }
 
   return nodeLabel(
@@ -659,8 +659,8 @@ function recursiveActionArgLabel(
   seen: Set<string>
 ): RecursiveActionResult | null {
   const trimmed = compactExpression(arg);
-  const patternAtomicRenderer = (value: string) => typstColorWrap(typstAtomicExpression(value), TYPOLOGY_PATTERN_COLOR);
-  const actionAtomicRenderer = (value: string) => typstColorWrap(typstAtomicExpression(value), TYPOLOGY_ACTION_COLOR);
+  const patternAtomicRenderer = (value: string) => typstAtomicExpression(value);
+  const actionAtomicRenderer = (value: string) => typstAtomicExpression(value);
   if (effectByBinding.has(trimmed)) {
     const childEffectId = effectByBinding.get(trimmed);
     if (childEffectId) {
