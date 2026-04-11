@@ -666,7 +666,7 @@ function recursiveActionArgLabel(
     if (childEffectId) {
       const child = recursiveActionLabel(ir, strategy, effectByBinding, nodeById, incomingCounts, childEffectId, seen, actionAtomicRenderer);
       if (child) {
-        return child;
+        return { ...child, text: typstColorWrap(child.text, TYPOLOGY_ACTION_COLOR) };
       }
     }
   }
@@ -702,7 +702,7 @@ function recursiveActionArgLabel(
       return null;
     }
     return {
-      text: rendered,
+      text: typstColorWrap(rendered, TYPOLOGY_ACTION_COLOR),
       precedence: variantPrecedence(ir, inlineInsert.variantName),
       isAtomic: inlineInsert.args.length === 0,
     };
@@ -712,7 +712,7 @@ function recursiveActionArgLabel(
   if (nodeById.has(patVar)) {
     const child = recursivePatternLabel(ir, nodeById, incomingCounts, patVar, strategy, new Set(), patternAtomicRenderer);
     if (child) {
-      return child;
+      return { ...child, text: typstColorWrap(child.text, TYPOLOGY_PATTERN_COLOR) };
     }
     if (strategy === "tree-safe") {
       return null;
@@ -858,7 +858,7 @@ function actionEffectTypstSource(
   if (labelStyle === "recursive") {
     const rendered = recursiveActionLabel(ir, strategy, effectByBinding, nodeById, incomingCounts, effectId, new Set(), typstAtomicExpression);
     if (rendered) {
-      return rendered.text;
+      return typstColorWrap(rendered.text, TYPOLOGY_ACTION_COLOR);
     }
   }
 
