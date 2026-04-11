@@ -37,7 +37,7 @@ const TYPOLOGY_PATTERN_COLOR = "#5F7A8A";
 const TYPOLOGY_ACTION_COLOR = "#B86A5B";
 
 function typstColorWrap(source: string, color: string): string {
-  return `(#text(fill: rgb(${JSON.stringify(color)}))[${source}])`;
+  return `#text(fill: rgb(${JSON.stringify(color)}))[${source}]`;
 }
 
 function quote(value: string): string {
@@ -609,7 +609,7 @@ function typstPatternSource(
       patternAtomicRenderer
     );
     if (recursive) {
-      return recursive.text;
+      return typstColorWrap(recursive.text, TYPOLOGY_PATTERN_COLOR);
     }
   }
 
@@ -621,12 +621,12 @@ function typstPatternSource(
       variantPrecedence(ir, node.dsl_type)
     );
     if (rendered) {
-      return rendered;
+      return typstColorWrap(rendered, TYPOLOGY_PATTERN_COLOR);
     }
   }
 
   if (node.inputs.length === 0) {
-    return patternAtomicRenderer(node.id);
+    return typstColorWrap(patternAtomicRenderer(node.id), TYPOLOGY_PATTERN_COLOR);
   }
 
   return nodeLabel(
@@ -816,7 +816,7 @@ function actionEffectLabel(
   if (labelStyle === "recursive") {
     const rendered = recursiveActionLabel(ir, strategy, effectByBinding, nodeById, incomingCounts, effectId, new Set(), displayAtomicExpression);
     if (rendered) {
-      return rendered.text;
+      return typstColorWrap(rendered.text, TYPOLOGY_ACTION_COLOR);
     }
   }
   if (parsed) {
@@ -829,7 +829,7 @@ function actionEffectLabel(
         )
       : null;
     if (rendered) {
-      return rendered;
+      return typstColorWrap(rendered, TYPOLOGY_ACTION_COLOR);
     }
   }
   return compactExpression(semantic);
