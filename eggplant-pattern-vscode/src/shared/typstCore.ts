@@ -33,7 +33,9 @@ export function buildTypstMathDocument(source: string): string {
 export function displayTextFallbackSource(source: string): string {
   let current = source;
   while (true) {
-    const next = current.replace(/upright\("((?:\\.|[^"])*)"\)/g, "$1");
+    const next = current
+      .replace(/#text\(fill: rgb\("#[0-9A-Fa-f]{6}"\)\)\[([^\[\]]+)\]/g, "$1")
+      .replace(/upright\("((?:\\.|[^"])*)"\)/g, "$1");
     if (next === current) {
       return next;
     }
