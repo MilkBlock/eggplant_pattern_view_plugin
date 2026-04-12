@@ -57,6 +57,7 @@ pub struct PatternConstraint {
     pub id: String,
     pub source_text: String,
     pub resolved_text: String,
+    pub semantic_text: Option<String>,
     pub referenced_vars: Vec<String>,
     pub range: TextSpan,
 }
@@ -67,6 +68,7 @@ pub struct ActionEffect {
     pub effect_id: String,
     pub bound_var: Option<String>,
     pub source_text: String,
+    pub semantic_text: Option<String>,
     pub referenced_pat_vars: Vec<String>,
     pub referenced_action_vars: Vec<String>,
     pub range: TextSpan,

@@ -30,6 +30,7 @@ export interface PatternConstraint {
   id: string;
   source_text: string;
   resolved_text: string;
+  semantic_text?: string | null;
   referenced_vars: string[];
   range: TextSpan;
 }
@@ -39,6 +40,7 @@ export interface ActionEffect {
   effect_id: string;
   bound_var: string | null;
   source_text: string;
+  semantic_text?: string | null;
   referenced_pat_vars: string[];
   referenced_action_vars: string[];
   range: TextSpan;

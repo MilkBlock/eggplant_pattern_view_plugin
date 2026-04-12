@@ -3,20 +3,39 @@ import { spawnSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 import { buildTraceSourcePreview, resolveDynamicActionRecoveryPolicy, summarizeRuntimeActionSampleTrace } from "./actionRecovery";
-import { collectTypstReplacementSources, compactConstraintLabel, DotLabelStyle, DotViewMode, inlineConstraintAnnotation, patternIrToDotWithMode, RecursiveStrategy } from "./dot";
-import { configureExtractorResolution, ExtractorError, runExtractorSource } from "./extractor";
+import { collectTypstReplacementSources, DotLabelStyle, DotViewMode, patternIrToDotWithMode, RecursiveStrategy } from "./dot";
+import { configureExtractorResolution, ExtractorError, runExtractor, runExtractorSource } from "./extractor";
+import { resolveEggPreviewOffset } from "./eggRuleMapping";
 import { configureTranspilerResolution, EggTranspilerError, transpileEggSource } from "./eggTranspiler";
 import { PatternIr } from "./ir";
+import { buildMathViewModel, buildMathViewTypstSource } from "./mathView";
 import { clearMetadataSourceCache, discoverWorkspaceMetadataSourceFiles, loadMetadataSources, mergeExternalMetadata, pickMetadataSourceFiles } from "./metadataSources";
 import {
+  buildConstraintEntries,
+  buildMetadataSourcesView,
+  buildPreviewPanelState,
+  createDefaultPreviewInteractionState,
+  collectSourceTargetIds,
+  drilldownConstraintNode as applyConstraintNodeDrilldown,
+  filterConstraintEntries,
+  formatPreviewTitle,
+  PreviewConstraintEntry,
   PreviewConstraintFilterMode,
-  PreviewMetadataSourceEntry,
-  PreviewMetadataSourceKind,
+  PreviewInteractionState,
+  PreviewInteractionProjection,
   PreviewMetadataSourcesView,
-  PreviewPanel,
   PreviewSourceMode,
-  RecoveryUiMode
+  projectPreviewInteractionState,
+  RecoveryUiMode,
+  selectConstraint as applyConstraintSelection,
+  selectRuleCheck as applyRuleCheckSelection,
+  setConstraintFilterMode as applyConstraintFilterMode,
+  toggleRuleCheckView
+} from "./shared/previewCore";
+import {
+  PreviewPanel,
 } from "./previewPanel";
+import { buildRuleCheckRewritePlan, findRedundantActionInsertChecks } from "./ruleChecks";
 import { dotToSvg } from "./svg";
 import { renderTypstSnippets } from "./typst";
 
@@ -122,9 +141,7 @@ class PreviewController {
   private currentRecursiveStrategy: RecursiveStrategy;
   private metadataSourceFiles: string[];
   private autoMetadataSourceFiles: string[] = [];
-  private activeConstraintId: string | null = null;
-  private constraintFilterMode: PreviewConstraintFilterMode = "all";
-  private constraintFilterNodeId: string | null = null;
+  private interactionState: PreviewInteractionState = createDefaultPreviewInteractionState();
   private metadataWatchers: vscode.Disposable[] = [];
   private metadataRefreshTimer: NodeJS.Timeout | undefined;
   private typstOverridesByTargetId: Record<string, string> = {};
@@ -148,6 +165,9 @@ class PreviewController {
     onSaveTypstEdit: (targetId: string, source: string) => Promise<void>;
     onClearTypstEdit: (targetId: string) => Promise<void>;
     onTemporaryFullPreviewChange: (active: boolean) => Promise<void>;
+    onToggleRuleChecks: () => Promise<void>;
+    onSelectRuleCheck: (checkId: string) => Promise<void>;
+    onApplyRuleCheckRewrite: (checkId: string) => Promise<void>;
     onRefresh: () => Promise<void>;
   };
 
@@ -252,6 +272,15 @@ class PreviewController {
       onTemporaryFullPreviewChange: async (active: boolean) => {
         await this.setTemporaryFullPreview(active);
       },
+      onToggleRuleChecks: async () => {
+        await this.toggleRuleChecks();
+      },
+      onSelectRuleCheck: async (checkId: string) => {
+        await this.selectRuleCheck(checkId);
+      },
+      onApplyRuleCheckRewrite: async (checkId: string) => {
+        await this.applyRuleCheckRewrite(checkId);
+      },
       onRefresh: async () => {
         const editor = this.lastPreview?.editor ?? vscode.window.activeTextEditor;
         if (editor) {
@@ -310,9 +339,7 @@ class PreviewController {
 
   async showCurrentMode(mode: DotViewMode): Promise<void> {
     this.currentModeOverride = mode;
-    this.activeConstraintId = null;
-    this.constraintFilterMode = "all";
-    this.constraintFilterNodeId = null;
+    this.resetConstraintSelection();
     if (this.lastPreview) {
       await this.renderLastPreview(
         this.lastPreview.editor,
@@ -351,9 +378,7 @@ class PreviewController {
   async showCurrentLabelStyle(labelStyle: DotLabelStyle): Promise<void> {
     this.currentLabelStyle = labelStyle;
     this.temporaryFullLabelPreview = false;
-    this.activeConstraintId = null;
-    this.constraintFilterMode = "all";
-    this.constraintFilterNodeId = null;
+    this.resetConstraintSelection();
     await vscode.workspace.getConfiguration().update(
       "eggplantPattern.defaultLabelStyle",
       labelStyle,
@@ -367,9 +392,7 @@ class PreviewController {
 
   async showCurrentSourceMode(sourceMode: PreviewSourceMode): Promise<void> {
     this.currentSourceMode = sourceMode;
-    this.activeConstraintId = null;
-    this.constraintFilterMode = "all";
-    this.constraintFilterNodeId = null;
+    this.resetConstraintSelection();
     if (this.lastPreview) {
       await this.renderLastPreview(
         this.lastPreview.editor,
@@ -386,9 +409,7 @@ class PreviewController {
 
   async showCurrentRecursiveStrategy(strategy: RecursiveStrategy): Promise<void> {
     this.currentRecursiveStrategy = strategy;
-    this.activeConstraintId = null;
-    this.constraintFilterMode = "all";
-    this.constraintFilterNodeId = null;
+    this.resetConstraintSelection();
     await vscode.workspace.getConfiguration().update(
       "eggplantPattern.defaultRecursiveStrategy",
       strategy,
@@ -603,6 +624,23 @@ class PreviewController {
     return this.currentModeOverride ?? PreviewPanel.current()?.snapshot()?.mode ?? "combined";
   }
 
+  private previewInteractionState(): PreviewInteractionState {
+    return this.interactionState;
+  }
+
+  private applyPreviewInteractionState(state: PreviewInteractionState): void {
+    this.interactionState = { ...state };
+  }
+
+  private resetConstraintSelection(): void {
+    this.applyPreviewInteractionState({
+      ...this.previewInteractionState(),
+      activeConstraintId: null,
+      constraintFilterMode: "all",
+      constraintFilterNodeId: null
+    });
+  }
+
   private async setTemporaryFullPreview(active: boolean): Promise<void> {
     const nextActive = active && this.currentLabelStyle !== "full";
     if (this.temporaryFullLabelPreview === nextActive) {
@@ -643,25 +681,15 @@ class PreviewController {
       sourceNotice: null
     }
   ): Promise<void> {
-    const allConstraintEntries = buildConstraintEntries(baseIr);
+    const allConstraintEntries = buildConstraintEntries(baseIr, { includeInlineHidden: true });
     const constraintEntries = buildConstraintEntries(baseIr);
-    const constraintFilterNodeId = this.constraintFilterNodeId;
-    if (
-      this.constraintFilterMode === "node-specific"
-      && constraintFilterNodeId
-      && !constraintEntries.some((constraint) => constraint.referencedNodeIds.includes(constraintFilterNodeId))
-    ) {
-      this.constraintFilterMode = "all";
-      this.constraintFilterNodeId = null;
-    }
-    const visibleConstraints = filterConstraintEntries(
-      constraintEntries,
-      this.constraintFilterMode,
-      this.constraintFilterNodeId
+    const ruleChecks = findRedundantActionInsertChecks(baseIr);
+    const interactionProjection = projectPreviewInteractionState(
+      this.previewInteractionState(),
+      ruleChecks,
+      constraintEntries
     );
-    if (!visibleConstraints.some((constraint) => constraint.id === this.activeConstraintId)) {
-      this.activeConstraintId = null;
-    }
+    this.applyPreviewInteractionState(interactionProjection.state);
     const metadataSourcesView = buildMetadataSourcesView(
       editor.document.fileName,
       this.autoMetadataSourceFiles,
@@ -698,9 +726,8 @@ class PreviewController {
       metadataSourcesView,
       allConstraintEntries,
       constraintEntries,
-      this.constraintFilterMode,
-      this.constraintFilterNodeId,
-      this.activeConstraintId,
+      ruleChecks,
+      interactionProjection,
       previewInput.recoveryMetadata,
       [previewInput.notice, prepared.sourceNotice].filter((value): value is string => Boolean(value)).join(" | ") || null,
       this.typstOverridesByTargetId
@@ -711,7 +738,9 @@ class PreviewController {
     if (!this.lastPreview) {
       return;
     }
-    this.activeConstraintId = this.activeConstraintId === constraintId ? null : constraintId;
+    this.applyPreviewInteractionState(
+      applyConstraintSelection(this.previewInteractionState(), constraintId)
+    );
     await this.renderLastPreview(
       this.lastPreview.editor,
       this.lastPreview.ir,
@@ -724,14 +753,97 @@ class PreviewController {
     );
   }
 
-  private async setConstraintFilterMode(mode: PreviewConstraintFilterMode): Promise<void> {
-    if (mode === this.constraintFilterMode) {
+  private async toggleRuleChecks(): Promise<void> {
+    this.applyPreviewInteractionState(toggleRuleCheckView(this.previewInteractionState()));
+    if (!this.lastPreview) {
       return;
     }
-    this.constraintFilterMode = mode;
-    if (mode === "all") {
-      this.constraintFilterNodeId = null;
+    await this.renderLastPreview(
+      this.lastPreview.editor,
+      this.lastPreview.ir,
+      this.currentMode(),
+      this.labelStyle(),
+      this.currentRecursiveStrategy,
+      true,
+      undefined,
+      this.lastPreview.prepared
+    );
+  }
+
+  private async selectRuleCheck(checkId: string): Promise<void> {
+    if (!this.lastPreview) {
+      return;
     }
+    this.applyPreviewInteractionState(
+      applyRuleCheckSelection(this.previewInteractionState(), checkId)
+    );
+    await this.renderLastPreview(
+      this.lastPreview.editor,
+      this.lastPreview.ir,
+      this.currentMode(),
+      this.labelStyle(),
+      this.currentRecursiveStrategy,
+      true,
+      undefined,
+      this.lastPreview.prepared
+    );
+  }
+
+  private async applyRuleCheckRewrite(checkId: string): Promise<void> {
+    const preview = this.lastPreview;
+    if (!preview) {
+      return;
+    }
+    if (preview.prepared.kind !== "rust") {
+      void vscode.window.showInformationMessage("Rule-check rewrites are disabled for .egg previews because edits target generated in-memory Rust.");
+      return;
+    }
+
+    const check = findRedundantActionInsertChecks(preview.ir).find((entry) => entry.id === checkId);
+    if (!check) {
+      void vscode.window.showWarningMessage("This redundant rule check is no longer available.");
+      return;
+    }
+
+    const document = preview.editor.document;
+    const plan = buildRuleCheckRewritePlan(preview.ir, check, document.getText());
+    if (!plan) {
+      void vscode.window.showWarningMessage("This redundant rule check cannot be rewritten automatically yet.");
+      return;
+    }
+
+    const edit = new vscode.WorkspaceEdit();
+    const orderedEdits = [...plan.edits].sort((left, right) => right.range.start - left.range.start);
+    for (const textEdit of orderedEdits) {
+      edit.replace(
+        document.uri,
+        new vscode.Range(document.positionAt(textEdit.range.start), document.positionAt(textEdit.range.end)),
+        textEdit.text
+      );
+    }
+
+    const applied = await vscode.workspace.applyEdit(edit);
+    if (!applied) {
+      void vscode.window.showWarningMessage("Failed to apply redundant rule rewrite.");
+      return;
+    }
+
+    await document.save();
+    this.applyPreviewInteractionState({
+      ...this.previewInteractionState(),
+      activeRuleCheckId: null
+    });
+    void vscode.window.setStatusBarMessage(`Eggplant Pattern: ${plan.summary}`, 2500);
+    await this.requestPreview(preview.editor, true, true);
+  }
+
+  private async setConstraintFilterMode(mode: PreviewConstraintFilterMode): Promise<void> {
+    if (mode === this.previewInteractionState().constraintFilterMode) {
+      return;
+    }
+    this.applyPreviewInteractionState(
+      applyConstraintFilterMode(this.previewInteractionState(), mode)
+    );
     if (!this.lastPreview) {
       return;
     }
@@ -751,13 +863,10 @@ class PreviewController {
     if (!this.lastPreview) {
       return;
     }
-    const visibleConstraints = buildConstraintEntries(this.lastPreview.ir)
-      .filter((constraint) => constraint.referencedNodeIds.includes(targetId));
-    this.constraintFilterMode = "node-specific";
-    this.constraintFilterNodeId = targetId;
-    if (!visibleConstraints.some((constraint) => constraint.id === this.activeConstraintId)) {
-      this.activeConstraintId = null;
-    }
+    const visibleConstraints = filterConstraintEntries(buildConstraintEntries(this.lastPreview.ir), "node-specific", targetId);
+    this.applyPreviewInteractionState(
+      applyConstraintNodeDrilldown(this.previewInteractionState(), targetId, visibleConstraints)
+    );
     await this.renderLastPreview(
       this.lastPreview.editor,
       this.lastPreview.ir,
@@ -1067,11 +1176,10 @@ async function renderDot(
   recursiveStrategy: RecursiveStrategy,
   metadataSourceFiles: string[],
   metadataSourcesView: PreviewMetadataSourcesView,
-  allConstraints: ReturnType<typeof buildConstraintEntries>,
-  constraints: ReturnType<typeof buildConstraintEntries>,
-  constraintFilterMode: PreviewConstraintFilterMode,
-  constraintFilterNodeId: string | null,
-  activeConstraintId: string | null,
+  allConstraints: PreviewConstraintEntry[],
+  constraints: PreviewConstraintEntry[],
+  ruleChecks: ReturnType<typeof findRedundantActionInsertChecks>,
+  interactionProjection: PreviewInteractionProjection,
   recoveryMetadata: ReturnType<typeof summarizeRuntimeActionSampleTrace> | null,
   notice: string | null,
   typstOverridesByTargetId: Record<string, string>
@@ -1081,6 +1189,10 @@ async function renderDot(
     collectTypstReplacementSources(ir, mode, effectiveLabelStyle, recursiveStrategy)
       .map((entry) => [entry.targetId, entry.source] as const)
   );
+  const mathViewModel = buildMathViewModel(ir, editor.document.getText());
+  const mathViewFormulaTargetId = `math-view:${mathViewModel.ruleName}`;
+  const mathViewFormulaSource = buildMathViewTypstSource(mathViewModel);
+  typstSources[mathViewFormulaTargetId] = mathViewFormulaSource;
   for (const [targetId, source] of Object.entries(typstOverridesByTargetId)) {
     if (source.trim().length > 0 && targetId in typstSources) {
       typstSources[targetId] = source.trim();
@@ -1108,40 +1220,44 @@ async function renderDot(
     editor.document.fileName
   );
   const svg = await dotToSvg(dot);
-  const strategySuffix = effectiveLabelStyle === "recursive" ? `, ${recursiveStrategy}` : "";
-  const visibleConstraints = filterConstraintEntries(constraints, constraintFilterMode, constraintFilterNodeId);
-  const activeConstraint = visibleConstraints.find((constraint) => constraint.id === activeConstraintId) ?? null;
-  await panel.render({
-    title: `Eggplant Pattern (${modeLabel(mode)}, ${sourceMode}, ${effectiveLabelStyle}${strategySuffix}): ${editor.document.fileName.split("/").pop() ?? "Preview"}`,
-    mode,
-    sourceMode,
-    recoveryMode: configuredRecoveryUiMode(),
-    tracePath: configuredActionSampleTracePath(),
-    labelStyle: selectedLabelStyle,
-    effectiveLabelStyle,
-    recursiveStrategy,
-    fileName: editor.document.fileName.split("/").pop() ?? "Preview",
-    dot,
-    svg,
-    typstRenderings,
-    typstSources,
-    typstStatusByTargetId,
-    sourceTargetIds,
-    allConstraints,
-    constraints: visibleConstraints,
-    constraintCountByNodeId: buildConstraintCountByNodeId(constraints),
-    constraintFilterMode,
-    constraintFilterNodeId,
-    activeConstraintId: activeConstraint?.id ?? null,
-    activeConstraintNodeIds: activeConstraint?.referencedNodeIds ?? [],
-    metadataSourceFiles,
-    metadataSourcesView,
-    recoverySummary: recoveryMetadata?.summary ?? null,
-    recoveryDiagnostics: recoveryMetadata?.diagnostics.map((entry) => entry.message) ?? [],
-    sourceWarning: null,
-    showSwitchToAst: false,
-    notice
-  });
+  await panel.render(
+    buildPreviewPanelState({
+      mode,
+      sourceMode,
+      selectedLabelStyle,
+      effectiveLabelStyle,
+      recursiveStrategy,
+      fileName: editor.document.fileName.split("/").pop() ?? "Preview",
+      dot,
+      svg,
+      typstRenderings,
+      typstSources,
+      typstStatusByTargetId,
+      sourceTargetIds,
+      allConstraints,
+      constraints,
+      ruleChecks,
+      interactionState: interactionProjection.state,
+      metadataSourceFiles,
+      metadataSourcesView,
+      recoveryMode: configuredRecoveryUiMode(),
+      tracePath: configuredActionSampleTracePath(),
+      recoverySummary: recoveryMetadata?.summary ?? null,
+      recoveryDiagnostics: recoveryMetadata?.diagnostics.map((entry) => entry.message) ?? [],
+      sourceWarning: null,
+      showSwitchToAst: false,
+      notice,
+      mathView: {
+        ruleName: mathViewModel.ruleName,
+        formulaTargetId: mathViewFormulaTargetId,
+        formulaSource: mathViewFormulaSource,
+        derivations: mathViewModel.derivations.map((entry) => ({
+          targetId: entry.targetId,
+          label: entry.label
+        }))
+      }
+    })
+  );
 }
 
 async function renderNotice(panel: PreviewPanel, editor: vscode.TextEditor, message: string): Promise<void> {
@@ -1149,13 +1265,19 @@ async function renderNotice(panel: PreviewPanel, editor: vscode.TextEditor, mess
   const dot = withGitDotMetadata([
     "digraph EggplantPatternStatus {",
     "  graph [pad=0.3];",
-    "  node [shape=note, style=\"rounded,filled\", fillcolor=\"#fff4de\", color=\"#b26a00\", fontname=\"Iosevka\"];",
+    "  node [shape=note, style=\"rounded,filled\", fillcolor=\"#fff4de\", color=\"#b26a00\", fontname=\"Helvetica\"];",
     `  status [label=${JSON.stringify(message)}];`,
     "}"
   ].join("\n"), editor.document.fileName);
   const svg = await dotToSvg(dot);
   await panel.render({
-    title: `Eggplant Pattern (${modeLabel("combined")}, ${labelStyle}): ${editor.document.fileName.split("/").pop() ?? "Preview"}`,
+    title: formatPreviewTitle(
+      "combined",
+      "ast",
+      labelStyle,
+      configuredDefaultRecursiveStrategy(),
+      editor.document.fileName.split("/").pop() ?? "Preview"
+    ),
     mode: "combined",
     sourceMode: "ast",
     recoveryMode: configuredRecoveryUiMode(),
@@ -1172,6 +1294,11 @@ async function renderNotice(panel: PreviewPanel, editor: vscode.TextEditor, mess
     sourceTargetIds: [],
     allConstraints: [],
     constraints: [],
+    ruleChecks: [],
+    ruleCheckViewVisible: false,
+    activeRuleCheckId: null,
+    highlightedPatternNodeIds: [],
+    highlightedActionEffectIds: [],
     constraintCountByNodeId: {},
     constraintFilterMode: "all",
     constraintFilterNodeId: null,
@@ -1190,7 +1317,8 @@ async function renderNotice(panel: PreviewPanel, editor: vscode.TextEditor, mess
     recoveryDiagnostics: [],
     sourceWarning: null,
     showSwitchToAst: false,
-    notice: message
+    notice: message,
+    mathView: null
   });
 }
 
@@ -1209,13 +1337,19 @@ async function renderTraceUnavailableNotice(
   const dot = withGitDotMetadata([
     "digraph EggplantPatternStatus {",
     "  graph [pad=0.3];",
-    "  node [shape=note, style=\"rounded,filled\", fillcolor=\"#fff4de\", color=\"#b26a00\", fontname=\"Iosevka\"];",
+    "  node [shape=note, style=\"rounded,filled\", fillcolor=\"#fff4de\", color=\"#b26a00\", fontname=\"Helvetica\"];",
     `  status [label=${JSON.stringify(message)}];`,
     "}"
   ].join("\n"), editor.document.fileName);
   const svg = await dotToSvg(dot);
   await panel.render({
-    title: `Eggplant Pattern (${modeLabel(mode)}, ${sourceMode}, ${effectiveLabelStyle}${effectiveLabelStyle === "recursive" ? `, ${recursiveStrategy}` : ""}): ${editor.document.fileName.split("/").pop() ?? "Preview"}`,
+    title: formatPreviewTitle(
+      mode,
+      sourceMode,
+      effectiveLabelStyle,
+      recursiveStrategy,
+      editor.document.fileName.split("/").pop() ?? "Preview"
+    ),
     mode,
     sourceMode,
     recoveryMode: configuredRecoveryUiMode(),
@@ -1232,6 +1366,11 @@ async function renderTraceUnavailableNotice(
     sourceTargetIds: [],
     allConstraints: [],
     constraints: buildConstraintEntries(irlessPatternIr()),
+    ruleChecks: [],
+    ruleCheckViewVisible: false,
+    activeRuleCheckId: null,
+    highlightedPatternNodeIds: [],
+    highlightedActionEffectIds: [],
     constraintCountByNodeId: {},
     constraintFilterMode: "all",
     constraintFilterNodeId: null,
@@ -1243,7 +1382,8 @@ async function renderTraceUnavailableNotice(
     recoveryDiagnostics: [message],
     sourceWarning: message,
     showSwitchToAst: true,
-    notice: null
+    notice: null,
+    mathView: null
   });
 }
 
@@ -1254,17 +1394,6 @@ async function tryRenderNotice(panel: PreviewPanel, editor: vscode.TextEditor, m
   } catch (error) {
     console.error("Eggplant pattern preview notice failed:", error);
     return false;
-  }
-}
-
-function modeLabel(mode: DotViewMode): string {
-  switch (mode) {
-    case "pattern":
-      return "pattern.dot";
-    case "action":
-      return "action.dot";
-    case "combined":
-      return "action + pattern.dot";
   }
 }
 
@@ -1310,30 +1439,6 @@ function isSupportedPreviewDocument(document: vscode.TextDocument): boolean {
   return isRustPreviewDocument(document) || isEggPreviewDocument(document);
 }
 
-function collectRuleCallOffsets(source: string): number[] {
-  return Array.from(source.matchAll(/add_rule(?:_with_hook)?\s*\(/g)).map((match) => match.index ?? 0);
-}
-
-function countEggRuleFormsBeforeOffset(source: string, offset: number): number {
-  const bounded = source.slice(0, Math.max(0, Math.min(source.length, offset)));
-  return Array.from(bounded.matchAll(/\((?:rewrite|birewrite|rule)\b/g)).length;
-}
-
-function resolveEggPreviewOffset(eggSource: string, eggOffset: number, generatedRust: string): number {
-  const ruleCallOffsets = collectRuleCallOffsets(generatedRust);
-  if (ruleCallOffsets.length === 0) {
-    throw new EggTranspilerError(
-      "transpile_failed",
-      "Generated Rust does not contain any add_rule scopes yet."
-    );
-  }
-  if (ruleCallOffsets.length === 1) {
-    return ruleCallOffsets[0];
-  }
-  const eggRuleOrdinal = Math.max(0, countEggRuleFormsBeforeOffset(eggSource, eggOffset) - 1);
-  return ruleCallOffsets[Math.min(eggRuleOrdinal, ruleCallOffsets.length - 1)];
-}
-
 async function preparePreviewDocument(
   document: vscode.TextDocument,
   offset: number
@@ -1354,77 +1459,20 @@ async function preparePreviewDocument(
 
   const eggSource = document.getText();
   const generatedRust = await transpileEggSource(eggSource);
+  let extractorOffset: number;
+  try {
+    extractorOffset = resolveEggPreviewOffset(eggSource, offset, generatedRust);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new EggTranspilerError("transpile_failed", message);
+  }
   return {
     kind: "egg",
     extractorSource: generatedRust,
-    extractorOffset: resolveEggPreviewOffset(eggSource, offset, generatedRust),
+    extractorOffset,
     extractorFileName: `${document.fileName}.transpiled.rs`,
     sourceNotice: "preview source=.egg -> in-memory transpiled Rust; source reveal and rewrites are disabled"
   };
-}
-
-function collectSourceTargetIds(ir: PatternIr, mode: DotViewMode): string[] {
-  const targetIds: string[] = [];
-  if (mode === "pattern" || mode === "combined") {
-    for (const node of ir.nodes) {
-      targetIds.push(node.id);
-    }
-  }
-  if (mode === "action" || mode === "combined") {
-    for (const effect of ir.action_effects) {
-      targetIds.push(`effect:${effect.id}`);
-    }
-    for (const fact of ir.seed_facts) {
-      targetIds.push(`seed:${fact.id}`);
-    }
-  }
-  return targetIds;
-}
-
-function buildConstraintEntries(
-  ir: PatternIr,
-  options: { includeInlineHidden?: boolean } = {}
-): Array<{ id: string; compactText: string; fullText: string; sourceText: string; referencedNodeIds: string[] }> {
-  const nodeIds = new Set(ir.nodes.map((node) => node.id));
-  const rootIds = new Set(ir.roots);
-  return ir.constraints
-    .filter((constraint) => options.includeInlineHidden || inlineConstraintAnnotation(constraint)?.hideInSidebar !== true)
-    .map((constraint) => ({
-      id: constraint.id,
-      compactText: compactConstraintLabel(constraint.source_text, constraint.resolved_text),
-      fullText: constraint.resolved_text,
-      sourceText: constraint.source_text,
-      referencedNodeIds: (() => {
-        const referenced = constraint.referenced_vars.filter((name) => nodeIds.has(name) || rootIds.has(name));
-        return referenced.length > 0 ? referenced : [...ir.roots];
-      })()
-    }));
-}
-
-function filterConstraintEntries(
-  constraints: Array<{ id: string; compactText: string; fullText: string; sourceText: string; referencedNodeIds: string[] }>,
-  mode: PreviewConstraintFilterMode,
-  nodeId: string | null
-): Array<{ id: string; compactText: string; fullText: string; sourceText: string; referencedNodeIds: string[] }> {
-  if (mode !== "node-specific") {
-    return constraints;
-  }
-  if (!nodeId) {
-    return [];
-  }
-  return constraints.filter((constraint) => constraint.referencedNodeIds.includes(nodeId));
-}
-
-function buildConstraintCountByNodeId(
-  constraints: Array<{ id: string; compactText: string; fullText: string; sourceText: string; referencedNodeIds: string[] }>
-): Record<string, number> {
-  const counts: Record<string, number> = {};
-  for (const constraint of constraints) {
-    for (const nodeId of constraint.referencedNodeIds) {
-      counts[nodeId] = (counts[nodeId] ?? 0) + 1;
-    }
-  }
-  return counts;
 }
 
 function irlessPatternIr(): PatternIr {
@@ -1463,39 +1511,6 @@ function resolveSourceSpan(ir: PatternIr, targetId: string): { start: number; en
     return ir.seed_facts.find((entry) => `seed:${entry.id}` === targetId)?.range ?? null;
   }
   return null;
-}
-
-function buildMetadataSourcesView(
-  currentFile: string,
-  autoMetadataSourceFiles: string[],
-  manualMetadataSourceFiles: string[]
-): PreviewMetadataSourcesView {
-  const autoDiscovered = Array.from(new Set(autoMetadataSourceFiles));
-  const manual = Array.from(new Set(manualMetadataSourceFiles));
-  const entries: PreviewMetadataSourceEntry[] = [
-    { path: currentFile, kind: "current" },
-    ...autoDiscovered.map((filePath) => ({ path: filePath, kind: "auto" as const })),
-    ...manual.map((filePath) => ({ path: filePath, kind: "manual" as const }))
-  ];
-  const effectiveKinds = new Map<string, Set<PreviewMetadataSourceKind>>();
-  for (const entry of entries) {
-    const kinds = effectiveKinds.get(entry.path) ?? new Set<PreviewMetadataSourceKind>();
-    kinds.add(entry.kind);
-    effectiveKinds.set(entry.path, kinds);
-  }
-  const effectiveEntries = Array.from(effectiveKinds.entries()).map(([filePath, kinds]) => ({
-    path: filePath,
-    kinds: Array.from(kinds)
-  }));
-  const effective = effectiveEntries.map((entry) => entry.path);
-  return {
-    currentFile,
-    autoDiscovered,
-    manual,
-    effective,
-    entries,
-    effectiveEntries
-  };
 }
 
 async function loadActionRecoveryPreviewMetadata(

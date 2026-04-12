@@ -1,89 +1,14 @@
 import * as vscode from "vscode";
 import { DotLabelStyle, DotViewMode, RecursiveStrategy } from "./dot";
-import { RenderedTypstSnippet } from "./typst";
-
-export type PreviewSourceMode = "ast" | "trace";
-export type PreviewConstraintFilterMode = "all" | "node-specific";
-export type RecoveryUiMode = "off" | "static" | "sample" | "hybrid";
-
-export type PreviewMetadataSourceKind = "current" | "auto" | "manual";
-
-export interface PreviewMetadataSourceEntry {
-  path: string;
-  kind: PreviewMetadataSourceKind;
-}
-
-export interface PreviewMetadataEffectiveSourceEntry {
-  path: string;
-  kinds: PreviewMetadataSourceKind[];
-}
-
-export interface PreviewMetadataSourcesView {
-  currentFile: string;
-  autoDiscovered: string[];
-  manual: string[];
-  effective: string[];
-  entries: PreviewMetadataSourceEntry[];
-  effectiveEntries: PreviewMetadataEffectiveSourceEntry[];
-}
-
-export interface PreviewConstraintEntry {
-  id: string;
-  compactText: string;
-  fullText: string;
-  sourceText: string;
-  referencedNodeIds: string[];
-}
-
-export function groupConstraintsByNodeId(
-  constraints: PreviewConstraintEntry[]
-): Record<string, PreviewConstraintEntry[]> {
-  const grouped: Record<string, PreviewConstraintEntry[]> = {};
-  for (const constraint of constraints) {
-    for (const nodeId of constraint.referencedNodeIds) {
-      if (!grouped[nodeId]) {
-        grouped[nodeId] = [];
-      }
-      grouped[nodeId].push(constraint);
-    }
-  }
-  return grouped;
-}
-
-export interface PreviewPanelState {
-  renderNonce?: number;
-  title: string;
-  mode: DotViewMode;
-  sourceMode: PreviewSourceMode;
-  labelStyle: DotLabelStyle;
-  effectiveLabelStyle: DotLabelStyle;
-  recursiveStrategy: RecursiveStrategy;
-  fileName: string;
-  dot: string;
-  svg: string;
-  typstRenderings: Record<string, RenderedTypstSnippet>;
-  typstSources: Record<string, string>;
-  typstStatusByTargetId: Record<string, string>;
-  sourceTargetIds: string[];
-  allConstraints: PreviewConstraintEntry[];
-  constraints: PreviewConstraintEntry[];
-  nodeConstraintsPopoverTargetId?: string | null;
-  nodeConstraintsPopoverRows?: PreviewConstraintEntry[];
-  constraintCountByNodeId: Record<string, number>;
-  constraintFilterMode: PreviewConstraintFilterMode;
-  constraintFilterNodeId: string | null;
-  activeConstraintId: string | null;
-  activeConstraintNodeIds: string[];
-  metadataSourceFiles: string[];
-  metadataSourcesView: PreviewMetadataSourcesView;
-  recoveryMode: RecoveryUiMode;
-  tracePath: string;
-  recoverySummary: string | null;
-  recoveryDiagnostics: string[];
-  sourceWarning: string | null;
-  showSwitchToAst: boolean;
-  notice: string | null;
-}
+import { RuleCheckEntry } from "./ruleChecks";
+import {
+  PreviewConstraintEntry,
+  PreviewConstraintFilterMode,
+  PreviewMetadataSourcesView,
+  PreviewPanelState,
+  PreviewSourceMode,
+  RecoveryUiMode
+} from "./shared/previewCore";
 
 interface PreviewPanelCallbacks {
   onModeChange(mode: DotViewMode): Promise<void>;
@@ -105,6 +30,9 @@ interface PreviewPanelCallbacks {
   onSaveTypstEdit(targetId: string, source: string): Promise<void>;
   onClearTypstEdit(targetId: string): Promise<void>;
   onTemporaryFullPreviewChange(active: boolean): Promise<void>;
+  onToggleRuleChecks(): Promise<void>;
+  onSelectRuleCheck(checkId: string): Promise<void>;
+  onApplyRuleCheckRewrite(checkId: string): Promise<void>;
   onRefresh(): Promise<void>;
 }
 
@@ -129,6 +57,9 @@ type IncomingMessage =
   | { type: "saveTypstEdit"; targetId: string; source: string }
   | { type: "clearTypstEdit"; targetId: string }
   | { type: "setTemporaryFullPreview"; active: boolean }
+  | { type: "toggleRuleChecks" }
+  | { type: "selectRuleCheck"; checkId: string }
+  | { type: "applyRuleCheckRewrite"; checkId: string }
   | { type: "refresh" };
 
 let currentPanel: PreviewPanel | undefined;
@@ -301,6 +232,15 @@ export class PreviewPanel implements vscode.Disposable {
       case "setTemporaryFullPreview":
         await this.callbacks.onTemporaryFullPreviewChange(message.active);
         return;
+      case "toggleRuleChecks":
+        await this.callbacks.onToggleRuleChecks();
+        return;
+      case "selectRuleCheck":
+        await this.callbacks.onSelectRuleCheck(message.checkId);
+        return;
+      case "applyRuleCheckRewrite":
+        await this.callbacks.onApplyRuleCheckRewrite(message.checkId);
+        return;
       case "refresh":
         await this.callbacks.onRefresh();
         return;
@@ -461,10 +401,6 @@ export class PreviewPanel implements vscode.Disposable {
         user-select: none;
         -webkit-user-select: none;
       }
-      .graph svg text,
-      .graph svg tspan {
-        font-family: "Iosevka", "Iosevka Term", var(--vscode-editor-font-family, var(--vscode-font-family)) !important;
-      }
       .graph svg * {
         user-select: none;
         -webkit-user-select: none;
@@ -587,6 +523,120 @@ export class PreviewPanel implements vscode.Disposable {
       }
       .constraint-node-list li + li {
         margin-top: 4px;
+      }
+      .check-panel {
+        border-bottom: 1px solid var(--border);
+        background: color-mix(in srgb, var(--panel) 70%, var(--bg) 30%);
+        padding: 10px 12px;
+      }
+      .check-panel[hidden] {
+        display: none;
+      }
+      .math-view-panel {
+        border-bottom: 1px solid var(--border);
+        background: color-mix(in srgb, var(--panel) 78%, var(--bg) 22%);
+        padding: 10px 12px;
+        display: grid;
+        gap: 10px;
+      }
+      .math-view-panel[hidden] {
+        display: none;
+      }
+      .math-view-header h3 {
+        margin: 0;
+        font-size: 12px;
+      }
+      .math-view-header p {
+        margin: 4px 0 0;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .math-view-formula {
+        overflow: auto hidden;
+      }
+      .math-view-formula svg {
+        display: block;
+        max-width: 100%;
+        height: auto;
+      }
+      .math-view-fallback {
+        margin: 0;
+        white-space: pre-wrap;
+        color: var(--fg);
+        font-family: var(--vscode-editor-font-family, monospace);
+        font-size: 12px;
+        line-height: 1.55;
+      }
+      .math-view-derivations {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      .math-view-derivation {
+        padding: 3px 8px;
+        border: 1px solid var(--border);
+        background: color-mix(in srgb, var(--panel) 88%, var(--bg) 12%);
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .check-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 8px;
+      }
+      .check-header h3 {
+        margin: 0;
+        font-size: 12px;
+      }
+      .check-header p {
+        margin: 0;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .check-list {
+        display: grid;
+        gap: 8px;
+      }
+      .check-item {
+        border: 1px solid var(--border);
+        background: var(--bg);
+        padding: 8px 10px;
+        cursor: pointer;
+      }
+      .check-item[data-active="true"] {
+        border-color: #cf5f00;
+        box-shadow: inset 0 0 0 1px #cf5f00;
+      }
+      .check-kind {
+        margin: 0 0 4px;
+        font-size: 11px;
+        color: #cf5f00;
+      }
+      .check-message,
+      .check-suggestion {
+        margin: 0;
+        font-size: 12px;
+        line-height: 1.4;
+        word-break: break-word;
+      }
+      .check-suggestion {
+        margin-top: 4px;
+        color: var(--muted);
+      }
+      .check-actions {
+        display: flex;
+        gap: 8px;
+        margin-top: 8px;
+      }
+      .check-actions button {
+        padding: 4px 8px;
+      }
+      .check-empty {
+        margin: 0;
+        font-size: 12px;
+        color: var(--muted);
       }
       .footer {
         display: flex;
@@ -722,12 +772,6 @@ export class PreviewPanel implements vscode.Disposable {
           <option value="sample">sample</option>
           <option value="hybrid">hybrid</option>
         </select>
-        <button id="selectTraceFile" type="button">Select Trace</button>
-        <button id="clearTraceFile" type="button">Clear Trace</button>
-        <button id="metadataSources" type="button">Meta Sources</button>
-        <button id="showCurrentMetadataSources" type="button">Show Current Meta Sources</button>
-        <button id="clearMetadataSources" type="button">Clear Sources</button>
-        <button id="refresh" type="button">Refresh</button>
       </div>
       <div class="meta" id="meta">No preview yet.</div>
       <div class="metadata-viewer" id="metadataViewer" hidden>
@@ -751,6 +795,23 @@ export class PreviewPanel implements vscode.Disposable {
           </section>
         </div>
       </div>
+      <section class="math-view-panel" id="mathViewPanel" hidden>
+        <div class="math-view-header">
+          <h3>Math View</h3>
+          <p id="mathViewSummary">No math-view formula yet.</p>
+        </div>
+        <div class="math-view-formula" id="mathViewFormula"></div>
+        <div class="math-view-derivations" id="mathViewDerivations"></div>
+      </section>
+      <section class="check-panel" id="checkPanel" hidden>
+        <div class="check-header">
+          <div>
+            <h3>Rule Checks</h3>
+            <p id="checkSummary">No check results.</p>
+          </div>
+        </div>
+        <div class="check-list" id="checkList"></div>
+      </section>
       <div class="content">
         <div class="graph" id="graph"></div>
         <aside class="constraints-panel">
@@ -790,12 +851,13 @@ export class PreviewPanel implements vscode.Disposable {
       const sourceMode = document.getElementById("sourceMode");
       const recursiveStrategy = document.getElementById("recursiveStrategy");
       const recoveryMode = document.getElementById("recoveryMode");
-      const selectTraceFile = document.getElementById("selectTraceFile");
-      const clearTraceFile = document.getElementById("clearTraceFile");
-      const refresh = document.getElementById("refresh");
-      const metadataSources = document.getElementById("metadataSources");
-      const showCurrentMetadataSources = document.getElementById("showCurrentMetadataSources");
-      const clearMetadataSources = document.getElementById("clearMetadataSources");
+      const checkPanel = document.getElementById("checkPanel");
+      const checkSummary = document.getElementById("checkSummary");
+      const checkList = document.getElementById("checkList");
+      const mathViewPanel = document.getElementById("mathViewPanel");
+      const mathViewSummary = document.getElementById("mathViewSummary");
+      const mathViewFormula = document.getElementById("mathViewFormula");
+      const mathViewDerivations = document.getElementById("mathViewDerivations");
       const metadataViewer = document.getElementById("metadataViewer");
       const metadataViewerHeader = document.getElementById("metadataViewerHeader");
       const metadataCurrentFile = document.getElementById("metadataCurrentFile");
@@ -819,6 +881,9 @@ export class PreviewPanel implements vscode.Disposable {
       const sourceClickDelayMs = 400;
       let lastRenderedSvgMarkup = "";
       let currentDot = "";
+      let currentTracePath = "";
+      let currentManualMetadataSourceCount = 0;
+      let currentRuleChecksVisible = false;
       const typstSourcesByTargetId = new Map();
       const typstStatusByTargetId = new Map();
       const constraintsByNodeId = new Map();
@@ -835,6 +900,34 @@ export class PreviewPanel implements vscode.Disposable {
       typstStatusButton.type = "button";
       typstStatusButton.disabled = true;
       graphContextMenu.appendChild(typstStatusButton);
+      const menuSelectTraceFileButton = document.createElement("button");
+      menuSelectTraceFileButton.type = "button";
+      menuSelectTraceFileButton.textContent = "Select Trace";
+      graphContextMenu.appendChild(menuSelectTraceFileButton);
+      const menuClearTraceFileButton = document.createElement("button");
+      menuClearTraceFileButton.type = "button";
+      menuClearTraceFileButton.textContent = "Clear Trace";
+      graphContextMenu.appendChild(menuClearTraceFileButton);
+      const menuMetadataSourcesButton = document.createElement("button");
+      menuMetadataSourcesButton.type = "button";
+      menuMetadataSourcesButton.textContent = "Meta Sources";
+      graphContextMenu.appendChild(menuMetadataSourcesButton);
+      const menuShowCurrentMetadataSourcesButton = document.createElement("button");
+      menuShowCurrentMetadataSourcesButton.type = "button";
+      menuShowCurrentMetadataSourcesButton.textContent = "Show Current Meta Sources";
+      graphContextMenu.appendChild(menuShowCurrentMetadataSourcesButton);
+      const menuClearMetadataSourcesButton = document.createElement("button");
+      menuClearMetadataSourcesButton.type = "button";
+      menuClearMetadataSourcesButton.textContent = "Clear Sources";
+      graphContextMenu.appendChild(menuClearMetadataSourcesButton);
+      const menuToggleRuleChecksButton = document.createElement("button");
+      menuToggleRuleChecksButton.type = "button";
+      menuToggleRuleChecksButton.textContent = "Check";
+      graphContextMenu.appendChild(menuToggleRuleChecksButton);
+      const menuRefreshButton = document.createElement("button");
+      menuRefreshButton.type = "button";
+      menuRefreshButton.textContent = "Refresh";
+      graphContextMenu.appendChild(menuRefreshButton);
       const copyDotButton = document.createElement("button");
       copyDotButton.type = "button";
       copyDotButton.textContent = "Copy DOT";
@@ -890,7 +983,21 @@ export class PreviewPanel implements vscode.Disposable {
       const setMetadataViewerVisible = (visible) => {
         metadataViewerVisible = visible;
         metadataViewer.hidden = !visible;
-        showCurrentMetadataSources.textContent = visible ? "Hide Current Meta Sources" : "Show Current Meta Sources";
+        syncSharedActionState();
+      };
+
+      const syncSharedActionState = () => {
+        const showCurrentMetadataSourcesLabel = metadataViewerVisible
+          ? "Hide Current Meta Sources"
+          : "Show Current Meta Sources";
+        const toggleRuleChecksLabel = currentRuleChecksVisible ? "Hide Check" : "Check";
+        const canClearTrace = currentTracePath.length > 0;
+        const canClearMetadataSources = currentManualMetadataSourceCount > 0;
+
+        menuShowCurrentMetadataSourcesButton.textContent = showCurrentMetadataSourcesLabel;
+        menuToggleRuleChecksButton.textContent = toggleRuleChecksLabel;
+        menuClearTraceFileButton.disabled = !canClearTrace;
+        menuClearMetadataSourcesButton.disabled = !canClearMetadataSources;
       };
 
       const renderMetadataList = (element, items) => {
@@ -958,6 +1065,9 @@ export class PreviewPanel implements vscode.Disposable {
       const constraintHighlightColor = "#c26d00";
       const constraintHighlightArtifactAttr = "data-constraint-highlight-artifact";
       const constraintCountBadgeAttr = "data-constraint-count-badge";
+      const ruleCheckHighlightArtifactAttr = "data-rule-check-highlight-artifact";
+      const ruleCheckPatternColor = "#2f6fed";
+      const ruleCheckActionColor = "#d16002";
 
       const encodeSvgDataUri = (svgMarkup) => {
         return "data:image/svg+xml;base64," + btoa(unescape(encodeURIComponent(svgMarkup)));
@@ -971,6 +1081,12 @@ export class PreviewPanel implements vscode.Disposable {
 
       const clearConstraintHighlightArtifacts = (nodeGroup) => {
         for (const artifact of Array.from(nodeGroup.querySelectorAll("[" + constraintHighlightArtifactAttr + '="true"]'))) {
+          artifact.remove();
+        }
+      };
+
+      const clearRuleCheckHighlightArtifacts = (nodeGroup) => {
+        for (const artifact of Array.from(nodeGroup.querySelectorAll("[" + ruleCheckHighlightArtifactAttr + '="true"]'))) {
           artifact.remove();
         }
       };
@@ -1006,6 +1122,37 @@ export class PreviewPanel implements vscode.Disposable {
         ring.setAttribute("fill", "none");
         ring.setAttribute("stroke", constraintHighlightColor);
         ring.setAttribute("stroke-width", "3");
+        ring.setAttribute("pointer-events", "none");
+        ring.setAttribute("vector-effect", "non-scaling-stroke");
+        return ring;
+      };
+
+      const createRuleCheckHighlightHalo = (shape, color, width, opacity) => {
+        const halo = shape.cloneNode(true);
+        halo.setAttribute(ruleCheckHighlightArtifactAttr, "true");
+        halo.setAttribute("fill", "none");
+        halo.setAttribute("stroke", color);
+        halo.setAttribute("stroke-width", String(width));
+        halo.setAttribute("stroke-opacity", String(opacity));
+        halo.setAttribute("pointer-events", "none");
+        halo.setAttribute("vector-effect", "non-scaling-stroke");
+        return halo;
+      };
+
+      const createRuleCheckHighlightRing = (bbox, color) => {
+        const ring = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+        const padding = 10;
+        ring.setAttribute(ruleCheckHighlightArtifactAttr, "true");
+        ring.setAttribute("x", String(bbox.x - padding));
+        ring.setAttribute("y", String(bbox.y - padding));
+        ring.setAttribute("width", String(bbox.width + padding * 2));
+        ring.setAttribute("height", String(bbox.height + padding * 2));
+        ring.setAttribute("rx", "14");
+        ring.setAttribute("ry", "14");
+        ring.setAttribute("fill", "none");
+        ring.setAttribute("stroke", color);
+        ring.setAttribute("stroke-width", "3");
+        ring.setAttribute("stroke-dasharray", "6 4");
         ring.setAttribute("pointer-events", "none");
         ring.setAttribute("vector-effect", "non-scaling-stroke");
         return ring;
@@ -1353,6 +1500,113 @@ export class PreviewPanel implements vscode.Disposable {
         setConstraintNodeList(activeConstraintNodeIds || []);
       };
 
+      const renderRuleChecks = (checks, visible, activeRuleCheckId) => {
+        currentRuleChecksVisible = visible;
+        checkPanel.hidden = !visible;
+        syncSharedActionState();
+        checkList.innerHTML = "";
+
+        if (!visible) {
+          checkSummary.textContent = checks.length > 0
+            ? String(checks.length) + " warning" + (checks.length === 1 ? "" : "s") + " ready."
+            : "No check results.";
+          return;
+        }
+
+        checkSummary.textContent = checks.length > 0
+          ? String(checks.length) + " warning" + (checks.length === 1 ? "" : "s")
+          : "No redundancy warnings.";
+
+        if (!checks || checks.length === 0) {
+          const empty = document.createElement("p");
+          empty.className = "check-empty";
+          empty.textContent = "No redundant action-insert overlaps were detected for this rule.";
+          checkList.appendChild(empty);
+          return;
+        }
+
+        for (const check of checks) {
+          const item = document.createElement("div");
+          item.className = "check-item";
+          item.dataset.active = String(check.id === activeRuleCheckId);
+          const kind = document.createElement("p");
+          kind.className = "check-kind";
+          kind.textContent = "warning · " + check.kind;
+          const message = document.createElement("p");
+          message.className = "check-message";
+          message.textContent = check.message;
+          const suggestion = document.createElement("p");
+          suggestion.className = "check-suggestion";
+          suggestion.textContent = check.suggestion;
+          const actions = document.createElement("div");
+          actions.className = "check-actions";
+          if (check.rewriteReplacement && check.sourceRange) {
+            const rewriteButton = document.createElement("button");
+            rewriteButton.type = "button";
+            rewriteButton.textContent = check.rewriteLabel || "Rewrite";
+            rewriteButton.addEventListener("click", (event) => {
+              event.stopPropagation();
+              vscode.postMessage({ type: "applyRuleCheckRewrite", checkId: check.id });
+            });
+            actions.appendChild(rewriteButton);
+          }
+          item.appendChild(kind);
+          item.appendChild(message);
+          item.appendChild(suggestion);
+          if (actions.childElementCount > 0) {
+            item.appendChild(actions);
+          }
+          item.addEventListener("click", () => {
+            vscode.postMessage({ type: "selectRuleCheck", checkId: check.id });
+          });
+          checkList.appendChild(item);
+        }
+      };
+
+      const mathViewFallbackText = (source) => {
+        let current = source || "";
+        while (true) {
+          const next = current
+            .replace(/#text\(fill: rgb\("#[0-9A-Fa-f]{6}"\)\)\[\$ ([^\]]+) \$\]/g, "$1")
+            .replace(/upright\("((?:\\.|[^"])*)"\)/g, "$1");
+          if (next === current) {
+            return next;
+          }
+          current = next;
+        }
+      };
+
+      const renderMathView = (mathView, typstRenderings, typstStatusByTargetId) => {
+        mathViewPanel.hidden = !mathView;
+        mathViewFormula.innerHTML = "";
+        mathViewDerivations.innerHTML = "";
+        if (!mathView) {
+          mathViewSummary.textContent = "No math-view formula yet.";
+          return;
+        }
+
+        mathViewSummary.textContent = mathView.ruleName + " | " + String((mathView.derivations || []).length) + " derivation" + ((mathView.derivations || []).length === 1 ? "" : "s");
+        const rendering = (typstRenderings || {})[mathView.formulaTargetId];
+        if (rendering && rendering.mode === "math") {
+          mathViewFormula.innerHTML = rendering.svg;
+        } else {
+          const fallback = document.createElement("pre");
+          fallback.className = "math-view-fallback";
+          const status = (typstStatusByTargetId || {})[mathView.formulaTargetId];
+          fallback.textContent = status === "Typst: failed"
+            ? mathView.formulaSource
+            : mathViewFallbackText(mathView.formulaSource);
+          mathViewFormula.appendChild(fallback);
+        }
+
+        for (const derivation of mathView.derivations || []) {
+          const chip = document.createElement("span");
+          chip.className = "math-view-derivation";
+          chip.textContent = derivation.label;
+          mathViewDerivations.appendChild(chip);
+        }
+      };
+
       const applyConstraintHighlights = (root, highlightedNodeIds) => {
         const highlights = new Set(highlightedNodeIds || []);
         for (const nodeGroup of Array.from(root.querySelectorAll("g.node"))) {
@@ -1382,6 +1636,30 @@ export class PreviewPanel implements vscode.Disposable {
                 child.setAttribute("fill", constraintHighlightColor);
               }
             }
+          }
+        }
+      };
+
+      const applyRuleCheckHighlights = (root, highlightedPatternNodeIds, highlightedActionEffectIds) => {
+        const patternHighlights = new Set(highlightedPatternNodeIds || []);
+        const actionHighlights = new Set(highlightedActionEffectIds || []);
+        for (const nodeGroup of Array.from(root.querySelectorAll("g.node"))) {
+          clearRuleCheckHighlightArtifacts(nodeGroup);
+          const targetId = nodeGroup.querySelector("title")?.textContent;
+          const shape = findNodeShape(nodeGroup);
+          if (!targetId || !shape) {
+            continue;
+          }
+          const bbox = shape.getBBox();
+          const hasPatternHighlight = patternHighlights.has(targetId);
+          const hasActionHighlight = actionHighlights.has(targetId);
+          if (hasPatternHighlight) {
+            nodeGroup.appendChild(createRuleCheckHighlightHalo(shape, ruleCheckPatternColor, 10, 0.18));
+            nodeGroup.appendChild(createRuleCheckHighlightRing(bbox, ruleCheckPatternColor));
+          }
+          if (hasActionHighlight) {
+            nodeGroup.appendChild(createRuleCheckHighlightHalo(shape, ruleCheckActionColor, 8, 0.22));
+            nodeGroup.appendChild(createRuleCheckHighlightRing(bbox, ruleCheckActionColor));
           }
         }
       };
@@ -1510,28 +1788,52 @@ export class PreviewPanel implements vscode.Disposable {
         vscode.postMessage({ type: "changeRecoveryMode", recoveryMode: recoveryMode.value });
       });
 
-      selectTraceFile.addEventListener("click", () => {
+      menuSelectTraceFileButton.addEventListener("click", (event) => {
+        event.stopPropagation();
         vscode.postMessage({ type: "selectTraceFile" });
+        hideGraphContextMenu();
       });
 
-      clearTraceFile.addEventListener("click", () => {
+      menuClearTraceFileButton.addEventListener("click", (event) => {
+        event.stopPropagation();
+        if (!currentTracePath) {
+          return;
+        }
         vscode.postMessage({ type: "clearTraceFile" });
+        hideGraphContextMenu();
       });
 
-      refresh.addEventListener("click", () => {
-        vscode.postMessage({ type: "refresh" });
-      });
-
-      metadataSources.addEventListener("click", () => {
+      menuMetadataSourcesButton.addEventListener("click", (event) => {
+        event.stopPropagation();
         vscode.postMessage({ type: "selectMetadataSources" });
+        hideGraphContextMenu();
       });
 
-      showCurrentMetadataSources.addEventListener("click", () => {
+      menuShowCurrentMetadataSourcesButton.addEventListener("click", (event) => {
+        event.stopPropagation();
         setMetadataViewerVisible(!metadataViewerVisible);
+        hideGraphContextMenu();
       });
 
-      clearMetadataSources.addEventListener("click", () => {
+      menuClearMetadataSourcesButton.addEventListener("click", (event) => {
+        event.stopPropagation();
+        if (currentManualMetadataSourceCount === 0) {
+          return;
+        }
         vscode.postMessage({ type: "clearMetadataSources" });
+        hideGraphContextMenu();
+      });
+
+      menuToggleRuleChecksButton.addEventListener("click", (event) => {
+        event.stopPropagation();
+        vscode.postMessage({ type: "toggleRuleChecks" });
+        hideGraphContextMenu();
+      });
+
+      menuRefreshButton.addEventListener("click", (event) => {
+        event.stopPropagation();
+        vscode.postMessage({ type: "refresh" });
+        hideGraphContextMenu();
       });
 
       graph.addEventListener("contextmenu", (event) => {
@@ -1540,10 +1842,6 @@ export class PreviewPanel implements vscode.Disposable {
         const typstSource = targetId ? (typstSourcesByTargetId.get(targetId) || "") : "";
         const typstStatus = targetId ? (typstStatusByTargetId.get(targetId) || "Typst: no source") : "";
         const nodeConstraints = targetId ? (constraintsByNodeId.get(targetId) || []) : [];
-        if (!isGraphBackgroundEvent(event) && !typstStatus) {
-          hideGraphContextMenu();
-          return;
-        }
         event.preventDefault();
         event.stopPropagation();
         showGraphContextMenu(event.clientX, event.clientY, targetId, typstSource, typstStatus, nodeConstraints);
@@ -1723,6 +2021,9 @@ export class PreviewPanel implements vscode.Disposable {
             kind: entry.kinds.join("+")
           }))
         );
+        currentTracePath = payload.tracePath || "";
+        currentManualMetadataSourceCount = (metadataSourcesView.manual || []).length;
+        syncSharedActionState();
         const sourceSummary = payload.metadataSourceFiles.length > 0
           ? " | meta sources: " + payload.metadataSourceFiles.length
           : "";
@@ -1743,6 +2044,16 @@ export class PreviewPanel implements vscode.Disposable {
           payload.constraintFilterMode || "all",
           payload.constraintFilterNodeId || null
         );
+        renderRuleChecks(
+          payload.ruleChecks || [],
+          Boolean(payload.ruleCheckViewVisible),
+          payload.activeRuleCheckId || null
+        );
+        renderMathView(
+          payload.mathView || null,
+          payload.typstRenderings || {},
+          payload.typstStatusByTargetId || {}
+        );
         sourceWarning.textContent = payload.sourceWarning || "";
         switchToAst.hidden = !payload.showSwitchToAst;
         const svgChanged = payload.svg !== lastRenderedSvgMarkup;
@@ -1759,6 +2070,11 @@ export class PreviewPanel implements vscode.Disposable {
             bindGraphDragging(graph, rootSvg);
             rootSvg.dataset.boundSvg = "true";
           }
+          applyRuleCheckHighlights(
+            rootSvg,
+            payload.highlightedPatternNodeIds || [],
+            payload.highlightedActionEffectIds || []
+          );
           applyConstraintCountBadges(rootSvg, payload.constraintCountByNodeId || {});
           applyConstraintHighlights(rootSvg, payload.activeConstraintNodeIds || []);
         }
@@ -1768,6 +2084,7 @@ export class PreviewPanel implements vscode.Disposable {
 
       syncRecursiveStrategyState();
       setMetadataViewerVisible(false);
+      syncSharedActionState();
     </script>
   </body>
 </html>`;
@@ -1822,6 +2139,9 @@ export async function dispatchPreviewPanelTestMessage(
     | { type: "saveTypstEdit"; targetId: string; source: string }
     | { type: "clearTypstEdit"; targetId: string }
     | { type: "setTemporaryFullPreview"; active: boolean }
+    | { type: "toggleRuleChecks" }
+    | { type: "selectRuleCheck"; checkId: string }
+    | { type: "applyRuleCheckRewrite"; checkId: string }
     | { type: "refresh" }
 ): Promise<void> {
   await currentPanel?.dispatchTestMessage(message);

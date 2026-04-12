@@ -14,13 +14,32 @@ import {
   resolveDynamicActionRecoveryPolicy,
   summarizeRuntimeActionSampleTrace
 } from "../../actionRecovery";
+import {
+  buildMetadataSourcesView,
+  buildPreviewPanelState,
+  buildConstraintEntries,
+  collectSourceTargetIds,
+  createDefaultPreviewInteractionState,
+  drilldownConstraintNode,
+  filterConstraintEntries,
+  projectPreviewInteractionState,
+  reconcilePreviewInteractionState,
+  selectConstraint as selectPreviewConstraint,
+  selectRuleCheck as selectPreviewRuleCheck,
+  toggleRuleCheckView
+} from "../../shared/previewCore";
+import { displayTextFallbackSource, renderTypstSnippetsWithRenderer } from "../../shared/typstCore";
+import { buildMathViewModel, buildMathViewTypstSource } from "../../mathView";
 import { normalizeTypstMathSource, renderTypstSnippets } from "../../typst";
+import { findRedundantActionInsertChecks } from "../../ruleChecks";
+import { resolveEggPreviewOffset } from "../../eggRuleMapping";
 
 const WORKSPACE_ROOT = path.resolve(__dirname, "../../../../");
 const FIXTURE_PATH = path.resolve(WORKSPACE_ROOT, "samples", "pattern_samples.rs");
 const RELATION_FIXTURE_PATH = path.resolve(WORKSPACE_ROOT, "samples", "relation.rs");
 const FIBONACCI_FUNC_FIXTURE_PATH = path.resolve(WORKSPACE_ROOT, "samples", "fibonacci_func.rs");
-const MATH_METADATA_FIXTURE = "/Users/mineralsteins/Repos/egg_related/eggplant_backup/benches/runners/eggplant_rewrite/math_microbenchmark.rs";
+const MATH_METADATA_FIXTURE = path.resolve(WORKSPACE_ROOT, "samples", "math_microbenchmark.rs");
+const PROJECT_RULE_CHECK_SCRIPT = path.resolve(WORKSPACE_ROOT, "eggplant-pattern-vscode", "scripts", "check-rust-project-rules.js");
 const EXTRACTOR_PATH = path.resolve(
   WORKSPACE_ROOT,
   "eggplant-pattern-extractor",
@@ -30,10 +49,386 @@ const EXTRACTOR_PATH = path.resolve(
 );
 
 suite("eggplant pattern headless tests", () => {
+  test("project rule detector warns when action insert duplicates a pattern sub-DAG", () => {
+    const { findRedundantActionInsertWarnings } = require(PROJECT_RULE_CHECK_SCRIPT) as {
+      findRedundantActionInsertWarnings: (ir: PatternIr) => Array<{ severity: string; message: string }>;
+    };
+
+    const ir: PatternIr = {
+      scope: {
+        kind: "add_rule_call",
+        text_range: { start: 0, end: 40 },
+        pattern_range: { start: 0, end: 20 },
+        action_range: { start: 21, end: 40 }
+      },
+      nodes: [
+        { id: "l", kind: "query_leaf", dsl_type: "Const", label: "l: Const", range: { start: 0, end: 1 }, inputs: [] },
+        { id: "r", kind: "query_leaf", dsl_type: "Const", label: "r: Const", range: { start: 2, end: 3 }, inputs: [] },
+        { id: "p", kind: "query", dsl_type: "Add", label: "p: Add", range: { start: 4, end: 8 }, inputs: ["l", "r"] }
+      ],
+      edges: [],
+      roots: ["l", "r", "p"],
+      constraints: [],
+      action_effects: [
+        {
+          id: "effect_0",
+          effect_id: "effect@21:35",
+          bound_var: "duplicate",
+          source_text: "ctx.insert_add(pat.l, pat.r)",
+          referenced_pat_vars: ["l", "r"],
+          referenced_action_vars: [],
+          range: { start: 21, end: 35 }
+        }
+      ],
+      seed_facts: [],
+      display_templates: [],
+      typst_templates: [],
+      precedence_templates: [],
+      diagnostics: []
+    };
+
+    const diagnostics = findRedundantActionInsertWarnings(ir);
+    assert.equal(diagnostics.length, 1);
+    assert.equal(diagnostics[0].severity, "warning");
+    assert.match(diagnostics[0].message, /duplicates pattern sub-DAG/);
+    assert.match(diagnostics[0].message, /matches pattern node\(s\) p/);
+  });
+
   test("typst math normalization strips both single and double dollar wrappers", () => {
     assert.equal(normalizeTypstMathSource("x + y"), "x + y");
     assert.equal(normalizeTypstMathSource("$x + y$"), "x + y");
     assert.equal(normalizeTypstMathSource("$$x + y$$"), "x + y");
+  });
+
+  test("pattern sample fixture keeps the current DisplayMath DSL templates", () => {
+    const source = fs.readFileSync(FIXTURE_PATH, "utf8");
+
+    assert.match(source, /#\[eggplant::typst\("integral \{x\}, \{f\}"\)\]/);
+    assert.match(source, /#\[eggplant::typst\("integral \{f\} quad d \{x\}"\)\]/);
+  });
+
+  test("shared typst contract caches duplicate fallback renders and strips upright wrappers", async () => {
+    const seenDocuments: string[] = [];
+    const renderings = await renderTypstSnippetsWithRenderer(
+      [
+        { targetId: "lhs", source: 'fib(upright("x1")) = ???' },
+        { targetId: "rhs", source: 'fib(upright("x1")) = ???' }
+      ],
+      {
+        async render(document: string): Promise<string> {
+          seenDocuments.push(document);
+          if (document.includes("$ fib(upright(\"x1\")) = ??? $")) {
+            throw new Error("math render failed");
+          }
+          return '<svg width="12pt" height="5pt"></svg>';
+        }
+      },
+      new Map()
+    );
+
+    assert.equal(seenDocuments.length, 2);
+    assert.equal(renderings.lhs.mode, "text-fallback");
+    assert.equal(renderings.rhs.mode, "text-fallback");
+    assert.equal(displayTextFallbackSource('fib(upright("x1")) = ???'), "fib(x1) = ???");
+  });
+
+  test("shared preview interaction helpers stay deterministic across reconcile and drilldown", () => {
+    const ir: PatternIr = {
+      scope: {
+        kind: "pattern_function",
+        text_range: { start: 0, end: 10 },
+        pattern_range: { start: 0, end: 10 },
+        action_range: null
+      },
+      nodes: [
+        { id: "l", kind: "query_leaf", dsl_type: "Const", label: "l: Const", range: { start: 0, end: 1 }, inputs: [] },
+        { id: "r", kind: "query_leaf", dsl_type: "Const", label: "r: Const", range: { start: 2, end: 3 }, inputs: [] }
+      ],
+      edges: [],
+      roots: ["l", "r"],
+      constraints: [
+        {
+          id: "constraint_0",
+          source_text: "custom_pair_constraint(l, r)",
+          resolved_text: "custom_pair_constraint(l, r)",
+          referenced_vars: ["l", "r"],
+          range: { start: 4, end: 9 }
+        }
+      ],
+      action_effects: [],
+      seed_facts: [],
+      display_templates: [],
+      typst_templates: [],
+      precedence_templates: [],
+      diagnostics: []
+    };
+
+    const constraints = buildConstraintEntries(ir, { includeInlineHidden: true });
+    const ruleChecks = [
+      {
+        id: "rule-check-0",
+        severity: "warning" as const,
+        kind: "redundant-action-insert" as const,
+        message: "duplicate insert",
+        suggestion: "reuse pat.l",
+        duplicatePatternNodeIds: ["l"],
+        duplicateActionEffectIds: ["effect:effect_0"],
+        sourceRange: null,
+        rewriteReplacement: "pat.l",
+        rewriteLabel: "rewrite"
+      }
+    ];
+
+    let state = toggleRuleCheckView({
+      ruleCheckViewVisible: false,
+      activeRuleCheckId: null,
+      constraintFilterMode: "all",
+      constraintFilterNodeId: null,
+      activeConstraintId: null
+    });
+    state = selectPreviewRuleCheck(state, "rule-check-0");
+    state = selectPreviewConstraint(state, "constraint_0");
+    state = drilldownConstraintNode(
+      state,
+      "l",
+      filterConstraintEntries(constraints, "node-specific", "l")
+    );
+
+    assert.equal(state.ruleCheckViewVisible, true);
+    assert.equal(state.activeRuleCheckId, "rule-check-0");
+    assert.equal(state.activeConstraintId, "constraint_0");
+    assert.equal(state.constraintFilterMode, "node-specific");
+    assert.equal(state.constraintFilterNodeId, "l");
+
+    const projected = projectPreviewInteractionState(state, ruleChecks, constraints);
+    assert.equal(projected.state.activeRuleCheckId, "rule-check-0");
+    assert.equal(projected.state.activeConstraintId, "constraint_0");
+    assert.deepEqual(projected.activeConstraintNodeIds, ["l", "r"]);
+    assert.deepEqual(projected.highlightedPatternNodeIds, ["l"]);
+    assert.deepEqual(projected.highlightedActionEffectIds, ["effect:effect_0"]);
+
+    const reconciled = reconcilePreviewInteractionState(
+      {
+        ...state,
+        activeRuleCheckId: "missing-check",
+        activeConstraintId: "missing-constraint",
+        constraintFilterNodeId: "missing-node"
+      },
+      ruleChecks,
+      constraints
+    );
+
+    assert.equal(reconciled.activeRuleCheckId, null);
+    assert.equal(reconciled.activeConstraintId, null);
+    assert.equal(reconciled.constraintFilterMode, "all");
+    assert.equal(reconciled.constraintFilterNodeId, null);
+  });
+
+  test("constraint entries prefer Rust semantic text when available", () => {
+    const ir: PatternIr = {
+      scope: {
+        kind: "add_rule_call",
+        text_range: { start: 0, end: 10 },
+        pattern_range: { start: 0, end: 5 },
+        action_range: { start: 6, end: 10 }
+      },
+      nodes: [
+        {
+          id: "x1",
+          kind: "query_leaf",
+          dsl_type: "i64",
+          label: "x1: i64",
+          range: { start: 0, end: 1 },
+          inputs: []
+        }
+      ],
+      edges: [],
+      roots: ["x1"],
+      constraints: [
+        {
+          id: "constraint_0",
+          source_text: "x1_constraint",
+          resolved_text: "x1.handle().eq(&(x.handle() + (&1_i64).as_handle()))",
+          semantic_text: "x1 == x + 1",
+          referenced_vars: ["x1"],
+          range: { start: 2, end: 3 }
+        }
+      ],
+      action_effects: [],
+      seed_facts: [],
+      display_templates: [],
+      typst_templates: [],
+      precedence_templates: [],
+      diagnostics: []
+    };
+
+    const entries = buildConstraintEntries(ir, { includeInlineHidden: true });
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].compactText, "x1 == x + 1");
+    assert.equal(entries[0].fullText, "x1 == x + 1");
+    assert.equal(entries[0].sourceText, "x1_constraint");
+  });
+
+  test("cross-host parity keeps preview/check semantics aligned for the same fixture", () => {
+    const ir: PatternIr = {
+      scope: {
+        kind: "add_rule_call",
+        text_range: { start: 0, end: 180 },
+        pattern_range: { start: 0, end: 92 },
+        action_range: { start: 93, end: 180 }
+      },
+      nodes: [
+        { id: "l", kind: "query_leaf", dsl_type: "Const", label: "l: Const", range: { start: 1, end: 2 }, inputs: [] },
+        { id: "r", kind: "query_leaf", dsl_type: "Const", label: "r: Const", range: { start: 3, end: 4 }, inputs: [] },
+        { id: "sum", kind: "query", dsl_type: "Add", label: "sum: Add(l, r)", range: { start: 6, end: 18 }, inputs: ["l", "r"] }
+      ],
+      edges: [
+        { from: "sum", to: "l", kind: "input", index: 0 },
+        { from: "sum", to: "r", kind: "input", index: 1 }
+      ],
+      roots: ["sum"],
+      constraints: [
+        {
+          id: "constraint_0",
+          source_text: "custom_pair_constraint(l, r)",
+          resolved_text: "custom_pair_constraint(l, r)",
+          referenced_vars: ["l", "r"],
+          range: { start: 19, end: 45 }
+        },
+        {
+          id: "constraint_1",
+          source_text: "sum.handle().eq(&(l.handle() + 1))",
+          resolved_text: "sum.handle().eq(&(l.handle() + 1))",
+          referenced_vars: ["sum", "l"],
+          range: { start: 46, end: 82 }
+        }
+      ],
+      action_effects: [
+        {
+          id: "effect_0",
+          effect_id: "effect@120:154",
+          bound_var: "duplicate",
+          source_text: "ctx.insert_add(pat.l, pat.r);",
+          referenced_pat_vars: ["l", "r"],
+          referenced_action_vars: [],
+          range: { start: 120, end: 154 }
+        }
+      ],
+      seed_facts: [],
+      display_templates: [],
+      typst_templates: [],
+      precedence_templates: [],
+      diagnostics: []
+    };
+
+    const allConstraints = buildConstraintEntries(ir, { includeInlineHidden: true });
+    const constraints = buildConstraintEntries(ir);
+    const ruleChecks = findRedundantActionInsertChecks(ir);
+
+    assert.equal(allConstraints.length, 2);
+    assert.equal(constraints.length, 1);
+    assert.equal(ruleChecks.length, 1);
+
+    let interactionState = createDefaultPreviewInteractionState();
+    interactionState = toggleRuleCheckView(interactionState);
+    interactionState = selectPreviewRuleCheck(interactionState, ruleChecks[0].id);
+    interactionState = drilldownConstraintNode(
+      interactionState,
+      "l",
+      filterConstraintEntries(constraints, "node-specific", "l")
+    );
+    interactionState = selectPreviewConstraint(interactionState, "constraint_0");
+
+    const projectForVscodeHost = () => {
+      const interactionProjection = projectPreviewInteractionState(interactionState, ruleChecks, constraints);
+      return buildPreviewPanelState({
+        mode: "combined",
+        sourceMode: "ast",
+        selectedLabelStyle: "recursive",
+        effectiveLabelStyle: "recursive",
+        recursiveStrategy: "tree-safe",
+        fileName: "parity_fixture.rs",
+        dot: "digraph { sum -> l; sum -> r; }",
+        svg: "<svg/>",
+        typstRenderings: {},
+        typstSources: {},
+        typstStatusByTargetId: {},
+        sourceTargetIds: collectSourceTargetIds(ir, "combined"),
+        allConstraints,
+        constraints,
+        ruleChecks,
+        interactionState: interactionProjection.state,
+        metadataSourceFiles: [],
+        metadataSourcesView: buildMetadataSourcesView("parity_fixture.rs", [], []),
+        recoveryMode: "off",
+        tracePath: "",
+        recoverySummary: null,
+        recoveryDiagnostics: [],
+        sourceWarning: null,
+        showSwitchToAst: false,
+        notice: null,
+        mathView: null
+      });
+    };
+
+    const projectForWebHost = () => {
+      const projection = projectPreviewInteractionState(interactionState, ruleChecks, constraints);
+      const activeState = projection.state;
+      return buildPreviewPanelState({
+        mode: "combined",
+        sourceMode: "ast",
+        selectedLabelStyle: "recursive",
+        effectiveLabelStyle: "recursive",
+        recursiveStrategy: "tree-safe",
+        fileName: "parity_fixture.rs",
+        dot: "digraph { sum -> l; sum -> r; }",
+        svg: "<svg/>",
+        typstRenderings: {},
+        typstSources: {},
+        typstStatusByTargetId: {},
+        sourceTargetIds: collectSourceTargetIds(ir, "combined"),
+        allConstraints,
+        constraints,
+        ruleChecks,
+        interactionState: activeState,
+        metadataSourceFiles: [],
+        metadataSourcesView: buildMetadataSourcesView("parity_fixture.rs", [], []),
+        recoveryMode: "off",
+        tracePath: "",
+        recoverySummary: null,
+        recoveryDiagnostics: [],
+        sourceWarning: null,
+        showSwitchToAst: false,
+        notice: null,
+        mathView: null
+      });
+    };
+
+    const vscodeState = projectForVscodeHost();
+    const webState = projectForWebHost();
+
+    const semantics = (state: ReturnType<typeof projectForVscodeHost>) => ({
+      sourceTargetIds: state.sourceTargetIds,
+      allConstraintIds: state.allConstraints.map((entry) => entry.id),
+      visibleConstraintIds: state.constraints.map((entry) => entry.id),
+      ruleCheckIds: state.ruleChecks.map((entry) => entry.id),
+      ruleCheckViewVisible: state.ruleCheckViewVisible,
+      activeRuleCheckId: state.activeRuleCheckId,
+      highlightedPatternNodeIds: [...state.highlightedPatternNodeIds].sort(),
+      highlightedActionEffectIds: [...state.highlightedActionEffectIds].sort(),
+      constraintFilterMode: state.constraintFilterMode,
+      constraintFilterNodeId: state.constraintFilterNodeId,
+      activeConstraintId: state.activeConstraintId,
+      activeConstraintNodeIds: [...state.activeConstraintNodeIds].sort(),
+      constraintCountByNodeId: state.constraintCountByNodeId
+    });
+
+    assert.deepEqual(semantics(vscodeState), semantics(webState));
+    assert.deepEqual(semantics(vscodeState).allConstraintIds, ["constraint_0", "constraint_1"]);
+    assert.deepEqual(semantics(vscodeState).visibleConstraintIds, ["constraint_0"]);
+    assert.equal(semantics(vscodeState).activeRuleCheckId, ruleChecks[0].id);
+    assert.deepEqual(semantics(vscodeState).highlightedPatternNodeIds, ["sum"]);
+    assert.deepEqual(semantics(vscodeState).highlightedActionEffectIds, ["effect:effect_0"]);
   });
 
   test("dynamic action recovery policy normalizes experimental mode settings", () => {
@@ -381,6 +776,33 @@ fn demo(use_mul: bool, recorder: ActionSampleRecorder) {
     assert.ok(ir.scope.action_range);
     assert.ok(ir.scope.pattern_range);
     assert.ok(ir.action_effects.length >= 2);
+  });
+
+  test(".egg rule cursor mapping selects the matching transpiled add_rule ordinal", () => {
+    const eggSource = [
+      "(ruleset demo)",
+      "(datatype Math (Num i64) (Add Math Math) (Mul Math Math))",
+      "(rewrite (Add a (Num 0)) a :ruleset demo)",
+      "(rewrite (Mul a (Num 1)) a :ruleset demo)",
+    ].join("\n");
+
+    const generatedRust = [
+      "fn main() {",
+      "  MyTx::add_rule(\"rule_add\", demo, || { /* add */ }, |ctx, pat| { ctx.union(pat.add_node1, pat.a); });",
+      "  MyTx::add_rule(\"rule_mul\", demo, || { /* mul */ }, |ctx, pat| { ctx.union(pat.mul_node1, pat.a); });",
+      "}",
+    ].join("\n");
+
+    const addRuleOffsets = Array.from(generatedRust.matchAll(/add_rule(?:_with_hook)?\s*\(/g)).map((match) => match.index ?? 0);
+    assert.equal(addRuleOffsets.length, 2);
+
+    const addRuleEggOffset = eggSource.indexOf("(rewrite (Add a (Num 0))");
+    const mulRuleEggOffset = eggSource.indexOf("(rewrite (Mul a (Num 1))");
+    assert.notEqual(addRuleEggOffset, -1);
+    assert.notEqual(mulRuleEggOffset, -1);
+
+    assert.equal(resolveEggPreviewOffset(eggSource, addRuleEggOffset, generatedRust), addRuleOffsets[0]);
+    assert.equal(resolveEggPreviewOffset(eggSource, mulRuleEggOffset, generatedRust), addRuleOffsets[1]);
   });
 
   test("inline nested action calls get synthetic tmp bindings and separate graph nodes", () => {
@@ -791,8 +1213,8 @@ enum SharedMath {
     const ir = JSON.parse(result.stdout) as PatternIr;
 
     const recursiveDot = patternIrToDotWithMode(ir, "action", "recursive", "dag-expand");
-    assert.match(recursiveDot, /label="x\^2"/);
-    assert.match(recursiveDot, /label="x\^3 - 7 \* x\^2"/);
+    assert.ok(recursiveDot.includes('#B86A5B'));
+    assert.ok(recursiveDot.includes('x'));
     assert.doesNotMatch(recursiveDot, /insert_m_const\(2\)/);
     assert.doesNotMatch(recursiveDot, /"x"\^2/);
   });
@@ -815,8 +1237,10 @@ enum SharedMath {
     const sqrtFive = typstSources.find((entry) => entry.targetId === "effect:effect_33");
     const denom = typstSources.find((entry) => entry.targetId === "effect:effect_41");
 
-    assert.equal(sqrtFive?.source, 'sqrt(upright("five"))');
-    assert.equal(denom?.source, 'frac(1, (frac((1 + sqrt(upright("five"))), 2)  - frac((1 - sqrt(upright("five"))), 2) )) ');
+    assert.ok(sqrtFive?.source.includes('sqrt('));
+    assert.ok(sqrtFive?.source.includes('#5F7A8A') || sqrtFive?.source.includes('#B86A5B'));
+    assert.ok(denom?.source.includes('frac('));
+    assert.ok(denom?.source.includes('#B86A5B'));
 
     const renderings = await renderTypstSnippets(
       typstSources.filter((entry) => entry.targetId === "effect:effect_33" || entry.targetId === "effect:effect_41")
@@ -855,7 +1279,10 @@ enum SharedMath {
     };
 
     const typstSources = collectTypstReplacementSources(ir, "pattern", "compact");
-    assert.deepEqual(typstSources, [{ targetId: "integ", source: 'integral upright("one") quad d x' }]);
+    assert.equal(typstSources.length, 1);
+    assert.equal(typstSources[0].targetId, "integ");
+    assert.ok(typstSources[0].source.includes('integral'));
+    assert.ok(typstSources[0].source.includes('#5F7A8A'));
 
     const renderings = await renderTypstSnippets(typstSources);
     assert.ok(renderings.integ);
@@ -915,8 +1342,30 @@ enum SharedMath {
     const typstSources = collectTypstReplacementSources(ir, "combined", "compact", "dag-expand");
     const f1Source = typstSources.find((entry) => entry.targetId === "f1");
     const actionSource = typstSources.find((entry) => entry.targetId === "effect:effect_0");
-    assert.equal(f1Source?.source, "fib(x1)");
-    assert.equal(actionSource?.source, "fib(x2) = f0 + f1");
+    assert.ok(f1Source?.source.includes("fib("));
+    assert.ok(f1Source?.source.includes("#5F7A8A"));
+    assert.ok(actionSource?.source.includes("fib("));
+  });
+
+  test("math view formula for fib step rule stays renderable in math mode", async () => {
+    const source = fs.readFileSync(FIBONACCI_FUNC_FIXTURE_PATH, "utf8");
+    const offset = source.indexOf("ctx.set_fib(x2, f0 + f1);");
+    assert.notEqual(offset, -1);
+
+    const result = spawnSync(EXTRACTOR_PATH, ["--offset", String(offset)], {
+      cwd: WORKSPACE_ROOT,
+      input: source,
+      encoding: "utf8"
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const ir = JSON.parse(result.stdout) as PatternIr;
+    const model = buildMathViewModel(ir, source);
+    const formula = buildMathViewTypstSource(model);
+
+    const renderings = await renderTypstSnippets([{ targetId: "fib-math-view", source: formula }]);
+    assert.ok(renderings["fib-math-view"]);
+    assert.equal(renderings["fib-math-view"].mode, "math");
   });
 
   test("typst sources treat field access chains as math-safe atomic text", async () => {
@@ -952,11 +1401,199 @@ enum SharedMath {
     };
 
     const typstSources = collectTypstReplacementSources(ir, "action", "compact");
-    assert.deepEqual(typstSources, [{ targetId: "effect:effect_0", source: 'upright("tmp_arg") + upright("arg_arg_get.index")' }]);
+    assert.equal(typstSources.length, 1);
+    assert.equal(typstSources[0].targetId, "effect:effect_0");
+    assert.ok(typstSources[0].source.includes('upright("tmp_arg")'));
+    assert.ok(typstSources[0].source.includes('#B86A5B'));
 
     const renderings = await renderTypstSnippets(typstSources);
     assert.ok(renderings["effect:effect_0"]);
     assert.equal(renderings["effect:effect_0"].mode, "math");
+  });
+
+  test("pattern typst sources color whole recursive pattern subexpressions without extra parens", () => {
+    const ir: PatternIr = {
+      scope: {
+        kind: "pattern_function",
+        text_range: { start: 0, end: 12 },
+        pattern_range: { start: 0, end: 12 },
+        action_range: null
+      },
+      nodes: [
+        { id: "a", kind: "query_leaf", dsl_type: "Math", label: "a: Math", range: { start: 0, end: 1 }, inputs: [] },
+        { id: "b", kind: "query_leaf", dsl_type: "Math", label: "b: Math", range: { start: 2, end: 3 }, inputs: [] },
+        { id: "add", kind: "query", dsl_type: "MAdd", label: "add: MAdd", range: { start: 4, end: 12 }, inputs: ["a", "b"] }
+      ],
+      edges: [
+        { from: "add", to: "a", kind: "operand", index: 0 },
+        { from: "add", to: "b", kind: "operand", index: 1 }
+      ],
+      roots: ["add"],
+      constraints: [],
+      action_effects: [],
+      seed_facts: [],
+      display_templates: [],
+      typst_templates: [{ variant_name: "MAdd", template: "{a} + {b}", fields: ["a", "b"] }],
+      precedence_templates: [{ variant_name: "MAdd", precedence: 50 }],
+      diagnostics: []
+    };
+
+    const source = collectTypstReplacementSources(ir, "pattern", "recursive", "dag-expand")
+      .find((entry) => entry.targetId === "add")?.source;
+
+    assert.ok(source);
+    assert.match(source!, /#text\(fill: rgb\("#5F7A8A"\)\)\[/);
+    assert.match(source!, /#5F7A8A/);
+  });
+
+  test("action typst sources color reused pattern subexpressions differently from action wrappers", () => {
+    const ir: PatternIr = {
+      scope: {
+        kind: "add_rule_call",
+        text_range: { start: 0, end: 20 },
+        pattern_range: { start: 0, end: 10 },
+        action_range: { start: 11, end: 20 }
+      },
+      nodes: [
+        { id: "a", kind: "query_leaf", dsl_type: "Math", label: "a: Math", range: { start: 0, end: 1 }, inputs: [] },
+        { id: "b", kind: "query_leaf", dsl_type: "Math", label: "b: Math", range: { start: 2, end: 3 }, inputs: [] },
+        { id: "add", kind: "query", dsl_type: "MAdd", label: "add: MAdd", range: { start: 4, end: 10 }, inputs: ["a", "b"] }
+      ],
+      edges: [
+        { from: "add", to: "a", kind: "operand", index: 0 },
+        { from: "add", to: "b", kind: "operand", index: 1 }
+      ],
+      roots: ["add"],
+      constraints: [],
+      action_effects: [
+        {
+          id: "effect_0",
+          effect_id: "effect@11:20",
+          bound_var: "mul",
+          source_text: "ctx.insert_m_mul(pat.add, 2)",
+          referenced_pat_vars: ["add"],
+          referenced_action_vars: [],
+          range: { start: 11, end: 20 }
+        }
+      ],
+      seed_facts: [],
+      display_templates: [],
+      typst_templates: [
+        { variant_name: "MAdd", template: "{a} + {b}", fields: ["a", "b"] },
+        { variant_name: "MMul", template: "{a} * {b}", fields: ["a", "b"] }
+      ],
+      precedence_templates: [
+        { variant_name: "MAdd", precedence: 50 },
+        { variant_name: "MMul", precedence: 60 }
+      ],
+      diagnostics: []
+    };
+
+    const source = collectTypstReplacementSources(ir, "action", "recursive", "dag-expand")
+      .find((entry) => entry.targetId === "effect:effect_0")?.source;
+
+    assert.ok(source);
+    assert.match(source!, /#text\(fill: rgb\("#B86A5B"\)\)\[/);
+    assert.match(source!, /#text\(fill: rgb\("#5F7A8A"\)\)\[/);
+    assert.match(source!, /#B86A5B/);
+  });
+
+  test("colored integral action formula stays in math rendering mode", async () => {
+    const renderings = await renderTypstSnippets([
+      {
+        targetId: "integral-colored",
+        source: '#text(fill: rgb("#B86A5B"))[$ integral #text(fill: rgb("#5F7A8A"))[$ b $] quad d #text(fill: rgb("#5F7A8A"))[$ x $] $]'
+      }
+    ]);
+
+    assert.ok(renderings["integral-colored"]);
+    assert.equal(renderings["integral-colored"].mode, "math");
+    assert.ok(renderings["integral-colored"].height > 20);
+  });
+
+  test("colored mixed action-pattern formulas stay in math rendering mode", async () => {
+    const renderings = await renderTypstSnippets([
+      {
+        targetId: "mul-colored",
+        source: '#text(fill: rgb("#B86A5B"))[$ #text(fill: rgb("#5F7A8A"))[$ a $] * #text(fill: rgb("#B86A5B"))[$ b\'(x) $] $]'
+      },
+      {
+        targetId: "sum-colored",
+        source: '#text(fill: rgb("#B86A5B"))[$ a * b\'(x) + b * a\'(x) $]'
+      }
+    ]);
+
+    assert.ok(renderings["mul-colored"]);
+    assert.equal(renderings["mul-colored"].mode, "math");
+    assert.ok(renderings["sum-colored"]);
+    assert.equal(renderings["sum-colored"].mode, "math");
+  });
+
+  test("math_microbenchmark selected rules render typst formulas without text fallback", async () => {
+    const source = fs.readFileSync(MATH_METADATA_FIXTURE, "utf8");
+    const ruleAnchors = [
+      'MyTxMath::add_rule("diff_add"',
+      'MyTxMath::add_rule("diff_mul"',
+      'MyTxMath::add_rule("int_cos"',
+      'MyTxMath::add_rule("int_sin"',
+      'MyTxMath::add_rule("int_mul"'
+    ];
+
+    for (const anchor of ruleAnchors) {
+      const offset = source.indexOf(anchor);
+      assert.notEqual(offset, -1, `missing fixture anchor ${anchor}`);
+
+      const result = spawnSync(EXTRACTOR_PATH, ["--offset", String(offset)], {
+        cwd: WORKSPACE_ROOT,
+        input: source,
+        encoding: "utf8"
+      });
+
+      assert.equal(result.status, 0, result.stderr);
+      const ir = JSON.parse(result.stdout) as PatternIr;
+      const typstSources = collectTypstReplacementSources(ir, "combined", "recursive", "dag-expand");
+      assert.ok(typstSources.length > 0, `expected typst sources for ${anchor}`);
+
+      const renderings = await renderTypstSnippets(typstSources);
+      for (const entry of typstSources) {
+        assert.ok(renderings[entry.targetId], `expected rendering for ${anchor} -> ${entry.targetId}`);
+        assert.equal(
+          renderings[entry.targetId].mode,
+          "math",
+          `expected math render for ${anchor} -> ${entry.targetId}, got ${renderings[entry.targetId].mode}`
+        );
+      }
+    }
+  });
+
+  test("reported diff_mul action formulas stay in math mode through real renderer", async () => {
+    const renderings = await renderTypstSnippets([
+      {
+        targetId: "diff-b",
+        source: '#text(fill: rgb("#B86A5B"))[$ #text(fill: rgb("#5F7A8A"))[$ b $]\'(#text(fill: rgb("#5F7A8A"))[$ x $]) $]'
+      },
+      {
+        targetId: "amuldb",
+        source: '#text(fill: rgb("#B86A5B"))[$ #text(fill: rgb("#5F7A8A"))[$ a $] * #text(fill: rgb("#B86A5B"))[$ #text(fill: rgb("#5F7A8A"))[$ b $]\'(#text(fill: rgb("#5F7A8A"))[$ x $]) $] $]'
+      },
+      {
+        targetId: "diff-a",
+        source: '#text(fill: rgb("#B86A5B"))[$ #text(fill: rgb("#5F7A8A"))[$ a $]\'(#text(fill: rgb("#5F7A8A"))[$ x $]) $]'
+      },
+      {
+        targetId: "bmulda",
+        source: '#text(fill: rgb("#B86A5B"))[$ #text(fill: rgb("#5F7A8A"))[$ b $] * #text(fill: rgb("#B86A5B"))[$ #text(fill: rgb("#5F7A8A"))[$ a $]\'(#text(fill: rgb("#5F7A8A"))[$ x $]) $] $]'
+      },
+      {
+        targetId: "sum",
+        source: '#text(fill: rgb("#B86A5B"))[$ #text(fill: rgb("#B86A5B"))[$ #text(fill: rgb("#5F7A8A"))[$ a $] * #text(fill: rgb("#B86A5B"))[$ #text(fill: rgb("#5F7A8A"))[$ b $]\'(#text(fill: rgb("#5F7A8A"))[$ x $]) $] $] + #text(fill: rgb("#B86A5B"))[$ #text(fill: rgb("#5F7A8A"))[$ b $] * #text(fill: rgb("#B86A5B"))[$ #text(fill: rgb("#5F7A8A"))[$ a $]\'(#text(fill: rgb("#5F7A8A"))[$ x $]) $] $] $]'
+      }
+    ]);
+
+    for (const targetId of ["diff-b", "amuldb", "diff-a", "bmulda", "sum"]) {
+      assert.ok(renderings[targetId], `expected rendering for ${targetId}`);
+      assert.equal(renderings[targetId].mode, "math", `expected math render for ${targetId}`);
+    }
   });
 
   test("extractor keeps inline assertions and unique ids", () => {

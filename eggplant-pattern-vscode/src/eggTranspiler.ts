@@ -4,6 +4,7 @@ import { pathToFileURL } from "url";
 
 let configuredExtensionPath: string | undefined;
 let transpilerModulePromise: Promise<TranspilerModule> | undefined;
+const dynamicImport = new Function("specifier", "return import(specifier);") as (specifier: string) => Promise<TranspilerModule>;
 
 type TranspilerModule = {
   initSync?: (input: { module: BufferSource | WebAssembly.Module } | BufferSource | WebAssembly.Module) => unknown;
@@ -47,7 +48,7 @@ async function loadTranspilerModule(): Promise<TranspilerModule> {
         );
       }
 
-      const transpilerModule = (await import(pathToFileURL(modulePath).href)) as TranspilerModule;
+      const transpilerModule = await dynamicImport(pathToFileURL(modulePath).href);
       const wasmBytes = await fs.promises.readFile(wasmPath);
       if (typeof transpilerModule.initSync === "function") {
         transpilerModule.initSync({ module: wasmBytes });

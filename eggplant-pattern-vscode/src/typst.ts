@@ -1,13 +1,14 @@
 import { spawn } from "child_process";
 import { existsSync } from "fs";
 import * as path from "path";
+import {
+  RenderedTypstSnippet,
+  TypstSnippetRenderer,
+  normalizeTypstMathSource,
+  renderTypstSnippetsWithRenderer
+} from "./shared/typstCore";
 
-export interface RenderedTypstSnippet {
-  svg: string;
-  width: number;
-  height: number;
-  mode: "math" | "text-fallback";
-}
+export { normalizeTypstMathSource } from "./shared/typstCore";
 
 const renderCache = new Map<string, Promise<RenderedTypstSnippet | null>>();
 let missingTypstWarningShown = false;
@@ -15,79 +16,21 @@ let missingTypstWarningShown = false;
 export async function renderTypstSnippets(
   sources: Array<{ targetId: string; source: string }>
 ): Promise<Record<string, RenderedTypstSnippet>> {
-  const entries = await Promise.all(
-    sources.map(async ({ targetId, source }) => {
-      const rendered = await renderTypstSnippet(source);
-      return rendered ? [targetId, rendered] as const : null;
-    })
+  return renderTypstSnippetsWithRenderer(
+    sources,
+    cliTypstRenderer,
+    renderCache,
+    (error) => {
+      warnTypstFailure(error);
+    }
   );
-
-  return Object.fromEntries(entries.filter((entry): entry is readonly [string, RenderedTypstSnippet] => entry !== null));
 }
 
-async function renderTypstSnippet(source: string): Promise<RenderedTypstSnippet | null> {
-  if (!renderCache.has(source)) {
-    renderCache.set(source, renderTypstSnippetUncached(source));
+const cliTypstRenderer: TypstSnippetRenderer = {
+  render(document: string): Promise<string> {
+    return runTypst(document);
   }
-  return renderCache.get(source) ?? null;
-}
-
-async function renderTypstSnippetUncached(source: string): Promise<RenderedTypstSnippet | null> {
-  try {
-    const stdout = await runTypst(buildMathDocument(source));
-    return {
-      svg: stdout,
-      width: parseDimension(stdout, "width"),
-      height: parseDimension(stdout, "height"),
-      mode: "math"
-    };
-  } catch (error) {
-    try {
-      const stdout = await runTypst(buildTextDocument(source));
-      return {
-        svg: stdout,
-        width: parseDimension(stdout, "width"),
-        height: parseDimension(stdout, "height"),
-        mode: "text-fallback"
-      };
-    } catch (textError) {
-      warnTypstFailure(textError);
-      return null;
-    }
-  }
-}
-
-function buildMathDocument(source: string): string {
-  return [
-    "#set page(width: auto, height: auto, margin: 0pt)",
-    "#set par(justify: false)",
-    `#box(inset: (x: 1.2pt, y: 1.6pt))[$ ${normalizeTypstMathSource(source)} $]`
-  ].join("\n");
-}
-
-function buildTextDocument(source: string): string {
-  return [
-    "#set page(width: auto, height: auto, margin: 0pt)",
-    "#set par(justify: false)",
-    `#box(inset: (x: 1.2pt, y: 1.6pt))[#(${JSON.stringify(displayTextFallbackSource(source))})]`
-  ].join("\n");
-}
-
-function displayTextFallbackSource(source: string): string {
-  let current = source;
-  while (true) {
-    const next = current.replace(/upright\("((?:\\.|[^"])*)"\)/g, "$1");
-    if (next === current) {
-      return next;
-    }
-    current = next;
-  }
-}
-
-function parseDimension(svg: string, attr: "width" | "height"): number {
-  const match = svg.match(new RegExp(`${attr}="([0-9.]+)(?:pt)?"`));
-  return match ? Number(match[1]) : 0;
-}
+};
 
 function runTypst(document: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -159,15 +102,4 @@ function warnTypstFailure(error: unknown): void {
   missingTypstWarningShown = true;
   const message = error instanceof Error ? error.message : String(error);
   console.warn(`Eggplant pattern typst rendering disabled: ${message}`);
-}
-
-export function normalizeTypstMathSource(source: string): string {
-  const trimmed = source.trim();
-  if (trimmed.startsWith("$$") && trimmed.endsWith("$$") && trimmed.length >= 4) {
-    return trimmed.slice(2, -2).trim();
-  }
-  if (trimmed.startsWith("$") && trimmed.endsWith("$") && trimmed.length >= 2) {
-    return trimmed.slice(1, -1).trim();
-  }
-  return trimmed;
 }

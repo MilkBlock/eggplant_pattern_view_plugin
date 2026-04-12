@@ -20,6 +20,7 @@ const RELATION_FIXTURE = path.join(FIXTURE_DIR, "relation.rs");
 const UNICODE_OFFSET_FIXTURE = path.join(FIXTURE_DIR, "unicode_offset_scope.rs");
 const CROSS_FILE_METADATA_FIXTURE = path.join(FIXTURE_DIR, "cross_file_metadata_usage.rs");
 const ROOT_TYPST_FIXTURE = path.join(FIXTURE_DIR, "pattern_typst_root_failure.rs");
+const REDUNDANT_ACTION_INSERT_FIXTURE = path.join(FIXTURE_DIR, "redundant_action_insert.rs");
 const TEXT_FIXTURE = path.join(FIXTURE_DIR, "notes.txt");
 const TRACE_FIXTURE = path.join(FIXTURE_DIR, "tmp_action_sample_trace.json");
 const FIB_FUNC_FIXTURE = path.resolve(__dirname, "../../../../samples/fibonacci_func.rs");
@@ -653,6 +654,50 @@ suite("eggplant pattern extension", () => {
     assert.equal(preview.nodeConstraintsPopoverRows?.[0].sourceText, "l_r_plus1_eq");
   });
 
+  test("check view surfaces redundant action inserts with highlight targets and suggestions", async () => {
+    const editor = await openEditor(REDUNDANT_ACTION_INSERT_FIXTURE);
+    placeCursor(editor, "MyTx::add_rule(");
+
+    await vscode.commands.executeCommand("eggplant-pattern.preview");
+    let preview = await waitForPreviewState((state) => state.mode === "combined" && state.ruleChecks.length > 0);
+    assert.equal(preview.ruleCheckViewVisible, false);
+    assert.equal(preview.activeRuleCheckId, null);
+
+    await dispatchPreviewPanelTestMessage({ type: "toggleRuleChecks" });
+    preview = await waitForPreviewState((state) => state.ruleCheckViewVisible === true);
+    assert.equal(preview.ruleChecks.length, 1);
+    assert.match(preview.ruleChecks[0].message, /duplicates an existing pattern sub-DAG/);
+    assert.match(preview.ruleChecks[0].suggestion, /Reuse matched pattern sub-DAG/);
+    assert.deepEqual(preview.highlightedPatternNodeIds, ["p"]);
+    assert.deepEqual(preview.highlightedActionEffectIds, ["effect:effect_0"]);
+
+    await dispatchPreviewPanelTestMessage({ type: "selectRuleCheck", checkId: preview.ruleChecks[0].id });
+    preview = await waitForPreviewState((state) => state.activeRuleCheckId === state.ruleChecks[0]?.id);
+    assert.equal(preview.activeRuleCheckId, preview.ruleChecks[0].id);
+    assert.deepEqual(preview.highlightedPatternNodeIds, ["p"]);
+    assert.deepEqual(preview.highlightedActionEffectIds, ["effect:effect_0"]);
+  });
+
+  test("rule check rewrite replaces redundant insert source in rust code", async () => {
+    const tempFixture = await createTempRustFixture("redundant_action_insert.rs");
+    try {
+      const editor = await openEditor(tempFixture);
+      placeCursor(editor, "MyTx::add_rule(");
+
+      await vscode.commands.executeCommand("eggplant-pattern.preview");
+      let preview = await waitForPreviewState((state) => state.mode === "combined" && state.ruleChecks.length > 0);
+      await dispatchPreviewPanelTestMessage({ type: "applyRuleCheckRewrite", checkId: preview.ruleChecks[0].id });
+
+      preview = await waitForPreviewState((state) => state.mode === "combined" && state.ruleChecks.length === 0);
+      const updated = await fs.promises.readFile(tempFixture, "utf8");
+      assert.equal(updated.includes("let duplicate ="), false);
+      assert.equal(updated.includes("ctx.insert_add(pat.l, pat.r)"), false);
+      assert.match(updated, /ctx\.union\(pat\.p, pat\.p\);/);
+    } finally {
+      await fs.promises.rm(path.dirname(tempFixture), { recursive: true, force: true });
+    }
+  });
+
   test("node constraints popover omits constraints already inlined into node annotations", async () => {
     const editor = await openEditor(FIB_FUNC_FIXTURE);
     placeCursor(editor, "MyTx::add_rule(");
@@ -788,6 +833,14 @@ async function activateExtension(): Promise<void> {
 async function openEditor(filePath: string): Promise<vscode.TextEditor> {
   const document = await vscode.workspace.openTextDocument(filePath);
   return vscode.window.showTextDocument(document);
+}
+
+async function createTempRustFixture(fixtureName: string): Promise<string> {
+  const tempDir = await fs.promises.mkdtemp(path.join(FIXTURE_DIR, "tmp-"));
+  const sourcePath = path.join(FIXTURE_DIR, fixtureName);
+  const targetPath = path.join(tempDir, fixtureName);
+  await fs.promises.copyFile(sourcePath, targetPath);
+  return targetPath;
 }
 
 function placeCursor(editor: vscode.TextEditor, needle: string): void {

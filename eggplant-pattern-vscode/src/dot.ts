@@ -33,6 +33,13 @@ interface RenderedTemplateField {
   isAtomic: boolean;
 }
 
+const TYPOLOGY_PATTERN_COLOR = "#5F7A8A";
+const TYPOLOGY_ACTION_COLOR = "#B86A5B";
+
+function typstColorWrap(source: string, color: string): string {
+  return `#text(fill: rgb(${JSON.stringify(color)}))[$ ${source} $]`;
+}
+
 function quote(value: string): string {
   return JSON.stringify(value);
 }
@@ -590,6 +597,7 @@ function typstPatternSource(
   nodeById: Map<string, PatternNode>,
   incomingCounts: Map<string, number>
 ): string {
+  const patternAtomicRenderer = (value: string) => typstAtomicExpression(value);
   if (labelStyle !== "full" && node.inputs.length > 0) {
     const recursive = recursivePatternLabel(
       ir,
@@ -601,7 +609,7 @@ function typstPatternSource(
       typstAtomicExpression
     );
     if (recursive) {
-      return recursive.text;
+      return typstColorWrap(recursive.text, TYPOLOGY_PATTERN_COLOR);
     }
   }
 
@@ -613,12 +621,12 @@ function typstPatternSource(
       variantPrecedence(ir, node.dsl_type)
     );
     if (rendered) {
-      return rendered;
+      return typstColorWrap(rendered, TYPOLOGY_PATTERN_COLOR);
     }
   }
 
   if (node.inputs.length === 0) {
-    return typstAtomicExpression(node.id);
+    return typstColorWrap(typstAtomicExpression(node.id), TYPOLOGY_PATTERN_COLOR);
   }
 
   return nodeLabel(
@@ -648,16 +656,17 @@ function recursiveActionArgLabel(
   nodeById: Map<string, PatternNode>,
   incomingCounts: Map<string, number>,
   arg: string,
-  seen: Set<string>,
-  atomicRenderer: (value: string) => string
+  seen: Set<string>
 ): RecursiveActionResult | null {
   const trimmed = compactExpression(arg);
+  const patternAtomicRenderer = (value: string) => typstAtomicExpression(value);
+  const actionAtomicRenderer = (value: string) => typstAtomicExpression(value);
   if (effectByBinding.has(trimmed)) {
     const childEffectId = effectByBinding.get(trimmed);
     if (childEffectId) {
-      const child = recursiveActionLabel(ir, strategy, effectByBinding, nodeById, incomingCounts, childEffectId, seen, atomicRenderer);
+      const child = recursiveActionLabel(ir, strategy, effectByBinding, nodeById, incomingCounts, childEffectId, seen, actionAtomicRenderer);
       if (child) {
-        return child;
+        return { ...child, text: typstColorWrap(child.text, TYPOLOGY_ACTION_COLOR) };
       }
     }
   }
@@ -670,7 +679,7 @@ function recursiveActionArgLabel(
     }
 
     const renderedArgs = inlineInsert.args.map((childArg, index) => {
-      const child = recursiveActionArgLabel(ir, strategy, effectByBinding, nodeById, incomingCounts, childArg, seen, atomicRenderer);
+      const child = recursiveActionArgLabel(ir, strategy, effectByBinding, nodeById, incomingCounts, childArg, seen);
       if (!child) {
         return null;
       }
@@ -693,7 +702,7 @@ function recursiveActionArgLabel(
       return null;
     }
     return {
-      text: rendered,
+      text: typstColorWrap(rendered, TYPOLOGY_ACTION_COLOR),
       precedence: variantPrecedence(ir, inlineInsert.variantName),
       isAtomic: inlineInsert.args.length === 0,
     };
@@ -701,9 +710,9 @@ function recursiveActionArgLabel(
 
   const patVar = trimmed.replace(/^(?:pat|matched)\./, "");
   if (nodeById.has(patVar)) {
-    const child = recursivePatternLabel(ir, nodeById, incomingCounts, patVar, strategy, new Set(), atomicRenderer);
+    const child = recursivePatternLabel(ir, nodeById, incomingCounts, patVar, strategy, new Set(), patternAtomicRenderer);
     if (child) {
-      return child;
+      return { ...child, text: typstColorWrap(child.text, TYPOLOGY_PATTERN_COLOR) };
     }
     if (strategy === "tree-safe") {
       return null;
@@ -711,7 +720,7 @@ function recursiveActionArgLabel(
   }
 
   return {
-    text: atomicRenderer(trimmed),
+    text: actionAtomicRenderer(trimmed),
     precedence: Number.MAX_SAFE_INTEGER,
     isAtomic: true,
   };
@@ -748,7 +757,7 @@ function recursiveActionLabel(
   const nextSeen = new Set(seen);
   nextSeen.add(effectId);
   const renderedArgs = parsed.args.map((arg, index) => {
-    const child = recursiveActionArgLabel(ir, strategy, effectByBinding, nodeById, incomingCounts, arg, nextSeen, atomicRenderer);
+    const child = recursiveActionArgLabel(ir, strategy, effectByBinding, nodeById, incomingCounts, arg, nextSeen);
     if (child) {
       return {
         name: template.fields[index],
@@ -807,7 +816,7 @@ function actionEffectLabel(
   if (labelStyle === "recursive") {
     const rendered = recursiveActionLabel(ir, strategy, effectByBinding, nodeById, incomingCounts, effectId, new Set(), displayAtomicExpression);
     if (rendered) {
-      return rendered.text;
+      return typstColorWrap(rendered.text, TYPOLOGY_ACTION_COLOR);
     }
   }
   if (parsed) {
@@ -820,7 +829,7 @@ function actionEffectLabel(
         )
       : null;
     if (rendered) {
-      return rendered;
+      return typstColorWrap(rendered, TYPOLOGY_ACTION_COLOR);
     }
   }
   return compactExpression(semantic);
@@ -836,6 +845,7 @@ function actionEffectTypstSource(
   incomingCounts: Map<string, number>,
   effectId: string
 ): string {
+  const actionAtomicRenderer = (value: string) => typstColorWrap(typstAtomicExpression(value), TYPOLOGY_ACTION_COLOR);
   const renderedSet = renderSetCall(ir, sourceText, typstAtomicExpression, findTypstTemplate);
   if (renderedSet) {
     return renderedSet;
@@ -848,7 +858,7 @@ function actionEffectTypstSource(
   if (labelStyle === "recursive") {
     const rendered = recursiveActionLabel(ir, strategy, effectByBinding, nodeById, incomingCounts, effectId, new Set(), typstAtomicExpression);
     if (rendered) {
-      return rendered.text;
+      return typstColorWrap(rendered.text, TYPOLOGY_ACTION_COLOR);
     }
   }
 
@@ -856,7 +866,7 @@ function actionEffectTypstSource(
   const rendered = template
     ? applyDisplayTemplate(
         template,
-        parsed.args.map((arg) => typstAtomicExpression(arg)),
+        parsed.args.map((arg) => actionAtomicRenderer(arg)),
         variantPrecedence(ir, parsed.variantName)
       )
     : null;
@@ -938,7 +948,7 @@ export function patternIrToDotWithMode(
     "digraph EggplantPattern {",
     "  rankdir=TB;",
     "  graph [pad=0.3, nodesep=0.5, ranksep=0.6];",
-    "  node [shape=box, style=\"rounded,filled\", fillcolor=\"#f8f5ec\", color=\"#6b5b3e\", fontname=\"Iosevka\"];",
+    "  node [shape=box, style=\"rounded,filled\", fillcolor=\"#f8f5ec\", color=\"#6b5b3e\", fontname=\"Helvetica\"];",
     "  edge [color=\"#7a7468\"];"
   ];
 
@@ -977,14 +987,14 @@ export function patternIrToDotWithMode(
       }
       const rootLabel = `${root}${inlineAnnotationSuffix(inlineAnnotations, root)}`;
       lines.push(
-        `  ${quote(root)} [label=${quote(rootLabel)}, shape=ellipse, style="dashed,filled", fillcolor="#f3f0ea", color="#8d8477", penwidth=2, fontname="Iosevka"];`
+        `  ${quote(root)} [label=${quote(rootLabel)}, shape=ellipse, style="dashed,filled", fillcolor="#f3f0ea", color="#8d8477", penwidth=2, fontname="Helvetica"];`
       );
     }
   }
 
   if (!showPattern) {
     for (const anchor of actionAnchorVars) {
-      lines.push(`  ${quote(anchor)} [label=${quote(anchor)}, shape=ellipse, style="dashed,filled", fillcolor="#f3f0ea", color="#8d8477", fontname="Iosevka"];`);
+      lines.push(`  ${quote(anchor)} [label=${quote(anchor)}, shape=ellipse, style="dashed,filled", fillcolor="#f3f0ea", color="#8d8477", fontname="Helvetica"];`);
     }
   }
 

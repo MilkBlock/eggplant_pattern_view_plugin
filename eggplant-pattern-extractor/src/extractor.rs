@@ -798,10 +798,13 @@ fn unwrap_assert_chain(
 
         if let Some(arg) = method_call.arg_list().and_then(|args| args.args().next()) {
             let (resolved_text, referenced_vars) = resolve_constraint(&arg, local_bindings);
+            let semantic_text =
+                semanticize_constraint_text(&arg.syntax().text().to_string(), &resolved_text);
             extracted_constraints.push(PatternConstraint {
                 id: String::new(),
                 source_text: arg.syntax().text().to_string(),
                 resolved_text,
+                semantic_text,
                 referenced_vars,
                 range: span_from_text_range(arg.syntax().text_range()),
             });
@@ -840,6 +843,255 @@ fn resolve_constraint(
         expr.syntax().text().to_string(),
         collect_variable_references(expr),
     )
+}
+
+fn semanticize_constraint_text(source_text: &str, resolved_text: &str) -> Option<String> {
+    let semantic_source = if source_text == resolved_text {
+        source_text
+    } else {
+        resolved_text
+    };
+    semanticize_comparison_expr_text(semantic_source)
+}
+
+fn semanticize_action_effect_text(source_text: &str) -> Option<String> {
+    let trimmed = source_text.trim().trim_end_matches(';').trim();
+    let set_match = Regex::new(r"^(?:[A-Za-z_][A-Za-z0-9_]*\.)?set_([A-Za-z0-9_]+)\(([\s\S]*)\)$")
+        .ok()?
+        .captures(trimmed)?;
+    let target = set_match.get(1)?.as_str();
+    let args = split_top_level_args(set_match.get(2)?.as_str());
+    if args.len() < 2 {
+        return None;
+    }
+    let lhs_args = args[..args.len() - 1]
+        .iter()
+        .map(|arg| semanticize_value_expr_text(arg))
+        .collect::<Option<Vec<_>>>()?;
+    let rhs = semanticize_value_expr_text(args.last()?)?;
+    Some(format!("{target}({}) = {rhs}", lhs_args.join(", ")))
+}
+
+fn semanticize_comparison_expr_text(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    let primitive_ops = [
+        ("eq", "=="),
+        ("ne", "!="),
+        ("lt", "<"),
+        ("le", "<="),
+        ("gt", ">"),
+        ("ge", ">="),
+    ];
+    for (method, operator) in primitive_ops {
+        let suffix = format!(".{method}(");
+        if let Some(index) = find_top_level_method_suffix(trimmed, &suffix) {
+            let lhs = trimmed[..index].trim();
+            let arg_start = index + suffix.len();
+            if !trimmed.ends_with(')') {
+                return None;
+            }
+            let rhs = &trimmed[arg_start..trimmed.len() - 1];
+            let lhs_semantic = semanticize_handle_expr_text(lhs)?;
+            let rhs_semantic = semanticize_handle_expr_text(rhs)?;
+            return Some(format!("{lhs_semantic} {operator} {rhs_semantic}"));
+        }
+    }
+    None
+}
+
+fn semanticize_value_expr_text(text: &str) -> Option<String> {
+    let trimmed = trim_wrapping_expr(text);
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some(stripped) = trimmed.strip_prefix('&') {
+        return semanticize_value_expr_text(stripped);
+    }
+
+    if let Some(inner) = strip_suffix_call(trimmed, ".clone()") {
+        return semanticize_value_expr_text(inner);
+    }
+    if let Some(inner) = strip_suffix_call(trimmed, ".as_handle()") {
+        return semanticize_value_expr_text(inner);
+    }
+    if let Some(inner) = strip_suffix_call(trimmed, ".handle()") {
+        return semanticize_value_expr_text(inner);
+    }
+    if let Some((base, field)) = strip_handle_field_call(trimmed) {
+        let base_semantic = semanticize_value_expr_text(base)?;
+        return Some(format!("{base_semantic}.{field}"));
+    }
+
+    if let Some((left, operator, right)) = split_top_level_binary(trimmed) {
+        let left_semantic = semanticize_value_expr_text(left)?;
+        let right_semantic = semanticize_value_expr_text(right)?;
+        return Some(format!("{left_semantic} {operator} {right_semantic}"));
+    }
+
+    if let Some((name, args)) = split_call_expr(trimmed) {
+        let args_semantic = args
+            .iter()
+            .map(|arg| semanticize_value_expr_text(arg))
+            .collect::<Option<Vec<_>>>()?;
+        return Some(format!("{name}({})", args_semantic.join(", ")));
+    }
+
+    Some(normalize_atomic_value(trimmed))
+}
+
+fn semanticize_handle_expr_text(text: &str) -> Option<String> {
+    semanticize_value_expr_text(text)
+}
+
+fn normalize_atomic_value(text: &str) -> String {
+    let trimmed = trim_wrapping_expr(text);
+    let integer_suffix = Regex::new(r"^(-?\d+)_i(?:8|16|32|64|128|size)$").unwrap();
+    if let Some(captures) = integer_suffix.captures(trimmed)
+        && let Some(number) = captures.get(1)
+    {
+        return number.as_str().to_string();
+    }
+    trimmed.to_string()
+}
+
+fn trim_wrapping_expr(text: &str) -> &str {
+    let mut current = text.trim();
+    loop {
+        let mut chars = current.chars();
+        if matches!(chars.next(), Some('(')) && matches!(current.chars().last(), Some(')')) && expr_wrapped_by_outer_parens(current) {
+            current = current[1..current.len() - 1].trim();
+            continue;
+        }
+        break;
+    }
+    current
+}
+
+fn expr_wrapped_by_outer_parens(text: &str) -> bool {
+    let mut depth = 0usize;
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 && index != text.len() - 1 {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    depth == 0
+}
+
+fn strip_suffix_call<'a>(text: &'a str, suffix: &str) -> Option<&'a str> {
+    text.strip_suffix(suffix).map(trim_wrapping_expr)
+}
+
+fn strip_handle_field_call<'a>(text: &'a str) -> Option<(&'a str, &'a str)> {
+    let captures = Regex::new(r"^(.+)\.handle_([A-Za-z_][A-Za-z0-9_]*)\(\)$")
+        .ok()?
+        .captures(text)?;
+    Some((
+        captures.get(1)?.as_str().trim(),
+        captures.get(2)?.as_str().trim(),
+    ))
+}
+
+fn split_call_expr(text: &str) -> Option<(&str, Vec<&str>)> {
+    if !text.ends_with(')') {
+        return None;
+    }
+    let open = text.find('(')?;
+    if open == 0 {
+        return None;
+    }
+    let name = text[..open].trim();
+    if name.is_empty() || text[open + 1..text.len() - 1].contains("=>") {
+        return None;
+    }
+    Some((name, split_top_level_args(&text[open + 1..text.len() - 1])))
+}
+
+fn split_top_level_args(text: &str) -> Vec<&str> {
+    let mut args = Vec::new();
+    let mut depth_paren = 0usize;
+    let mut depth_bracket = 0usize;
+    let mut depth_brace = 0usize;
+    let mut start = 0usize;
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '(' => depth_paren += 1,
+            ')' => depth_paren = depth_paren.saturating_sub(1),
+            '[' => depth_bracket += 1,
+            ']' => depth_bracket = depth_bracket.saturating_sub(1),
+            '{' => depth_brace += 1,
+            '}' => depth_brace = depth_brace.saturating_sub(1),
+            ',' if depth_paren == 0 && depth_bracket == 0 && depth_brace == 0 => {
+                args.push(text[start..index].trim());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    let tail = text[start..].trim();
+    if !tail.is_empty() {
+        args.push(tail);
+    }
+    args
+}
+
+fn split_top_level_binary(text: &str) -> Option<(&str, &str, &str)> {
+    let operators = ["==", "!=", "<=", ">=", "+", "-", "*", "/"];
+    let mut depth_paren = 0usize;
+    let mut depth_bracket = 0usize;
+    let mut depth_brace = 0usize;
+    for (index, ch) in text.char_indices().rev() {
+        match ch {
+            ')' => depth_paren += 1,
+            '(' => depth_paren = depth_paren.saturating_sub(1),
+            ']' => depth_bracket += 1,
+            '[' => depth_bracket = depth_bracket.saturating_sub(1),
+            '}' => depth_brace += 1,
+            '{' => depth_brace = depth_brace.saturating_sub(1),
+            _ => {}
+        }
+        if depth_paren != 0 || depth_bracket != 0 || depth_brace != 0 {
+            continue;
+        }
+        for operator in operators {
+            if index + operator.len() <= text.len() && &text[index..index + operator.len()] == operator {
+                let left = text[..index].trim();
+                let right = text[index + operator.len()..].trim();
+                if !left.is_empty() && !right.is_empty() {
+                    return Some((left, operator, right));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn find_top_level_method_suffix(text: &str, suffix: &str) -> Option<usize> {
+    let mut depth_paren = 0usize;
+    let mut depth_bracket = 0usize;
+    let mut depth_brace = 0usize;
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '(' => depth_paren += 1,
+            ')' => depth_paren = depth_paren.saturating_sub(1),
+            '[' => depth_bracket += 1,
+            ']' => depth_bracket = depth_bracket.saturating_sub(1),
+            '{' => depth_brace += 1,
+            '}' => depth_brace = depth_brace.saturating_sub(1),
+            _ => {}
+        }
+        if depth_paren == 0 && depth_bracket == 0 && depth_brace == 0 && text[index..].starts_with(suffix) {
+            return Some(index);
+        }
+    }
+    None
 }
 
 fn collect_variable_references(expr: &ast::Expr) -> Vec<String> {
@@ -1005,6 +1257,7 @@ fn extract_action_effects(
                     .cloned()
             }),
             source_text: method_call.syntax().text().to_string(),
+            semantic_text: semanticize_action_effect_text(&method_call.syntax().text().to_string()),
             referenced_pat_vars: referenced_pat_vars.into_iter().collect(),
             referenced_action_vars: referenced_action_vars.into_iter().collect(),
             range: span_from_text_range(method_call.syntax().text_range()),
@@ -2154,7 +2407,7 @@ fn demo() {
 "#;
         let ir = extract(src, "ctx.insert_m_ln");
         assert!(ir.diagnostics.is_empty());
-        assert!(ir.roots.is_empty());
+        assert_eq!(ir.roots, vec!["Unit"]);
         assert_eq!(ir.action_effects.len(), 3);
         assert_eq!(ir.action_effects[0].bound_var.as_deref(), Some("x"));
         assert_eq!(ir.action_effects[1].bound_var.as_deref(), Some("ln_x"));
@@ -2303,8 +2556,14 @@ fn demo(step_ruleset: Ruleset) {
             vec![("f0", "fib"), ("f1", "fib")]
         );
         assert_eq!(ir.constraints.len(), 2);
+        assert_eq!(ir.constraints[0].semantic_text.as_deref(), Some("x1 == x + 1"));
+        assert_eq!(ir.constraints[1].semantic_text.as_deref(), Some("x2 == x + 2"));
         assert_eq!(ir.action_effects.len(), 1);
         assert_eq!(ir.action_effects[0].source_text, "ctx.set_fib(x2, f0 + f1)");
+        assert_eq!(
+            ir.action_effects[0].semantic_text.as_deref(),
+            Some("fib(x2) = f0 + f1")
+        );
         assert_eq!(ir.action_effects[0].referenced_pat_vars, vec!["f0", "f1", "x2"]);
     }
 
@@ -2511,6 +2770,10 @@ fn demo() {
         assert_eq!(
             ir.constraints[0].resolved_text,
             "edge.handle_src().eq(&edge.handle_dst())"
+        );
+        assert_eq!(
+            ir.constraints[0].semantic_text.as_deref(),
+            Some("edge.src == edge.dst")
         );
         assert_eq!(ir.constraints[0].referenced_vars, vec!["edge"]);
     }
