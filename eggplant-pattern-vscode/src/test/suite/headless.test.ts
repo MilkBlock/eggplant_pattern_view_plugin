@@ -1389,6 +1389,33 @@ enum SharedMath {
     assert.doesNotMatch(formula, /^frac\(sin\(x\) \\\\/);
   });
 
+  test("math view mul_distrib stays in math render mode", async () => {
+    const source = fs.readFileSync(MATH_METADATA_FIXTURE, "utf8");
+    const offset = source.indexOf('MyTxMath::add_rule("mul_distrib"');
+    assert.notEqual(offset, -1);
+
+    const result = spawnSync(EXTRACTOR_PATH, ["--offset", String(offset)], {
+      cwd: WORKSPACE_ROOT,
+      input: source,
+      encoding: "utf8"
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const ir = JSON.parse(result.stdout) as PatternIr;
+    const model = buildMathViewModel(ir, source);
+    const formula = buildMathViewTypstSource(model);
+
+    assert.equal(model.ruleName, "mul_distrib");
+    assert.deepEqual(model.premises.map((entry) => entry.targetId), ["mul"]);
+    assert.equal(model.conclusions.length, 1);
+    assert.equal(model.conclusions[0].from?.targetId, "mul");
+    assert.equal(model.conclusions[0].to?.targetId, "effect:effect_2");
+
+    const renderings = await renderTypstSnippets([{ targetId: "mul-distrib-math-view", source: formula }]);
+    assert.ok(renderings["mul-distrib-math-view"]);
+    assert.equal(renderings["mul-distrib-math-view"].mode, "math");
+  });
+
   test("math view demo_assert_block falls back to structural premise and conclusion", () => {
     const source = fs.readFileSync(FIXTURE_PATH, "utf8");
     const offset = source.indexOf('"demo_assert_block"');

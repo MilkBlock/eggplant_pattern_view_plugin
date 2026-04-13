@@ -233,6 +233,10 @@ function buildEntry(targetId: string, source: string, ir: PatternIr): MathViewEn
   };
 }
 
+function hasResidualTypstPreviewArtifacts(source: string): boolean {
+  return source.includes("#text(") || source.includes("$]");
+}
+
 function parseUnionConclusion(effect: ActionEffect): { patternVar: string; targetKind: "action" | "pattern"; targetVar: string } | null {
   const match = effect.source_text.match(
     /(?:[A-Za-z_][A-Za-z0-9_]*\.)?union\(\s*(?:pat|matched)\.([A-Za-z_][A-Za-z0-9_]*)\s*,\s*((?:(?:pat|matched)\.)?)([A-Za-z_][A-Za-z0-9_]*)\s*\)/
@@ -273,7 +277,10 @@ export function buildMathViewModel(ir: PatternIr, source: string): MathViewModel
   const actionEntries = ir.action_effects
     .map((effect) => {
       const targetId = `effect:${effect.id}`;
-      const sourceText = collectedActionSources.get(targetId) ?? fallbackActionSource(effect, ir);
+      const collected = collectedActionSources.get(targetId);
+      const sourceText = collected && !hasResidualTypstPreviewArtifacts(stripTypstPreviewDecorations(collected))
+        ? collected
+        : fallbackActionSource(effect, ir);
       return sourceText ? { targetId, sourceText } : null;
     })
     .filter((entry): entry is { targetId: string; sourceText: string } => entry !== null)
