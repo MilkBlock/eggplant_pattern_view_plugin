@@ -154,13 +154,6 @@ function parseUnionConclusion(effect: ActionEffect): { patternVar: string; targe
       targetVar: match[3],
     };
   }
-  if (effect.referenced_pat_vars.length === 1 && effect.referenced_action_vars.length === 1) {
-    return {
-      patternVar: effect.referenced_pat_vars[0],
-      targetKind: "action",
-      targetVar: effect.referenced_action_vars[0],
-    };
-  }
   return null;
 }
 
