@@ -158,7 +158,11 @@ function parseUnionConclusion(effect: ActionEffect): { patternVar: string; targe
 }
 
 export function buildMathViewModel(ir: PatternIr, source: string): MathViewModel {
+  const rootPatternIds = new Set(
+    ir.roots.filter((rootId) => ir.nodes.find((node) => node.id === rootId)?.kind !== "query_leaf")
+  );
   const patternEntries = collectTypstReplacementSources(ir, "pattern", "recursive", "tree-safe")
+    .filter((entry) => rootPatternIds.has(entry.targetId))
     .sort((left, right) => entrySortOrder(ir, left.targetId) - entrySortOrder(ir, right.targetId))
     .map((entry) => buildEntry(entry.targetId, entry.source, ir));
 

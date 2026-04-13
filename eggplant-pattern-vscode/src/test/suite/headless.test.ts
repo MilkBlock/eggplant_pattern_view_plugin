@@ -1368,6 +1368,27 @@ enum SharedMath {
     assert.equal(renderings["fib-math-view"].mode, "math");
   });
 
+  test("math view diff_sin only lists root matched premises", () => {
+    const source = fs.readFileSync(MATH_METADATA_FIXTURE, "utf8");
+    const offset = source.indexOf('MyTxMath::add_rule("diff_sin"');
+    assert.notEqual(offset, -1);
+
+    const result = spawnSync(EXTRACTOR_PATH, ["--offset", String(offset)], {
+      cwd: WORKSPACE_ROOT,
+      input: source,
+      encoding: "utf8"
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const ir = JSON.parse(result.stdout) as PatternIr;
+    const model = buildMathViewModel(ir, source);
+    const formula = buildMathViewTypstSource(model);
+
+    assert.equal(model.ruleName, "diff_sin");
+    assert.deepEqual(model.premises.map((entry) => entry.targetId), ["diff"]);
+    assert.doesNotMatch(formula, /^frac\(sin\(x\) \\\\/);
+  });
+
   test("math view diff_mul only emits the final rewrite conclusion", () => {
     const source = fs.readFileSync(MATH_METADATA_FIXTURE, "utf8");
     const offset = source.indexOf('MyTxMath::add_rule("diff_mul"');
@@ -1385,7 +1406,7 @@ enum SharedMath {
     const formula = buildMathViewTypstSource(model);
 
     assert.equal(model.ruleName, "diff_mul");
-    assert.deepEqual(model.premises.map((entry) => entry.targetId), ["mul", "diff"]);
+    assert.deepEqual(model.premises.map((entry) => entry.targetId), ["diff"]);
     assert.deepEqual(model.derivations.map((entry) => entry.label), ["db", "da", "a_db", "b_da", "rhs"]);
     assert.equal(model.conclusions.length, 1);
     assert.equal(model.conclusions[0].from?.targetId, "diff");
