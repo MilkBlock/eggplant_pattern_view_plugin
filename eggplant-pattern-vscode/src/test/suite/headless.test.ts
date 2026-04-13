@@ -1389,6 +1389,32 @@ enum SharedMath {
     assert.doesNotMatch(formula, /^frac\(sin\(x\) \\\\/);
   });
 
+  test("math view demo_assert_block falls back to structural premise and conclusion", () => {
+    const source = fs.readFileSync(FIXTURE_PATH, "utf8");
+    const offset = source.indexOf('"demo_assert_block"');
+    assert.notEqual(offset, -1);
+
+    const result = spawnSync(EXTRACTOR_PATH, ["--offset", String(offset)], {
+      cwd: WORKSPACE_ROOT,
+      input: source,
+      encoding: "utf8"
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const ir = JSON.parse(result.stdout) as PatternIr;
+    const model = buildMathViewModel(ir, source);
+    const formula = buildMathViewTypstSource(model);
+
+    assert.equal(model.ruleName, "demo_assert_block");
+    assert.deepEqual(model.premises.map((entry) => entry.targetId), ["p"]);
+    assert.equal(model.conclusions.length, 1);
+    assert.equal(model.conclusions[0].from?.targetId, "p");
+    assert.equal(model.conclusions[0].to?.targetId, "effect:effect_0");
+    assert.doesNotMatch(formula, /no matched premise/);
+    assert.doesNotMatch(formula, /no conclusion/);
+    assert.match(formula, /l == r/);
+  });
+
   test("math view diff_mul only emits the final rewrite conclusion", () => {
     const source = fs.readFileSync(MATH_METADATA_FIXTURE, "utf8");
     const offset = source.indexOf('MyTxMath::add_rule("diff_mul"');

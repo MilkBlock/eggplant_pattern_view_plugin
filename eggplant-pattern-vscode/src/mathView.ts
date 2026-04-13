@@ -125,6 +125,96 @@ function stripTypstPreviewDecorations(source: string): string {
   }
 }
 
+function splitTopLevelArgs(source: string): string[] {
+  const args: string[] = [];
+  let depth = 0;
+  let current = "";
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    if (char === "(") {
+      depth += 1;
+      current += char;
+      continue;
+    }
+    if (char === ")") {
+      depth = Math.max(0, depth - 1);
+      current += char;
+      continue;
+    }
+    if (char === "," && depth === 0) {
+      args.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  const trimmed = current.trim();
+  if (trimmed.length > 0) {
+    args.push(trimmed);
+  }
+  return args;
+}
+
+function fallbackPatternSource(nodeId: string, ir: PatternIr, seen = new Set<string>()): string {
+  const node = ir.nodes.find((entry) => entry.id === nodeId);
+  if (!node) {
+    return semanticTextToTypst(nodeId);
+  }
+  if (seen.has(nodeId)) {
+    return semanticTextToTypst(nodeId);
+  }
+  if (node.inputs.length === 0) {
+    return semanticTextToTypst(node.id);
+  }
+  const nextSeen = new Set(seen);
+  nextSeen.add(nodeId);
+  const callee = semanticIdentifierToTypst(node.dsl_type, true);
+  const args = node.inputs.map((input) => fallbackPatternSource(input, ir, nextSeen)).join(", ");
+  return `${callee}(${args})`;
+}
+
+function fallbackActionValueSource(value: string, ir: PatternIr): string {
+  const trimmed = value.trim();
+  if (trimmed.startsWith("pat.") || trimmed.startsWith("matched.")) {
+    return fallbackPatternSource(trimmed.replace(/^(?:pat|matched)\./, ""), ir);
+  }
+  return semanticTextToTypst(trimmed);
+}
+
+function fallbackActionSource(effect: ActionEffect, ir: PatternIr): string | null {
+  const match = effect.source_text.match(/(?:[A-Za-z_][A-Za-z0-9_]*\.)?insert_([A-Za-z0-9_]+)\(([\s\S]*)\)$/);
+  if (!match) {
+    return effect.bound_var ? semanticTextToTypst(effect.bound_var) : null;
+  }
+  const target = match[1].replace(/^m_/, "");
+  const args = splitTopLevelArgs(match[2]);
+  if (target === "const" && args.length === 1) {
+    return fallbackActionValueSource(args[0], ir);
+  }
+  const callee = semanticIdentifierToTypst(target, true);
+  return `${callee}(${args.map((arg) => fallbackActionValueSource(arg, ir)).join(", ")})`;
+}
+
+function collectDescendantPatternIds(nodeId: string, ir: PatternIr, seen = new Set<string>()): Set<string> {
+  if (seen.has(nodeId)) {
+    return new Set();
+  }
+  const node = ir.nodes.find((entry) => entry.id === nodeId);
+  if (!node) {
+    return new Set();
+  }
+  const nextSeen = new Set(seen);
+  nextSeen.add(nodeId);
+  const descendants = new Set<string>();
+  for (const input of node.inputs) {
+    descendants.add(input);
+    for (const nested of collectDescendantPatternIds(input, ir, nextSeen)) {
+      descendants.add(nested);
+    }
+  }
+  return descendants;
+}
+
 function buildEntry(targetId: string, source: string, ir: PatternIr): MathViewEntry {
   const node = ir.nodes.find((entry) => entry.id === targetId);
   const effect = ir.action_effects.find((entry) => `effect:${entry.id}` === targetId);
@@ -158,17 +248,37 @@ function parseUnionConclusion(effect: ActionEffect): { patternVar: string; targe
 }
 
 export function buildMathViewModel(ir: PatternIr, source: string): MathViewModel {
-  const rootPatternIds = new Set(
-    ir.roots.filter((rootId) => ir.nodes.find((node) => node.id === rootId)?.kind !== "query_leaf")
+  const candidateRootIds = ir.roots.filter((rootId) => ir.nodes.find((node) => node.id === rootId)?.kind !== "query_leaf");
+  const descendantRootIds = new Set<string>();
+  for (const rootId of candidateRootIds) {
+    for (const descendant of collectDescendantPatternIds(rootId, ir)) {
+      if (candidateRootIds.includes(descendant)) {
+        descendantRootIds.add(descendant);
+      }
+    }
+  }
+  const rootPatternIds = new Set(candidateRootIds.filter((rootId) => !descendantRootIds.has(rootId)));
+  const collectedPatternSources = new Map(
+    collectTypstReplacementSources(ir, "pattern", "recursive", "tree-safe")
+      .map((entry) => [entry.targetId, entry.source] as const)
   );
-  const patternEntries = collectTypstReplacementSources(ir, "pattern", "recursive", "tree-safe")
-    .filter((entry) => rootPatternIds.has(entry.targetId))
-    .sort((left, right) => entrySortOrder(ir, left.targetId) - entrySortOrder(ir, right.targetId))
-    .map((entry) => buildEntry(entry.targetId, entry.source, ir));
+  const patternEntries = Array.from(rootPatternIds)
+    .sort((left, right) => entrySortOrder(ir, left) - entrySortOrder(ir, right))
+    .map((targetId) => buildEntry(targetId, collectedPatternSources.get(targetId) ?? fallbackPatternSource(targetId, ir), ir));
 
-  const actionEntries = collectTypstReplacementSources(ir, "action", "recursive", "tree-safe")
+  const collectedActionSources = new Map(
+    collectTypstReplacementSources(ir, "action", "recursive", "tree-safe")
+      .map((entry) => [entry.targetId, entry.source] as const)
+  );
+  const actionEntries = ir.action_effects
+    .map((effect) => {
+      const targetId = `effect:${effect.id}`;
+      const sourceText = collectedActionSources.get(targetId) ?? fallbackActionSource(effect, ir);
+      return sourceText ? { targetId, sourceText } : null;
+    })
+    .filter((entry): entry is { targetId: string; sourceText: string } => entry !== null)
     .sort((left, right) => entrySortOrder(ir, left.targetId) - entrySortOrder(ir, right.targetId))
-    .map((entry) => buildEntry(entry.targetId, entry.source, ir));
+    .map((entry) => buildEntry(entry.targetId, entry.sourceText, ir));
 
   const patternById = new Map(patternEntries.map((entry) => [entry.targetId, entry] as const));
   const ensurePatternEntry = (targetId: string): MathViewEntry | undefined => {
