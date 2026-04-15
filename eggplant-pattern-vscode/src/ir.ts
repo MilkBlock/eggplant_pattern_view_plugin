@@ -77,6 +77,40 @@ export interface Diagnostic {
   range: TextSpan | null;
 }
 
+export interface MathViewEntry {
+  target_id: string;
+  label: string;
+  plain_source: string;
+  colored_source: string;
+}
+
+export type MathViewConclusion =
+  | {
+      kind: "rewrite";
+      id: string;
+      from: MathViewEntry;
+      to: MathViewEntry;
+    }
+  | {
+      kind: "derive";
+      id: string;
+      entry: MathViewEntry;
+    };
+
+export interface MathViewFormulaSource {
+  plain: string;
+  colored: string;
+}
+
+export interface MathViewModel {
+  rule_name: string;
+  premises: MathViewEntry[];
+  side_conditions: string[];
+  derivations: MathViewEntry[];
+  conclusions: MathViewConclusion[];
+  formula_source: MathViewFormulaSource;
+}
+
 export interface PatternIr {
   scope: ScopeInfo;
   nodes: PatternNode[];
@@ -89,4 +123,5 @@ export interface PatternIr {
   typst_templates: TypstTemplate[];
   precedence_templates: PrecedenceTemplate[];
   diagnostics: Diagnostic[];
+  math_view?: MathViewModel | null;
 }

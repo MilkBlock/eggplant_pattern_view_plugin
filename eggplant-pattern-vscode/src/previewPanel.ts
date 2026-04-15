@@ -797,8 +797,11 @@ export class PreviewPanel implements vscode.Disposable {
       </div>
       <section class="math-view-panel" id="mathViewPanel" hidden>
         <div class="math-view-header">
-          <h3>Math View</h3>
-          <p id="mathViewSummary">No math-view formula yet.</p>
+          <div>
+            <h3>Math View</h3>
+            <p id="mathViewSummary">No math-view formula yet.</p>
+          </div>
+          <button type="button" class="action-button" id="copyMathViewTypst">Copy Typst</button>
         </div>
         <div class="math-view-formula" id="mathViewFormula"></div>
         <div class="math-view-derivations" id="mathViewDerivations"></div>
@@ -858,6 +861,7 @@ export class PreviewPanel implements vscode.Disposable {
       const mathViewSummary = document.getElementById("mathViewSummary");
       const mathViewFormula = document.getElementById("mathViewFormula");
       const mathViewDerivations = document.getElementById("mathViewDerivations");
+      const copyMathViewTypstButton = document.getElementById("copyMathViewTypst");
       const metadataViewer = document.getElementById("metadataViewer");
       const metadataViewerHeader = document.getElementById("metadataViewerHeader");
       const metadataCurrentFile = document.getElementById("metadataCurrentFile");
@@ -891,6 +895,7 @@ export class PreviewPanel implements vscode.Disposable {
       let currentContextTypstSource = "";
       let currentContextTypstStatus = "";
       let currentContextConstraints = [];
+      let currentMathViewFormulaSource = "";
       graph.dataset.draggable = "false";
       graph.dataset.dragging = "false";
       const graphContextMenu = document.createElement("div");
@@ -1580,11 +1585,14 @@ export class PreviewPanel implements vscode.Disposable {
         mathViewPanel.hidden = !mathView;
         mathViewFormula.innerHTML = "";
         mathViewDerivations.innerHTML = "";
+        currentMathViewFormulaSource = "";
+        copyMathViewTypstButton.disabled = !mathView;
         if (!mathView) {
           mathViewSummary.textContent = "No math-view formula yet.";
           return;
         }
 
+        currentMathViewFormulaSource = mathView.formulaSource || "";
         mathViewSummary.textContent = mathView.ruleName + " | " + String((mathView.derivations || []).length) + " derivation" + ((mathView.derivations || []).length === 1 ? "" : "s");
         const rendering = (typstRenderings || {})[mathView.formulaTargetId];
         if (rendering && rendering.mode === "math") {
@@ -1912,6 +1920,13 @@ export class PreviewPanel implements vscode.Disposable {
         }
         vscode.postMessage({ type: "copyTypst", source: currentContextTypstSource });
         hideGraphContextMenu();
+      });
+
+      copyMathViewTypstButton.addEventListener("click", () => {
+        if (!currentMathViewFormulaSource) {
+          return;
+        }
+        vscode.postMessage({ type: "copyTypst", source: currentMathViewFormulaSource });
       });
 
       editTypstButton.addEventListener("click", (event) => {

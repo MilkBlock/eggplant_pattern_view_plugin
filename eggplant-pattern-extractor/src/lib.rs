@@ -4,8 +4,9 @@ pub mod project_detector;
 
 pub use extractor::{ExtractOptions, extract_pattern};
 pub use ir::{
-    ActionEffect, Diagnostic, DisplayTemplate, PatternConstraint, PatternEdge, PatternIr,
-    PatternNode, PrecedenceTemplate, ScopeInfo, ScopeKind, SeedFact, TextSpan, TypstTemplate,
+    ActionEffect, Diagnostic, DisplayTemplate, MathView, MathViewConclusion, MathViewEntry,
+    MathViewFormulaSource, PatternConstraint, PatternEdge, PatternIr, PatternNode,
+    PrecedenceTemplate, ScopeInfo, ScopeKind, SeedFact, TextSpan, TypstTemplate,
 };
 
 #[cfg(target_arch = "wasm32")]

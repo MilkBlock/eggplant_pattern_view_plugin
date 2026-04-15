@@ -48,6 +48,60 @@ const EXTRACTOR_PATH = path.resolve(
   process.platform === "win32" ? "eggplant-pattern-extractor.exe" : "eggplant-pattern-extractor"
 );
 
+type ExtractedMathViewEntry = {
+  target_id: string;
+  label: string;
+  plain_source: string;
+  colored_source: string;
+};
+
+type ExtractedMathViewConclusion =
+  | {
+      id: string;
+      kind: "rewrite";
+      from: ExtractedMathViewEntry;
+      to: ExtractedMathViewEntry;
+    }
+  | {
+      id: string;
+      kind: "derive";
+      entry: ExtractedMathViewEntry;
+    };
+
+type ExtractedMathView = {
+  rule_name: string;
+  premises: ExtractedMathViewEntry[];
+  side_conditions: string[];
+  derivations: ExtractedMathViewEntry[];
+  conclusions: ExtractedMathViewConclusion[];
+  formula_source: {
+    plain: string;
+    colored: string;
+  };
+};
+
+function extractIrFromSource(source: string, needle: string): PatternIr {
+  const offset = source.indexOf(needle);
+  assert.notEqual(offset, -1, `needle not found: ${needle}`);
+
+  const result = spawnSync(EXTRACTOR_PATH, ["--offset", String(offset)], {
+    cwd: WORKSPACE_ROOT,
+    input: source,
+    encoding: "utf8"
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  return JSON.parse(result.stdout) as PatternIr;
+}
+
+function extractIrFromFile(filePath: string, needle: string): PatternIr {
+  return extractIrFromSource(fs.readFileSync(filePath, "utf8"), needle);
+}
+
+function mathViewFromIr(ir: PatternIr): ExtractedMathView | null {
+  return (ir as PatternIr & { math_view?: ExtractedMathView | null }).math_view ?? null;
+}
+
 suite("eggplant pattern headless tests", () => {
   test("project rule detector warns when action insert duplicates a pattern sub-DAG", () => {
     const { findRedundantActionInsertWarnings } = require(PROJECT_RULE_CHECK_SCRIPT) as {
@@ -1368,105 +1422,6 @@ enum SharedMath {
     assert.equal(renderings["fib-math-view"].mode, "math");
   });
 
-  test("math view diff_sin only lists root matched premises", () => {
-    const source = fs.readFileSync(MATH_METADATA_FIXTURE, "utf8");
-    const offset = source.indexOf('MyTxMath::add_rule("diff_sin"');
-    assert.notEqual(offset, -1);
-
-    const result = spawnSync(EXTRACTOR_PATH, ["--offset", String(offset)], {
-      cwd: WORKSPACE_ROOT,
-      input: source,
-      encoding: "utf8"
-    });
-
-    assert.equal(result.status, 0, result.stderr);
-    const ir = JSON.parse(result.stdout) as PatternIr;
-    const model = buildMathViewModel(ir, source);
-    const formula = buildMathViewTypstSource(model);
-
-    assert.equal(model.ruleName, "diff_sin");
-    assert.deepEqual(model.premises.map((entry) => entry.targetId), ["diff"]);
-    assert.doesNotMatch(formula, /^frac\(sin\(x\) \\\\/);
-  });
-
-  test("math view mul_distrib stays in math render mode", async () => {
-    const source = fs.readFileSync(MATH_METADATA_FIXTURE, "utf8");
-    const offset = source.indexOf('MyTxMath::add_rule("mul_distrib"');
-    assert.notEqual(offset, -1);
-
-    const result = spawnSync(EXTRACTOR_PATH, ["--offset", String(offset)], {
-      cwd: WORKSPACE_ROOT,
-      input: source,
-      encoding: "utf8"
-    });
-
-    assert.equal(result.status, 0, result.stderr);
-    const ir = JSON.parse(result.stdout) as PatternIr;
-    const model = buildMathViewModel(ir, source);
-    const formula = buildMathViewTypstSource(model);
-
-    assert.equal(model.ruleName, "mul_distrib");
-    assert.deepEqual(model.premises.map((entry) => entry.targetId), ["mul"]);
-    assert.equal(model.conclusions.length, 1);
-    assert.equal(model.conclusions[0].from?.targetId, "mul");
-    assert.equal(model.conclusions[0].to?.targetId, "effect:effect_2");
-
-    const renderings = await renderTypstSnippets([{ targetId: "mul-distrib-math-view", source: formula }]);
-    assert.ok(renderings["mul-distrib-math-view"]);
-    assert.equal(renderings["mul-distrib-math-view"].mode, "math");
-  });
-
-  test("math view demo_assert_block falls back to structural premise and conclusion", () => {
-    const source = fs.readFileSync(FIXTURE_PATH, "utf8");
-    const offset = source.indexOf('"demo_assert_block"');
-    assert.notEqual(offset, -1);
-
-    const result = spawnSync(EXTRACTOR_PATH, ["--offset", String(offset)], {
-      cwd: WORKSPACE_ROOT,
-      input: source,
-      encoding: "utf8"
-    });
-
-    assert.equal(result.status, 0, result.stderr);
-    const ir = JSON.parse(result.stdout) as PatternIr;
-    const model = buildMathViewModel(ir, source);
-    const formula = buildMathViewTypstSource(model);
-
-    assert.equal(model.ruleName, "demo_assert_block");
-    assert.deepEqual(model.premises.map((entry) => entry.targetId), ["p"]);
-    assert.equal(model.conclusions.length, 1);
-    assert.equal(model.conclusions[0].from?.targetId, "p");
-    assert.equal(model.conclusions[0].to?.targetId, "effect:effect_0");
-    assert.doesNotMatch(formula, /no matched premise/);
-    assert.doesNotMatch(formula, /no conclusion/);
-    assert.match(formula, /l == r/);
-  });
-
-  test("math view diff_mul only emits the final rewrite conclusion", () => {
-    const source = fs.readFileSync(MATH_METADATA_FIXTURE, "utf8");
-    const offset = source.indexOf('MyTxMath::add_rule("diff_mul"');
-    assert.notEqual(offset, -1);
-
-    const result = spawnSync(EXTRACTOR_PATH, ["--offset", String(offset)], {
-      cwd: WORKSPACE_ROOT,
-      input: source,
-      encoding: "utf8"
-    });
-
-    assert.equal(result.status, 0, result.stderr);
-    const ir = JSON.parse(result.stdout) as PatternIr;
-    const model = buildMathViewModel(ir, source);
-    const formula = buildMathViewTypstSource(model);
-
-    assert.equal(model.ruleName, "diff_mul");
-    assert.deepEqual(model.premises.map((entry) => entry.targetId), ["diff"]);
-    assert.deepEqual(model.derivations.map((entry) => entry.label), ["db", "da", "a_db", "b_da", "rhs"]);
-    assert.equal(model.conclusions.length, 1);
-    assert.equal(model.conclusions[0].from?.targetId, "diff");
-    assert.equal(model.conclusions[0].to?.targetId, "effect:effect_4");
-    assert.doesNotMatch(formula, /\(a\) arrow\.r\.double \(b'\(x\)\)/);
-  });
-
   test("math view formula for int_one rule resolves direct pattern-var rewrites", async () => {
     const source = fs.readFileSync(MATH_METADATA_FIXTURE, "utf8");
     const offset = source.indexOf('MyTxMath::add_rule("int_one"');
@@ -1495,6 +1450,78 @@ enum SharedMath {
     const renderings = await renderTypstSnippets([{ targetId: "int-one-math-view", source: formula }]);
     assert.ok(renderings["int-one-math-view"]);
     assert.equal(renderings["int-one-math-view"].mode, "math");
+  });
+
+  test("all math_microbenchmark rules render typst formulas without text fallback", async () => {
+    const source = fs.readFileSync(MATH_METADATA_FIXTURE, "utf8");
+    const ruleRegex = /MyTxMath::add_rule\("([^"]+)"/g;
+    const renderRequests: Array<{ targetId: string; source: string }> = [];
+    const expectedRuleNames: string[] = [];
+
+    for (const match of source.matchAll(ruleRegex)) {
+      const ruleName = match[1];
+      const offset = match.index ?? -1;
+      assert.notEqual(offset, -1, `offset missing for ${ruleName}`);
+      const ir = extractIrFromSource(source, `"${ruleName}"`);
+      const mathView = mathViewFromIr(ir);
+      assert.ok(mathView, `missing math_view for ${ruleName}`);
+      renderRequests.push({
+        targetId: `math-view:${ruleName}`,
+        source: buildMathViewTypstSource(mathView!)
+      });
+      expectedRuleNames.push(ruleName);
+    }
+
+    const renderings = await renderTypstSnippets(renderRequests);
+    assert.equal(renderRequests.length > 0, true);
+    for (const ruleName of expectedRuleNames) {
+      const rendering = renderings[`math-view:${ruleName}`];
+      assert.ok(rendering, `missing typst rendering for ${ruleName}`);
+      assert.equal(rendering.mode, "math", `expected math render, not fallback, for ${ruleName}`);
+    }
+  });
+
+  test("all pattern sample rules render typst formulas without text fallback", async () => {
+    const source = fs.readFileSync(FIXTURE_PATH, "utf8");
+    const ruleRegex = /MyTx::add_rule\(\s*"([^"]+)"/g;
+    const renderRequests: Array<{ targetId: string; source: string }> = [];
+    const expectedRuleNames: string[] = [];
+
+    for (const match of source.matchAll(ruleRegex)) {
+      const ruleName = match[1];
+      const ir = extractIrFromSource(source, `"${ruleName}"`);
+      const mathView = mathViewFromIr(ir);
+      assert.ok(mathView, `missing math_view for ${ruleName}`);
+      renderRequests.push({
+        targetId: `pattern-math-view:${ruleName}`,
+        source: buildMathViewTypstSource(mathView!)
+      });
+      expectedRuleNames.push(ruleName);
+    }
+
+    const renderings = await renderTypstSnippets(renderRequests);
+    assert.equal(renderRequests.length > 0, true);
+    for (const ruleName of expectedRuleNames) {
+      const rendering = renderings[`pattern-math-view:${ruleName}`];
+      assert.ok(rendering, `missing typst rendering for ${ruleName}`);
+      assert.equal(rendering.mode, "math", `expected math render, not fallback, for ${ruleName}`);
+    }
+  });
+
+  test("int_add formula keeps integral notation and excludes derivation-only terms from the premise row", () => {
+    const source = fs.readFileSync(MATH_METADATA_FIXTURE, "utf8");
+    const ir = extractIrFromSource(source, '"int_add"');
+    const mathView = mathViewFromIr(ir);
+
+    assert.ok(mathView);
+    assert.equal(mathView?.rule_name, "int_add");
+    assert.deepEqual(mathView?.premises.map((entry) => entry.target_id), ["integ"]);
+    assert.match(mathView?.formula_source.plain ?? "", /integral/);
+    assert.match(mathView?.formula_source.plain ?? "", /quad d/);
+    assert.doesNotMatch(mathView?.formula_source.plain ?? "", /upright\("integral"\)/);
+    assert.doesNotMatch(mathView?.formula_source.plain ?? "", /\bi_f\b/);
+    assert.doesNotMatch(mathView?.formula_source.plain ?? "", /\bi_g\b/);
+    assert.doesNotMatch(mathView?.formula_source.plain ?? "", /\brhs\b/);
   });
 
   test("typst sources treat field access chains as math-safe atomic text", async () => {

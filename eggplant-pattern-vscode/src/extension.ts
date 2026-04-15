@@ -1190,7 +1190,7 @@ async function renderDot(
       .map((entry) => [entry.targetId, entry.source] as const)
   );
   const mathViewModel = buildMathViewModel(ir, editor.document.getText());
-  const mathViewFormulaTargetId = `math-view:${mathViewModel.ruleName}`;
+  const mathViewFormulaTargetId = `math-view:${mathViewModel.rule_name}`;
   const mathViewFormulaSource = buildMathViewTypstSource(mathViewModel);
   typstSources[mathViewFormulaTargetId] = mathViewFormulaSource;
   for (const [targetId, source] of Object.entries(typstOverridesByTargetId)) {
@@ -1248,11 +1248,11 @@ async function renderDot(
       showSwitchToAst: false,
       notice,
       mathView: {
-        ruleName: mathViewModel.ruleName,
+        ruleName: mathViewModel.rule_name,
         formulaTargetId: mathViewFormulaTargetId,
         formulaSource: mathViewFormulaSource,
         derivations: mathViewModel.derivations.map((entry) => ({
-          targetId: entry.targetId,
+          targetId: entry.target_id,
           label: entry.label
         }))
       }

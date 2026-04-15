@@ -118,6 +118,44 @@ pub struct Diagnostic {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct MathViewEntry {
+    pub target_id: String,
+    pub label: String,
+    pub plain_source: String,
+    pub colored_source: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct MathViewFormulaSource {
+    pub plain: String,
+    pub colored: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MathViewConclusion {
+    Rewrite {
+        id: String,
+        from: MathViewEntry,
+        to: MathViewEntry,
+    },
+    Derive {
+        id: String,
+        entry: MathViewEntry,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct MathView {
+    pub rule_name: String,
+    pub premises: Vec<MathViewEntry>,
+    pub side_conditions: Vec<String>,
+    pub derivations: Vec<MathViewEntry>,
+    pub conclusions: Vec<MathViewConclusion>,
+    pub formula_source: MathViewFormulaSource,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PatternIr {
     pub scope: ScopeInfo,
     pub nodes: Vec<PatternNode>,
@@ -130,4 +168,6 @@ pub struct PatternIr {
     pub typst_templates: Vec<TypstTemplate>,
     pub precedence_templates: Vec<PrecedenceTemplate>,
     pub diagnostics: Vec<Diagnostic>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub math_view: Option<MathView>,
 }

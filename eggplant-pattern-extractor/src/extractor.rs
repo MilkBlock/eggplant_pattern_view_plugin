@@ -4,11 +4,12 @@ use ra_ap_syntax::{
     ast::{self, HasArgList, HasAttrs, HasName},
 };
 use regex::Regex;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::ir::{
-    ActionEffect, Diagnostic, DisplayTemplate, PatternConstraint, PatternEdge, PatternIr,
-    PatternNode, PrecedenceTemplate, ScopeInfo, ScopeKind, SeedFact, TextSpan, TypstTemplate,
+    ActionEffect, Diagnostic, DisplayTemplate, MathView, MathViewConclusion, MathViewEntry,
+    MathViewFormulaSource, NodeKind, PatternConstraint, PatternEdge, PatternIr, PatternNode,
+    PrecedenceTemplate, ScopeInfo, ScopeKind, SeedFact, TextSpan, TypstTemplate,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -66,6 +67,7 @@ pub fn extract_pattern(source: &str, options: ExtractOptions) -> Result<PatternI
     ir.typst_templates = typst_templates;
     ir.precedence_templates = precedence_templates;
     ir.diagnostics.append(&mut diagnostics);
+    ir.math_view = build_math_view(source, &ir);
     Ok(ir)
 }
 
@@ -371,6 +373,7 @@ fn extract_from_block(
         typst_templates: Vec::new(),
         precedence_templates: Vec::new(),
         diagnostics,
+        math_view: None,
     })
 }
 
@@ -1092,6 +1095,1221 @@ fn find_top_level_method_suffix(text: &str, suffix: &str) -> Option<usize> {
         }
     }
     None
+}
+
+const MATH_VIEW_PATTERN_COLOR: &str = "#5F7A8A";
+const MATH_VIEW_ACTION_COLOR: &str = "#B86A5B";
+const MAX_MATH_PRECEDENCE: u16 = u16::MAX;
+
+#[derive(Debug, Clone)]
+struct TemplateRef<'a> {
+    template: &'a str,
+    fields: &'a [String],
+    kind: TemplateKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TemplateKind {
+    Typst,
+    Display,
+}
+
+#[derive(Debug, Clone)]
+struct RenderedMathExpr {
+    plain: String,
+    colored: String,
+    precedence: u16,
+    is_atomic: bool,
+}
+
+#[derive(Debug, Clone)]
+struct InsertCall {
+    variant_name: String,
+    args: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct SetCall {
+    target_name: String,
+    lhs_args: Vec<String>,
+    rhs_arg: String,
+}
+
+#[derive(Debug, Clone)]
+enum UnionTarget {
+    Pattern(String),
+    Action(String),
+}
+
+#[derive(Debug, Clone)]
+struct UnionConclusion {
+    pattern_var: String,
+    target: UnionTarget,
+}
+
+fn build_math_view(source: &str, ir: &PatternIr) -> Option<MathView> {
+    let rule_name = parse_rule_name_from_source(source, ir);
+    let node_by_id = ir
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node))
+        .collect::<HashMap<_, _>>();
+    let effect_by_id = ir
+        .action_effects
+        .iter()
+        .map(|effect| (effect.id.as_str(), effect))
+        .collect::<HashMap<_, _>>();
+    let effect_by_binding = ir
+        .action_effects
+        .iter()
+        .filter_map(|effect| effect.bound_var.as_deref().map(|bound| (bound, effect.id.as_str())))
+        .collect::<HashMap<_, _>>();
+    let incoming_counts = build_incoming_counts(ir);
+    let visible_root_ids = visible_premise_root_ids(ir, &node_by_id);
+    let mut pattern_entry_cache = HashMap::<String, MathViewEntry>::new();
+    let mut action_entry_cache = HashMap::<String, MathViewEntry>::new();
+
+    let premises = visible_root_ids
+        .iter()
+        .map(|target_id| build_pattern_entry(
+            target_id,
+            ir,
+            &node_by_id,
+            &incoming_counts,
+            &mut pattern_entry_cache,
+        ))
+        .collect::<Vec<_>>();
+
+    let mut visible_effect_ids = BTreeSet::<String>::new();
+    let mut conclusions = Vec::<MathViewConclusion>::new();
+    for effect in &ir.action_effects {
+        let Some(union) = parse_union_conclusion(&effect.source_text) else {
+            continue;
+        };
+        let from = build_pattern_entry(
+            &union.pattern_var,
+            ir,
+            &node_by_id,
+            &incoming_counts,
+            &mut pattern_entry_cache,
+        );
+        let to = match union.target {
+            UnionTarget::Pattern(ref target_id) => build_pattern_entry(
+                target_id,
+                ir,
+                &node_by_id,
+                &incoming_counts,
+                &mut pattern_entry_cache,
+            ),
+            UnionTarget::Action(ref bound_var) => build_action_entry_by_binding(
+                bound_var,
+                ir,
+                &node_by_id,
+                &effect_by_id,
+                &effect_by_binding,
+                &incoming_counts,
+                &mut pattern_entry_cache,
+                &mut action_entry_cache,
+            ),
+        };
+        conclusions.push(MathViewConclusion::Rewrite {
+            id: effect.id.clone(),
+            from,
+            to,
+        });
+        if let UnionTarget::Action(ref bound_var) = union.target {
+            collect_action_dependencies(bound_var, &effect_by_binding, &effect_by_id, &mut visible_effect_ids);
+        }
+    }
+
+    if conclusions.is_empty() && !ir.action_effects.is_empty() {
+        let consumed_action_vars = ir
+            .action_effects
+            .iter()
+            .flat_map(|effect| effect.referenced_action_vars.iter().cloned())
+            .collect::<HashSet<_>>();
+        let terminal_effects = ir
+            .action_effects
+            .iter()
+            .filter(|effect| {
+                effect
+                    .bound_var
+                    .as_ref()
+                    .map(|bound| !consumed_action_vars.contains(bound))
+                    .unwrap_or_else(|| effect.semantic_text.is_some())
+            })
+            .collect::<Vec<_>>();
+        for effect in terminal_effects {
+            if let Some(bound_var) = effect.bound_var.as_deref() {
+                collect_action_dependencies(bound_var, &effect_by_binding, &effect_by_id, &mut visible_effect_ids);
+            }
+            conclusions.push(MathViewConclusion::Derive {
+                id: effect.id.clone(),
+                entry: build_action_entry_from_effect(
+                    effect,
+                    ir,
+                    &node_by_id,
+                    &effect_by_id,
+                    &effect_by_binding,
+                    &incoming_counts,
+                    &mut pattern_entry_cache,
+                    &mut action_entry_cache,
+                ),
+            });
+        }
+    }
+
+    let derivations = ir
+        .action_effects
+        .iter()
+        .filter(|effect| visible_effect_ids.contains(&effect.id))
+        .map(|effect| {
+            build_action_entry_from_effect(
+                effect,
+                ir,
+                &node_by_id,
+                &effect_by_id,
+                &effect_by_binding,
+                &incoming_counts,
+                &mut pattern_entry_cache,
+                &mut action_entry_cache,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let side_conditions = ir
+        .constraints
+        .iter()
+        .map(|constraint| {
+            constraint
+                .semantic_text
+                .as_deref()
+                .map(semantic_text_to_typst)
+                .unwrap_or_else(|| compact_constraint_label(&constraint.source_text, &constraint.resolved_text))
+        })
+        .collect::<Vec<_>>();
+
+    let formula_source = build_math_view_formula_source(&premises, &derivations, &conclusions, &side_conditions);
+    Some(MathView {
+        rule_name,
+        premises,
+        side_conditions,
+        derivations,
+        conclusions,
+        formula_source,
+    })
+}
+
+fn parse_rule_name_from_source(source: &str, ir: &PatternIr) -> String {
+    let start = ir.scope.text_range.start.min(source.len());
+    let end = ir.scope.text_range.end.min(source.len());
+    let slice = &source[start..end];
+    Regex::new(r#"add_rule(?:_with_hook)?\(\s*"([^"]+)""#)
+        .ok()
+        .and_then(|regex| regex.captures(slice))
+        .and_then(|captures| captures.get(1))
+        .map(|capture| capture.as_str().to_string())
+        .unwrap_or_else(|| format!("rule@{}", ir.scope.text_range.start))
+}
+
+fn build_incoming_counts(ir: &PatternIr) -> HashMap<String, usize> {
+    let mut counts = HashMap::new();
+    for edge in &ir.edges {
+        *counts.entry(edge.to.clone()).or_insert(0) += 1;
+    }
+    counts
+}
+
+fn visible_premise_root_ids(
+    ir: &PatternIr,
+    node_by_id: &HashMap<&str, &PatternNode>,
+) -> Vec<String> {
+    let has_non_leaf_root = ir.roots.iter().any(|root| {
+        node_by_id
+            .get(root.as_str())
+            .map(|node| node.kind != NodeKind::QueryLeaf)
+            .unwrap_or(false)
+    });
+    ir.roots
+        .iter()
+        .filter(|root| {
+            if !has_non_leaf_root {
+                return true;
+            }
+            node_by_id
+                .get(root.as_str())
+                .map(|node| node.kind != NodeKind::QueryLeaf)
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect()
+}
+
+fn build_pattern_entry(
+    target_id: &str,
+    ir: &PatternIr,
+    node_by_id: &HashMap<&str, &PatternNode>,
+    incoming_counts: &HashMap<String, usize>,
+    cache: &mut HashMap<String, MathViewEntry>,
+) -> MathViewEntry {
+    if let Some(entry) = cache.get(target_id) {
+        return entry.clone();
+    }
+    let rendered = render_pattern_expr(ir, target_id, node_by_id, incoming_counts, &mut HashSet::new())
+        .unwrap_or_else(|| pattern_atomic_expr(target_id));
+    let label = node_by_id
+        .get(target_id)
+        .map(|node| format!("{}: {}", node.id, node.dsl_type))
+        .unwrap_or_else(|| target_id.to_string());
+    let entry = MathViewEntry {
+        target_id: target_id.to_string(),
+        label,
+        plain_source: rendered.plain,
+        colored_source: rendered.colored,
+    };
+    cache.insert(target_id.to_string(), entry.clone());
+    entry
+}
+
+fn build_action_entry_by_binding(
+    bound_var: &str,
+    ir: &PatternIr,
+    node_by_id: &HashMap<&str, &PatternNode>,
+    effect_by_id: &HashMap<&str, &ActionEffect>,
+    effect_by_binding: &HashMap<&str, &str>,
+    incoming_counts: &HashMap<String, usize>,
+    pattern_cache: &mut HashMap<String, MathViewEntry>,
+    action_cache: &mut HashMap<String, MathViewEntry>,
+) -> MathViewEntry {
+    let effect_id = effect_by_binding
+        .get(bound_var)
+        .copied()
+        .unwrap_or(bound_var);
+    let effect = effect_by_id
+        .get(effect_id)
+        .copied()
+        .or_else(|| {
+            ir.action_effects
+                .iter()
+                .find(|effect| effect.bound_var.as_deref() == Some(bound_var))
+        })
+        .expect("bound action effect should exist");
+    build_action_entry_from_effect(
+        effect,
+        ir,
+        node_by_id,
+        effect_by_id,
+        effect_by_binding,
+        incoming_counts,
+        pattern_cache,
+        action_cache,
+    )
+}
+
+fn build_action_entry_from_effect(
+    effect: &ActionEffect,
+    ir: &PatternIr,
+    node_by_id: &HashMap<&str, &PatternNode>,
+    effect_by_id: &HashMap<&str, &ActionEffect>,
+    effect_by_binding: &HashMap<&str, &str>,
+    incoming_counts: &HashMap<String, usize>,
+    pattern_cache: &mut HashMap<String, MathViewEntry>,
+    action_cache: &mut HashMap<String, MathViewEntry>,
+) -> MathViewEntry {
+    let target_id = format!("effect:{}", effect.id);
+    if let Some(entry) = action_cache.get(&target_id) {
+        return entry.clone();
+    }
+    let rendered = render_action_effect_expr(
+        effect,
+        ir,
+        node_by_id,
+        effect_by_id,
+        effect_by_binding,
+        incoming_counts,
+        pattern_cache,
+        action_cache,
+        &mut HashSet::new(),
+    )
+    .unwrap_or_else(|| action_atomic_expr(effect.bound_var.as_deref().unwrap_or(&effect.id)));
+    let entry = MathViewEntry {
+        target_id: target_id.clone(),
+        label: effect.bound_var.clone().unwrap_or_else(|| effect.id.clone()),
+        plain_source: rendered.plain,
+        colored_source: rendered.colored,
+    };
+    action_cache.insert(target_id, entry.clone());
+    entry
+}
+
+fn collect_action_dependencies(
+    bound_var: &str,
+    effect_by_binding: &HashMap<&str, &str>,
+    effect_by_id: &HashMap<&str, &ActionEffect>,
+    visible_effect_ids: &mut BTreeSet<String>,
+) {
+    let Some(effect_id) = effect_by_binding.get(bound_var).copied() else {
+        return;
+    };
+    if !visible_effect_ids.insert(effect_id.to_string()) {
+        return;
+    }
+    let Some(effect) = effect_by_id.get(effect_id).copied() else {
+        return;
+    };
+    for dependency in &effect.referenced_action_vars {
+        collect_action_dependencies(dependency, effect_by_binding, effect_by_id, visible_effect_ids);
+    }
+}
+
+fn render_pattern_expr(
+    ir: &PatternIr,
+    target_id: &str,
+    node_by_id: &HashMap<&str, &PatternNode>,
+    incoming_counts: &HashMap<String, usize>,
+    seen: &mut HashSet<String>,
+) -> Option<RenderedMathExpr> {
+    let Some(node) = node_by_id.get(target_id).copied() else {
+        return Some(pattern_atomic_expr(target_id));
+    };
+    if node.kind == NodeKind::QueryLeaf {
+        return Some(pattern_atomic_expr(&node.id));
+    }
+    if seen.contains(target_id) || incoming_counts.get(target_id).copied().unwrap_or(0) > 1 {
+        return None;
+    }
+
+    if let Some(template) = find_preferred_template(ir, &node.dsl_type) {
+        seen.insert(target_id.to_string());
+        let child_exprs = node
+            .inputs
+            .iter()
+            .map(|input| render_pattern_expr(ir, input, node_by_id, incoming_counts, seen))
+            .collect::<Option<Vec<_>>>();
+        seen.remove(target_id);
+        if let Some(child_exprs) = child_exprs {
+            return render_template_expr(
+                template,
+                variant_precedence(ir, &node.dsl_type),
+                &child_exprs,
+                MATH_VIEW_PATTERN_COLOR,
+                node.inputs.is_empty(),
+            );
+        }
+        let atomic_args = node
+            .inputs
+            .iter()
+            .map(|input| pattern_atomic_expr(input))
+            .collect::<Vec<_>>();
+        if let Some(rendered) = render_template_expr(
+            template,
+            variant_precedence(ir, &node.dsl_type),
+            &atomic_args,
+            MATH_VIEW_PATTERN_COLOR,
+            node.inputs.is_empty(),
+        ) {
+            return Some(rendered);
+        }
+    }
+
+    if node.inputs.is_empty() {
+        return Some(pattern_atomic_expr(&node.id));
+    }
+    let args = node
+        .inputs
+        .iter()
+        .map(|input| {
+            render_pattern_expr(ir, input, node_by_id, incoming_counts, &mut HashSet::new())
+                .unwrap_or_else(|| pattern_atomic_expr(input))
+        })
+        .collect::<Vec<_>>();
+    Some(render_constructor_expr(&node.dsl_type, &args))
+}
+
+fn render_action_effect_expr(
+    effect: &ActionEffect,
+    ir: &PatternIr,
+    node_by_id: &HashMap<&str, &PatternNode>,
+    effect_by_id: &HashMap<&str, &ActionEffect>,
+    effect_by_binding: &HashMap<&str, &str>,
+    incoming_counts: &HashMap<String, usize>,
+    pattern_cache: &mut HashMap<String, MathViewEntry>,
+    action_cache: &mut HashMap<String, MathViewEntry>,
+    seen_effects: &mut HashSet<String>,
+) -> Option<RenderedMathExpr> {
+    if !seen_effects.insert(effect.id.clone()) {
+        return None;
+    }
+
+    let rendered = if let Some(set_call) = parse_set_call(&effect.source_text) {
+        render_set_expr(
+            ir,
+            &set_call,
+            node_by_id,
+            effect_by_id,
+            effect_by_binding,
+            incoming_counts,
+            pattern_cache,
+            action_cache,
+            seen_effects,
+        )
+    } else if let Some(semantic) = effect.semantic_text.as_deref() {
+        let plain = semantic_text_to_typst(semantic);
+        Some(RenderedMathExpr {
+            plain: plain.clone(),
+            colored: plain,
+            precedence: MAX_MATH_PRECEDENCE,
+            is_atomic: false,
+        })
+    } else if let Some(insert_call) = parse_insert_call(&effect.source_text) {
+        render_insert_expr(
+            ir,
+            &insert_call,
+            node_by_id,
+            effect_by_id,
+            effect_by_binding,
+            incoming_counts,
+            pattern_cache,
+            action_cache,
+            seen_effects,
+        )
+    } else {
+        None
+    };
+
+    seen_effects.remove(&effect.id);
+    rendered
+}
+
+fn render_insert_expr(
+    ir: &PatternIr,
+    insert_call: &InsertCall,
+    node_by_id: &HashMap<&str, &PatternNode>,
+    effect_by_id: &HashMap<&str, &ActionEffect>,
+    effect_by_binding: &HashMap<&str, &str>,
+    incoming_counts: &HashMap<String, usize>,
+    pattern_cache: &mut HashMap<String, MathViewEntry>,
+    action_cache: &mut HashMap<String, MathViewEntry>,
+    seen_effects: &mut HashSet<String>,
+) -> Option<RenderedMathExpr> {
+    let args = insert_call
+        .args
+        .iter()
+        .map(|arg| {
+            render_action_arg_expr(
+                arg,
+                ir,
+                node_by_id,
+                effect_by_id,
+                effect_by_binding,
+                incoming_counts,
+                pattern_cache,
+                action_cache,
+                seen_effects,
+            )
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if let Some(template) = find_preferred_template(ir, &insert_call.variant_name) {
+        return render_template_expr(
+            template,
+            variant_precedence(ir, &insert_call.variant_name),
+            &args,
+            MATH_VIEW_ACTION_COLOR,
+            args.is_empty(),
+        );
+    }
+    Some(render_constructor_expr(&insert_call.variant_name, &args))
+}
+
+fn render_set_expr(
+    ir: &PatternIr,
+    set_call: &SetCall,
+    node_by_id: &HashMap<&str, &PatternNode>,
+    effect_by_id: &HashMap<&str, &ActionEffect>,
+    effect_by_binding: &HashMap<&str, &str>,
+    incoming_counts: &HashMap<String, usize>,
+    pattern_cache: &mut HashMap<String, MathViewEntry>,
+    action_cache: &mut HashMap<String, MathViewEntry>,
+    seen_effects: &mut HashSet<String>,
+) -> Option<RenderedMathExpr> {
+    let lhs_args = set_call
+        .lhs_args
+        .iter()
+        .map(|arg| {
+            render_action_arg_expr(
+                arg,
+                ir,
+                node_by_id,
+                effect_by_id,
+                effect_by_binding,
+                incoming_counts,
+                pattern_cache,
+                action_cache,
+                seen_effects,
+            )
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let rhs = render_action_arg_expr(
+        &set_call.rhs_arg,
+        ir,
+        node_by_id,
+        effect_by_id,
+        effect_by_binding,
+        incoming_counts,
+        pattern_cache,
+        action_cache,
+        seen_effects,
+    )?;
+    let lhs = render_set_lhs(ir, &set_call.target_name, &lhs_args)?;
+    Some(RenderedMathExpr {
+        plain: format!("{} = {}", lhs.plain, rhs.plain),
+        colored: format!("{} = {}", lhs.colored, rhs.colored),
+        precedence: MAX_MATH_PRECEDENCE,
+        is_atomic: false,
+    })
+}
+
+fn render_set_lhs(ir: &PatternIr, target_name: &str, args: &[RenderedMathExpr]) -> Option<RenderedMathExpr> {
+    for candidate in [target_name.to_string(), to_variant_type_name(target_name)] {
+        if let Some(template) = find_preferred_template(ir, &candidate) {
+            return render_template_expr(
+                template,
+                variant_precedence(ir, &candidate),
+                args,
+                MATH_VIEW_ACTION_COLOR,
+                args.is_empty(),
+            );
+        }
+    }
+    Some(render_constructor_expr(target_name, args))
+}
+
+fn render_action_arg_expr(
+    arg: &str,
+    ir: &PatternIr,
+    node_by_id: &HashMap<&str, &PatternNode>,
+    effect_by_id: &HashMap<&str, &ActionEffect>,
+    effect_by_binding: &HashMap<&str, &str>,
+    incoming_counts: &HashMap<String, usize>,
+    pattern_cache: &mut HashMap<String, MathViewEntry>,
+    action_cache: &mut HashMap<String, MathViewEntry>,
+    seen_effects: &mut HashSet<String>,
+) -> Option<RenderedMathExpr> {
+    let compacted = compact_expression(arg);
+    if let Some(effect) = ir
+        .action_effects
+        .iter()
+        .find(|effect| effect.bound_var.as_deref() == Some(compacted.as_str()))
+    {
+        return render_action_effect_expr(
+            effect,
+            ir,
+            node_by_id,
+            effect_by_id,
+            effect_by_binding,
+            incoming_counts,
+            pattern_cache,
+            action_cache,
+            seen_effects,
+        );
+    }
+    if let Some(effect_id) = effect_by_binding.get(compacted.as_str()).copied()
+        && let Some(effect) = effect_by_id.get(effect_id).copied()
+    {
+        return render_action_effect_expr(
+            effect,
+            ir,
+            node_by_id,
+            effect_by_id,
+            effect_by_binding,
+            incoming_counts,
+            pattern_cache,
+            action_cache,
+            seen_effects,
+        );
+    }
+    if let Some(insert_call) = parse_insert_call(&compacted) {
+        return render_insert_expr(
+            ir,
+            &insert_call,
+            node_by_id,
+            effect_by_id,
+            effect_by_binding,
+            incoming_counts,
+            pattern_cache,
+            action_cache,
+            seen_effects,
+        );
+    }
+    let pattern_target = compacted
+        .strip_prefix("pat.")
+        .or_else(|| compacted.strip_prefix("matched."))
+        .unwrap_or(&compacted);
+    if node_by_id.contains_key(pattern_target)
+        || ir.roots.iter().any(|root| root == pattern_target)
+    {
+        let entry = build_pattern_entry(pattern_target, ir, node_by_id, incoming_counts, pattern_cache);
+        return Some(RenderedMathExpr {
+            plain: entry.plain_source,
+            colored: entry.colored_source,
+            precedence: MAX_MATH_PRECEDENCE,
+            is_atomic: true,
+        });
+    }
+    if let Some(semantic) = semanticize_value_expr_text(&compacted) {
+        let plain = semantic_text_to_typst(&semantic);
+        return Some(RenderedMathExpr {
+            plain: plain.clone(),
+            colored: color_wrap(&plain, MATH_VIEW_ACTION_COLOR),
+            precedence: MAX_MATH_PRECEDENCE,
+            is_atomic: !semantic.contains(' '),
+        });
+    }
+    Some(action_atomic_expr(&compacted))
+}
+
+fn render_template_expr(
+    template: TemplateRef<'_>,
+    precedence: u16,
+    args: &[RenderedMathExpr],
+    top_level_color: &str,
+    is_atomic: bool,
+) -> Option<RenderedMathExpr> {
+    if template.fields.len() != args.len() {
+        return None;
+    }
+    if (template.kind == TemplateKind::Display
+        || (template.kind == TemplateKind::Typst && template.template.contains(',')))
+        && let Some(prefix_name) = extract_prefix_template_name(template.template)
+    {
+        let function_name = template_identifier_to_typst(&prefix_name, true);
+        let plain_args = args.iter().map(|arg| arg.plain.clone()).collect::<Vec<_>>();
+        let colored_args = args.iter().map(|arg| arg.colored.clone()).collect::<Vec<_>>();
+        let plain = format!("{function_name}({})", plain_args.join(", "));
+        let colored = format!("{function_name}({})", colored_args.join(", "));
+        return Some(RenderedMathExpr {
+            plain,
+            colored: color_wrap(&colored, top_level_color),
+            precedence,
+            is_atomic,
+        });
+    }
+    let plain = render_template_text(&template, precedence, args, false)?;
+    let colored = render_template_text(&template, precedence, args, true)?;
+    let normalized_plain = if plain.contains("upright(") {
+        plain.clone()
+    } else {
+        semantic_text_to_typst(&plain)
+    };
+    Some(RenderedMathExpr {
+        plain: normalized_plain,
+        colored: if colored.is_empty() { colored } else { color_wrap(&colored, top_level_color) },
+        precedence,
+        is_atomic,
+    })
+}
+
+fn extract_prefix_template_name(template: &str) -> Option<String> {
+    if template.contains('(') {
+        return None;
+    }
+    let trimmed = template.trim();
+    let captures = Regex::new(r"^([A-Za-z_][A-Za-z0-9_]*)\b")
+        .ok()?
+        .captures(trimmed)?;
+    Some(captures.get(1)?.as_str().to_string())
+}
+
+fn render_template_text(
+    template: &TemplateRef<'_>,
+    parent_precedence: u16,
+    args: &[RenderedMathExpr],
+    colored: bool,
+) -> Option<String> {
+    let chars = template.template.chars().collect::<Vec<_>>();
+    let mut rendered = String::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] == '{' {
+            if chars.get(index + 1) == Some(&'{') {
+                rendered.push('{');
+                index += 2;
+                continue;
+            }
+            let start = index + 1;
+            let mut end = start;
+            while end < chars.len() && chars[end] != '}' {
+                end += 1;
+            }
+            if end >= chars.len() {
+                return None;
+            }
+            let placeholder = chars[start..end].iter().collect::<String>();
+            let field_index = template.fields.iter().position(|field| field == &placeholder)?;
+            let value = args.get(field_index)?;
+            let text = if colored { &value.colored } else { &value.plain };
+            let needs_parens = value.precedence < parent_precedence
+                || (value.precedence == parent_precedence
+                    && parent_precedence != MAX_MATH_PRECEDENCE
+                    && !value.is_atomic);
+            if needs_parens {
+                rendered.push('(');
+            }
+            rendered.push_str(text);
+            if needs_parens {
+                rendered.push(')');
+            }
+            index = end + 1;
+            continue;
+        }
+        if chars[index] == '}' && chars.get(index + 1) == Some(&'}') {
+            rendered.push('}');
+            index += 2;
+            continue;
+        }
+        let start = index;
+        while index < chars.len() {
+            if chars[index] == '{' {
+                break;
+            }
+            if chars[index] == '}' && chars.get(index + 1) == Some(&'}') {
+                break;
+            }
+            index += 1;
+        }
+        let literal = chars[start..index].iter().collect::<String>();
+        rendered.push_str(&sanitize_template_literal(&literal));
+    }
+    Some(rendered)
+}
+
+fn render_constructor_expr(name: &str, args: &[RenderedMathExpr]) -> RenderedMathExpr {
+    let plain_args = args.iter().map(|arg| arg.plain.clone()).collect::<Vec<_>>();
+    let colored_args = args.iter().map(|arg| arg.colored.clone()).collect::<Vec<_>>();
+    let constructor_name = template_identifier_to_typst(name, true);
+    RenderedMathExpr {
+        plain: format!("{constructor_name}({})", plain_args.join(", ")),
+        colored: format!("{constructor_name}({})", colored_args.join(", ")),
+        precedence: MAX_MATH_PRECEDENCE,
+        is_atomic: args.is_empty(),
+    }
+}
+
+fn parse_insert_call(source_text: &str) -> Option<InsertCall> {
+    let captures = Regex::new(r"^(?:[A-Za-z_][A-Za-z0-9_]*\.)?insert_([A-Za-z0-9_]+)\(([\s\S]*)\)\s*;?$")
+        .ok()?
+        .captures(source_text.trim())?;
+    Some(InsertCall {
+        variant_name: to_variant_type_name(captures.get(1)?.as_str()),
+        args: split_top_level_args(captures.get(2)?.as_str())
+            .into_iter()
+            .map(|arg| arg.to_string())
+            .collect(),
+    })
+}
+
+fn parse_set_call(source_text: &str) -> Option<SetCall> {
+    let captures = Regex::new(r"^(?:[A-Za-z_][A-Za-z0-9_]*\.)?set_([A-Za-z0-9_]+)\(([\s\S]*)\)\s*;?$")
+        .ok()?
+        .captures(source_text.trim())?;
+    let target_name = captures.get(1)?.as_str().to_string();
+    let args = split_top_level_args(captures.get(2)?.as_str())
+        .into_iter()
+        .map(|arg| arg.to_string())
+        .collect::<Vec<_>>();
+    if args.len() < 2 {
+        return None;
+    }
+    Some(SetCall {
+        target_name,
+        lhs_args: args[..args.len() - 1].to_vec(),
+        rhs_arg: args[args.len() - 1].clone(),
+    })
+}
+
+fn parse_union_conclusion(source_text: &str) -> Option<UnionConclusion> {
+    let captures = Regex::new(
+        r"^(?:[A-Za-z_][A-Za-z0-9_]*\.)?union\(\s*(?:pat|matched)\.([A-Za-z_][A-Za-z0-9_]*)\s*,\s*((?:(?:pat|matched)\.)?)([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*;?$",
+    )
+    .ok()?
+    .captures(source_text.trim())?;
+    let pattern_var = captures.get(1)?.as_str().to_string();
+    let target = if captures.get(2)?.as_str().is_empty() {
+        UnionTarget::Action(captures.get(3)?.as_str().to_string())
+    } else {
+        UnionTarget::Pattern(captures.get(3)?.as_str().to_string())
+    };
+    Some(UnionConclusion { pattern_var, target })
+}
+
+fn build_math_view_formula_source(
+    premises: &[MathViewEntry],
+    _derivations: &[MathViewEntry],
+    conclusions: &[MathViewConclusion],
+    side_conditions: &[String],
+) -> MathViewFormulaSource {
+    let plain_top = join_math_lines(
+        premises
+            .iter()
+            .map(|entry| entry.plain_source.clone())
+            .collect(),
+        r#"upright("no matched premise")"#,
+    );
+    let colored_top = join_math_lines(
+        premises
+            .iter()
+            .map(|entry| entry.colored_source.clone())
+            .collect(),
+        r#"upright("no matched premise")"#,
+    );
+    let plain_bottom = join_math_lines(
+        conclusions
+            .iter()
+            .map(math_view_conclusion_plain)
+            .collect(),
+        r#"upright("no conclusion")"#,
+    );
+    let colored_bottom = join_math_lines(
+        conclusions
+            .iter()
+            .map(math_view_conclusion_colored)
+            .collect(),
+        r#"upright("no conclusion")"#,
+    );
+    let side_condition_source = join_math_lines(
+        side_conditions.to_vec(),
+        r#"upright("None")"#,
+    );
+    MathViewFormulaSource {
+        plain: format!("frac({plain_top}, {plain_bottom}) quad upright(\"if\") quad {side_condition_source}"),
+        colored: format!("frac({colored_top}, {colored_bottom}) quad upright(\"if\") quad {side_condition_source}"),
+    }
+}
+
+fn math_view_conclusion_plain(conclusion: &MathViewConclusion) -> String {
+    match conclusion {
+        MathViewConclusion::Rewrite { from, to, .. } => {
+            format!("{} arrow.r.double {}", from.plain_source, to.plain_source)
+        }
+        MathViewConclusion::Derive { entry, .. } => entry.plain_source.clone(),
+    }
+}
+
+fn math_view_conclusion_colored(conclusion: &MathViewConclusion) -> String {
+    match conclusion {
+        MathViewConclusion::Rewrite { from, to, .. } => {
+            format!("{} arrow.r.double {}", from.colored_source, to.colored_source)
+        }
+        MathViewConclusion::Derive { entry, .. } => entry.colored_source.clone(),
+    }
+}
+
+fn join_math_lines(entries: Vec<String>, fallback: &str) -> String {
+    let filtered = entries
+        .into_iter()
+        .filter(|entry| !entry.trim().is_empty())
+        .collect::<Vec<_>>();
+    if filtered.is_empty() {
+        fallback.to_string()
+    } else {
+        filtered.join(" \\ ")
+    }
+}
+
+fn find_preferred_template<'a>(ir: &'a PatternIr, variant_name: &str) -> Option<TemplateRef<'a>> {
+    ir.typst_templates
+        .iter()
+        .find(|template| template.variant_name == variant_name)
+        .map(|template| TemplateRef {
+            template: &template.template,
+            fields: &template.fields,
+            kind: TemplateKind::Typst,
+        })
+        .or_else(|| {
+            ir.display_templates
+                .iter()
+                .find(|template| template.variant_name == variant_name)
+                .map(|template| TemplateRef {
+                    template: &template.template,
+                    fields: &template.fields,
+                    kind: TemplateKind::Display,
+                })
+        })
+}
+
+fn variant_precedence(ir: &PatternIr, variant_name: &str) -> u16 {
+    ir.precedence_templates
+        .iter()
+        .find(|template| template.variant_name == variant_name)
+        .map(|template| template.precedence)
+        .unwrap_or(MAX_MATH_PRECEDENCE)
+}
+
+fn to_variant_type_name(name: &str) -> String {
+    name.split('_')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_ascii_uppercase(), chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<String>()
+}
+
+fn compact_expression(text: &str) -> String {
+    let mut current = text
+        .replace(['\n', '\t'], " ")
+        .replace(".clone()", "")
+        .replace(".handle()", "")
+        .trim()
+        .to_string();
+    loop {
+        let next = current
+            .replace("pat.", "")
+            .replace("matched.", "")
+            .replace("ctx.", "")
+            .replace("tx.", "")
+            .replace("&", "")
+            .trim()
+            .to_string();
+        if next == current {
+            break;
+        }
+        current = next;
+    }
+    loop {
+        let next = Regex::new(r"\bdevalue\(\s*([^()]+?)\s*\)")
+            .ok()
+            .map(|regex| regex.replace_all(&current, "$1").to_string())
+            .unwrap_or_else(|| current.clone());
+        if next == current {
+            break;
+        }
+        current = next;
+    }
+    current = Regex::new(r#""([^"]+)"\.to_owned\(\)"#)
+        .ok()
+        .map(|regex| regex.replace_all(&current, r#""$1""#).to_string())
+        .unwrap_or(current);
+    current.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn pattern_atomic_expr(value: &str) -> RenderedMathExpr {
+    let plain = typst_atomic_expression(value);
+    RenderedMathExpr {
+        plain: plain.clone(),
+        colored: color_wrap(&plain, MATH_VIEW_PATTERN_COLOR),
+        precedence: MAX_MATH_PRECEDENCE,
+        is_atomic: true,
+    }
+}
+
+fn action_atomic_expr(value: &str) -> RenderedMathExpr {
+    let plain = typst_atomic_expression(value);
+    RenderedMathExpr {
+        plain: plain.clone(),
+        colored: color_wrap(&plain, MATH_VIEW_ACTION_COLOR),
+        precedence: MAX_MATH_PRECEDENCE,
+        is_atomic: true,
+    }
+}
+
+fn color_wrap(source: &str, color: &str) -> String {
+    format!(r#"#text(fill: rgb("{}"))[$ {} $]"#, color, source)
+}
+
+fn typst_atomic_expression(value: &str) -> String {
+    let compacted = compact_expression(value);
+    let string_literal = Regex::new(r#"^"((?:\\.|[^"])*)"$"#)
+        .ok()
+        .and_then(|regex| regex.captures(&compacted));
+    if let Some(captures) = string_literal {
+        let unescaped = captures
+            .get(1)
+            .map(|capture| {
+                capture
+                    .as_str()
+                    .replace(r#"\""#, "\"")
+                    .replace(r#"\\"#, "\\")
+            })
+            .unwrap_or_else(|| compacted.clone());
+        if Regex::new(r"^[A-Za-z]$")
+            .ok()
+            .is_some_and(|regex| regex.is_match(&unescaped))
+        {
+            return unescaped;
+        }
+        return typst_text_atom(&unescaped);
+    }
+
+    if Regex::new(r"^[A-Za-z]$")
+        .ok()
+        .is_some_and(|regex| regex.is_match(&compacted))
+    {
+        return compacted;
+    }
+    if Regex::new(r"^[A-Za-z][A-Za-z0-9]*$")
+        .ok()
+        .is_some_and(|regex| regex.is_match(&compacted))
+        && compacted.chars().any(|ch| ch.is_ascii_digit())
+    {
+        if let Some(captures) = Regex::new(r"^([A-Za-z])(\d+)$")
+            .ok()
+            .and_then(|regex| regex.captures(&compacted))
+        {
+            return format!(
+                "{}_{}",
+                captures.get(1).unwrap().as_str(),
+                captures.get(2).unwrap().as_str()
+            );
+        }
+        return compacted;
+    }
+    if Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+$")
+        .ok()
+        .is_some_and(|regex| regex.is_match(&compacted))
+    {
+        return typst_text_atom(&compacted);
+    }
+    if Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*$")
+        .ok()
+        .is_some_and(|regex| regex.is_match(&compacted))
+    {
+        return typst_text_atom(&compacted);
+    }
+    compacted
+}
+
+fn typst_text_atom(value: &str) -> String {
+    format!("upright({})", serde_json::to_string(value).unwrap_or_else(|_| format!(r#""{}""#, value)))
+}
+
+fn semantic_text_to_typst(source: &str) -> String {
+    let mut rendered = String::new();
+    let chars = source.chars().collect::<Vec<_>>();
+    let mut index = 0usize;
+    while index < chars.len() {
+        let ch = chars[index];
+        if !(ch.is_ascii_alphabetic() || ch == '_') {
+            rendered.push(ch);
+            index += 1;
+            continue;
+        }
+        let start = index;
+        index += 1;
+        while index < chars.len() && (chars[index].is_ascii_alphanumeric() || chars[index] == '_' || chars[index] == '.') {
+            index += 1;
+        }
+        let identifier = chars[start..index].iter().collect::<String>();
+        let mut lookahead = index;
+        while lookahead < chars.len() && chars[lookahead].is_whitespace() {
+            lookahead += 1;
+        }
+        let is_function_call = chars.get(lookahead) == Some(&'(');
+        rendered.push_str(&semantic_identifier_to_typst(&identifier, is_function_call));
+    }
+    rendered
+}
+
+fn sanitize_template_literal(source: &str) -> String {
+    let mut rendered = String::new();
+    let chars = source.chars().collect::<Vec<_>>();
+    let mut index = 0usize;
+    while index < chars.len() {
+        let ch = chars[index];
+        if !(ch.is_ascii_alphabetic() || ch == '_') {
+            rendered.push(ch);
+            index += 1;
+            continue;
+        }
+        let start = index;
+        index += 1;
+        while index < chars.len() && (chars[index].is_ascii_alphanumeric() || chars[index] == '_') {
+            index += 1;
+        }
+        let identifier = chars[start..index].iter().collect::<String>();
+        let mut lookahead = index;
+        while lookahead < chars.len() && chars[lookahead].is_whitespace() {
+            lookahead += 1;
+        }
+        let is_function_call = chars.get(lookahead) == Some(&'(');
+        rendered.push_str(&template_identifier_to_typst(&identifier, is_function_call));
+    }
+    rendered
+}
+
+fn semantic_identifier_to_typst(identifier: &str, is_function_call: bool) -> String {
+    let reserved = [
+        "frac", "sqrt", "sin", "cos", "ln", "integral", "quad", "upright", "text", "arrow",
+    ];
+    if reserved.contains(&identifier) {
+        return identifier.to_string();
+    }
+    if Regex::new(r"^[A-Za-z]$")
+        .ok()
+        .is_some_and(|regex| regex.is_match(identifier))
+    {
+        return identifier.to_string();
+    }
+    if let Some(captures) = Regex::new(r"^([A-Za-z])(\d+)$")
+        .ok()
+        .and_then(|regex| regex.captures(identifier))
+    {
+        return format!("{}_{}", captures.get(1).unwrap().as_str(), captures.get(2).unwrap().as_str());
+    }
+    if identifier.contains('.')
+        || is_function_call
+        || Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*$")
+            .ok()
+            .is_some_and(|regex| regex.is_match(identifier))
+    {
+        return typst_text_atom(identifier);
+    }
+    identifier.to_string()
+}
+
+fn template_identifier_to_typst(identifier: &str, is_function_call: bool) -> String {
+    let reserved = ["frac", "sqrt", "sin", "cos", "ln", "integral", "quad", "upright", "text", "arrow"];
+    if reserved.contains(&identifier) {
+        return identifier.to_string();
+    }
+    if Regex::new(r"^[A-Za-z]$")
+        .ok()
+        .is_some_and(|regex| regex.is_match(identifier))
+    {
+        return identifier.to_string();
+    }
+    if let Some(captures) = Regex::new(r"^([A-Za-z])(\d+)$")
+        .ok()
+        .and_then(|regex| regex.captures(identifier))
+    {
+        return format!("{}_{}", captures.get(1).unwrap().as_str(), captures.get(2).unwrap().as_str());
+    }
+    if is_function_call
+        || Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*$")
+            .ok()
+            .is_some_and(|regex| regex.is_match(identifier))
+    {
+        return typst_text_atom(identifier);
+    }
+    identifier.to_string()
+}
+
+fn compact_constraint_label(source_text: &str, resolved_text: &str) -> String {
+    let compacted = compact_expression(resolved_text);
+    for (method, operator) in [("eq", "=="), ("ne", "!="), ("lt", "<"), ("le", "<="), ("gt", ">"), ("ge", ">=")] {
+        let pattern = format!(r"^(.+)\.{}\((.+)\)$", method);
+        if let Some(captures) = Regex::new(&pattern).ok().and_then(|regex| regex.captures(&compacted)) {
+            return format!("{} {} {}", captures.get(1).unwrap().as_str(), operator, captures.get(2).unwrap().as_str());
+        }
+    }
+    if source_text.len() < compacted.len() {
+        format!("{source_text} [raw]")
+    } else {
+        format!("{compacted} [raw]")
+    }
 }
 
 fn collect_variable_references(expr: &ast::Expr) -> Vec<String> {
@@ -2565,6 +3783,206 @@ fn demo(step_ruleset: Ruleset) {
             Some("fib(x2) = f0 + f1")
         );
         assert_eq!(ir.action_effects[0].referenced_pat_vars, vec!["f0", "f1", "x2"]);
+    }
+
+    #[test]
+    fn math_view_set_effect_expands_rhs_action_binding_instead_of_leaking_binding_name() {
+        let src = r#"
+fn demo() {
+    PeepholeTx::add_rule(
+        "ivt_analysis_finish_passthrough_access",
+        ruleset,
+        || {
+            let len = Math::query_leaf();
+            let if_len = Math::query_leaf();
+            let arg_get = Math::query_leaf();
+            let perm = Math::query_leaf();
+            let pperm = Math::query_leaf();
+            let passthrough_tys = Math::query_leaf();
+            let new_ty = Math::query_leaf();
+            let if_eclass = Math::query_leaf();
+            let pred = Math::query_leaf();
+            let inputs = Math::query_leaf();
+            let then_branch = Math::query_leaf();
+            let else_branch = Math::query_leaf();
+            let loop_body = Math::query_leaf();
+            let curr = Math::query_leaf();
+            let analysis = Math::query_leaf();
+            let ifnode = MIf::query(&if_eclass, &pred);
+            DemoPat::new(
+                len, if_len, arg_get, perm, pperm, passthrough_tys, new_ty,
+                if_eclass, pred, inputs, then_branch, else_branch, loop_body, curr, analysis, ifnode
+            )
+        },
+        |ctx, pat| {
+            let tmp_type = ctx.insert_tmp_type();
+            let no_ctx = ctx.insert_in_func("no-ctx".to_owned());
+            let tmp_arg = ctx.insert_arg(tmp_type, no_ctx);
+            let len = ctx.devalue(pat.len);
+            let if_len = ctx.devalue(pat.if_len);
+            let get_passed_through = ctx.insert_single(ctx.insert_get(tmp_arg, if_len + len));
+            let new_perm = ctx.insert_concat(pat.perm, get_passed_through);
+            let original_get_index =
+                ctx.insert_single(ctx.insert_get(tmp_arg, ctx.devalue(pat.arg_get.index)));
+            let new_pperm = ctx.insert_concat(pat.pperm, original_get_index);
+            let tnil = ctx.insert_t_nil();
+            let new_passthrough_tys =
+                ctx.insert_tl_concat(pat.passthrough_tys, ctx.insert_t_cons(pat.new_ty, tnil));
+            let ifnode = ctx.insert_if_node(
+                pat.if_eclass,
+                pat.pred,
+                pat.inputs,
+                pat.then_branch,
+                pat.else_branch,
+            );
+            let res =
+                ctx.insert_ivt_analysis_res(new_perm, new_pperm, new_passthrough_tys, len + 1);
+            ctx.set_ivt_new_inputs_analysis(pat.loop_body, ifnode, res);
+        },
+    );
+}
+"#;
+        let ir = extract(src, "ctx.set_ivt_new_inputs_analysis");
+        let math_view = ir.math_view.expect("math_view should exist");
+
+        assert_eq!(math_view.rule_name, "ivt_analysis_finish_passthrough_access");
+        assert_eq!(math_view.conclusions.len(), 1);
+        let formula = &math_view.formula_source.plain;
+        assert!(!formula.contains("= res"));
+        assert!(!formula.contains(" res)"));
+        assert!(formula.contains("ivt_new_inputs_analysis"));
+        assert!(formula.contains(r#"upright("IvtAnalysisRes")"#));
+        assert!(formula.contains(r#"upright("IfNode")"#));
+    }
+
+    #[test]
+    fn math_view_emits_structured_formula_sources_for_int_one() {
+        let source = include_str!("../../samples/math_microbenchmark.rs");
+        let ir = extract(source, r#"MyTxMath::add_rule("int_one","#);
+        let math_view = ir.math_view.expect("math_view should exist");
+
+        assert_eq!(math_view.rule_name, "int_one");
+        assert!(math_view.formula_source.plain.contains("arrow.r.double x"));
+        assert!(!math_view.formula_source.plain.contains("#text(fill:"));
+        assert!(math_view.formula_source.colored.contains("#text(fill:"));
+        assert_eq!(math_view.conclusions.len(), 1);
+        match &math_view.conclusions[0] {
+            MathViewConclusion::Rewrite { from, to, .. } => {
+                assert_eq!(from.target_id, "integ");
+                assert_eq!(to.target_id, "x");
+            }
+            other => panic!("expected rewrite conclusion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn math_view_keeps_only_true_union_conclusions_for_diff_mul() {
+        let source = include_str!("../../samples/math_microbenchmark.rs");
+        let ir = extract(source, r#"MyTxMath::add_rule("diff_mul","#);
+        let math_view = ir.math_view.expect("math_view should exist");
+
+        assert_eq!(
+            math_view
+                .premises
+                .iter()
+                .map(|entry| entry.target_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["diff"]
+        );
+        assert_eq!(
+            math_view
+                .derivations
+                .iter()
+                .map(|entry| entry.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["db", "da", "a_db", "b_da", "rhs"]
+        );
+        assert_eq!(math_view.conclusions.len(), 1);
+        assert!(math_view.formula_source.plain.contains("(a * b)'(x)"));
+        assert!(math_view.formula_source.plain.contains("a * b'(x) + b * a'(x)"));
+        match &math_view.conclusions[0] {
+            MathViewConclusion::Rewrite { from, to, .. } => {
+                assert_eq!(from.target_id, "diff");
+                assert_eq!(to.target_id, "effect:effect_4");
+            }
+            other => panic!("expected rewrite conclusion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn math_view_falls_back_to_constructor_call_formulas_without_metadata() {
+        let source = include_str!("../../samples/pattern_samples.rs");
+        let ir = extract(source, r#""demo_assert_block""#);
+        let math_view = ir.math_view.expect("math_view should exist");
+
+        assert!(math_view.formula_source.plain.contains(r#"upright("Add")(l, r)"#));
+        assert!(math_view.formula_source.plain.contains(r#"upright("Const")(6)"#));
+        assert!(!math_view
+            .formula_source
+            .plain
+            .contains(r#"upright("no matched premise")"#));
+        assert!(!math_view
+            .formula_source
+            .plain
+            .contains(r#"upright("no conclusion")"#));
+        assert!(math_view.side_conditions.iter().any(|cond| cond == "l == r"));
+    }
+
+    #[test]
+    fn math_view_preserves_leaf_premises_and_multiple_rewrite_conclusions() {
+        let source = r#"
+fn demo() {
+    MyTx::add_rule("leaf_multi", ruleset, || {
+        let x = Math::query_leaf();
+        let y = Math::query_leaf();
+        #[eggplant::pat_vars_catch]
+        struct Pat {
+            x: Math,
+            y: Math,
+        }
+    }, |ctx, pat| {
+        ctx.union(pat.x, pat.y);
+        ctx.union(pat.y, pat.x);
+    });
+}
+"#;
+        let ir = extract(source, r#""leaf_multi""#);
+        let math_view = ir.math_view.expect("math_view should exist");
+
+        assert_eq!(
+            math_view
+                .premises
+                .iter()
+                .map(|entry| entry.target_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["x", "y"]
+        );
+        assert_eq!(math_view.conclusions.len(), 2);
+        assert!(math_view.formula_source.plain.contains("x"));
+        assert!(math_view.formula_source.plain.contains("y"));
+    }
+
+    #[test]
+    fn math_view_uses_integral_math_notation_and_keeps_derivations_out_of_premise_row() {
+        let source = include_str!("../../samples/math_microbenchmark.rs");
+        let ir = extract(source, r#"MyTxMath::add_rule("int_add","#);
+        let math_view = ir.math_view.expect("math_view should exist");
+
+        assert_eq!(math_view.rule_name, "int_add");
+        assert_eq!(
+            math_view
+                .premises
+                .iter()
+                .map(|entry| entry.target_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["integ"]
+        );
+        assert!(math_view.formula_source.plain.contains("integral"));
+        assert!(math_view.formula_source.plain.contains("quad d"));
+        assert!(!math_view.formula_source.plain.contains(r#"upright("integral")"#));
+        assert!(!math_view.formula_source.plain.contains("i_f"));
+        assert!(!math_view.formula_source.plain.contains("i_g"));
+        assert!(!math_view.formula_source.plain.contains("rhs"));
     }
 
     #[test]
